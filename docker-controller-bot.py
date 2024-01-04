@@ -11,8 +11,9 @@ import io
 import yaml
 import time
 import threading
+import pickle
 
-VERSION = "0.91.0"
+VERSION = "0.92.0"
 
 BUTTON_COLUMNS = 2
 
@@ -21,9 +22,19 @@ if "abc" == TELEGRAM_TOKEN:
 	print("Se necesita configurar el token del bot con la variable TELEGRAM_TOKEN")
 	sys.exit(1)
 
-if "abc" == TELEGRAM_CHAT_ID:
-	print("Se necesita configurar el chatId del usuario que interactuará con el bot con la variable TELEGRAM_CHAT_ID")
+if "abc" == TELEGRAM_ADMIN:
+	print("Se necesita configurar el chatId del usuario que interactuará con el bot con la variable TELEGRAM_ADMIN")
 	sys.exit(1)
+
+if "abc" == TELEGRAM_GROUP:
+	TELEGRAM_GROUP = TELEGRAM_ADMIN
+
+DIR = {"cache": "./cache/"}
+for key in DIR:
+    try:
+        os.mkdir(DIR[key])
+    except:
+        pass
 
 class DockerManager:
 	def __init__(self):
@@ -95,15 +106,11 @@ class DockerManager:
 				else:
 					ram = f"{used_ram_mb:.2f} MB\n"
 			
-			used_image = container.attrs['Config']['Image']
+			used_image = container.attrs['Config']['Image'].split(":")[0]
 			try:
-				local_image = self.client.images.get(used_image)
-				remote_image = self.client.images.pull(used_image + ":latest")
-				if local_image.id != remote_image.id:
-					image_status = "Actualización pendiente ⬆️"
-				else:
-					image_status = "Está actualizada ✅"
-			except docker.errors.ImageNotFound:
+				image_status = read_cache_item(used_image)
+			except Exception as e:
+				print(f"DEBUG: Se ha consultado por la actualización de {container.name} y no está disponible: [{e}]")
 				image_status = ""
 
 			text = '```\n'
@@ -130,15 +137,45 @@ class DockerEventMonitor:
 
 				message = None
 				if status == "start":
-					message = f"El contenedor `{container_name}` se ha *iniciado*"
+					message = f"🟢 El contenedor `{container_name}` se ha *iniciado*"
 				elif status == "stop":
-					message = f"El contenedor `{container_name}` se ha *detenido*"
+					message = f"🔴 El contenedor `{container_name}` se ha *detenido*"
 				
 				if message:
 					self.bot.send_message(self.chat_id, message, parse_mode="markdown")
 
-	def monitorear_contenedores(self):
+	def demonio_event(self):
 		thread = threading.Thread(target=self.detectar_eventos_contenedores, daemon=True)
+		thread.start()
+
+class DockerUpdateMonitor:
+	def __init__(self, bot, chat_id):
+		self.client = docker.from_env()
+		self.bot = bot
+		self.chat_id = chat_id
+
+	def detectar_actualizaciones(self):
+		containers = self.client.containers.list(all=True)
+		for container in containers:
+			used_image = container.attrs['Config']['Image'].split(":")[0]
+			print(f"DEBUG: Comprobando actualizaciones de {container.name} ({used_image})")
+			try:
+				local_image = self.client.images.get(used_image)
+				remote_image = self.client.images.pull(used_image + ":latest")
+				if local_image.id != remote_image.id:
+					image_status = "Actualización pendiente ⬆️"
+					self.bot.send_message(self.chat_id, f"⬆️ El contenedor `{container.name}` tiene una actualización disponible.", parse_mode="markdown")
+				else:
+					image_status = "Contenedor actualizado ✅"
+			except Exception as e:
+				print(f"No se pudo comprobar la actualización: [{e}]")
+				image_status = ""
+			write_cache_item(used_image, image_status)
+		print("DEBUG: Comprobaciones de actualizaciones completadas, esperando media hora.")
+		time.sleep(1800)
+
+	def demonio_update(self):
+		thread = threading.Thread(target=self.detectar_actualizaciones, daemon=True)
 		thread.start()
 
 # Instanciamos el bot y el enlace con el docker
@@ -147,35 +184,37 @@ docker_manager = DockerManager()
 
 @bot.message_handler(commands=["start", "list", "run", "stop", "logs", "logfile", "compose", "info", "version"])
 def command_controller(message):
-	chatId = message.chat.id
+	userId = message.from_user.id
 	comando = message.text.split("@")[0]
 	messageId = message.id
+	print(f"DEBUG: Interaccion de usuario detectada: {userId}")
+	print(f"DEBUG: Chat detectado: {message.chat.id}")
 
 	if comando not in ('/start'):
-		bot.delete_message(chatId, messageId)
-
-	if not is_admin(chatId):
-		bot.send_message(chatId, '❌ Este bot no te pertenece.\n\nSi quieres controlar tus contenedores docker a través de telegram despliégame en tu servidor.\n\nEcha un vistazo en [DockerHub](https://hub.docker.com/r/dgongut/docker-controller-bot) donde encontrarás un docker-compose. \n\n¿Eres curioso? El código se encuentra publicado en [GitHub](https://github.com/dgongut/docker-controller-bot).\n\nSi tienes dudas, pregúntame, soy @dgongut', parse_mode="markdown", disable_web_page_preview=True)
+		bot.delete_message(TELEGRAM_GROUP, messageId)
+		
+	if not is_admin(userId):
+		bot.send_message(userId, '❌ Este bot no te pertenece.\n\nSi quieres controlar tus contenedores docker a través de telegram despliégame en tu servidor.\n\nEcha un vistazo en [DockerHub](https://hub.docker.com/r/dgongut/docker-controller-bot) donde encontrarás un docker-compose. \n\n¿Eres curioso? El código se encuentra publicado en [GitHub](https://github.com/dgongut/docker-controller-bot).\n\nSi tienes dudas, pregúntame, soy @dgongut', parse_mode="markdown", disable_web_page_preview=True)
 		return
 
 	# Listar contenedores
 	if comando in ('/start'):
 		texto_inicial = f'*🫡 Docker Controller Bot a su servicio*\n\n'
 		texto_inicial += f'Puedes utilizar diversos comandos:\n\n'
-		texto_inicial += f' · /list Listado completo de los contenedores\n'
-		texto_inicial += f' · /run Inicia un contenedor\n'
-		texto_inicial += f' · /stop Detiene un contenedor\n'
-		texto_inicial += f' · /logs Muestra los últimos logs de un contenedor\n'
-		texto_inicial += f' · /logfile Muestra los últimos logs de un contenedor en formato fichero\n'
+		texto_inicial += f' · /list Listado completo de los contenedores.\n'
+		texto_inicial += f' · /run Inicia un contenedor.\n'
+		texto_inicial += f' · /stop Detiene un contenedor.\n'
+		texto_inicial += f' · /logs Muestra los últimos logs de un contenedor.\n'
+		texto_inicial += f' · /logfile Muestra los últimos logs de un contenedor en formato fichero.\n'
 		texto_inicial += f' · /compose Extrae el docker-compose de un contenedor. Esta función se encuentra en fase _experimental_.\n'
 		texto_inicial += f' · /info Muestra información de un contenedor.\n'
 		texto_inicial += f' · /version Muestra la versión actual.\n'
-		bot.send_message(chatId, texto_inicial, parse_mode="markdown")
+		bot.send_message(TELEGRAM_GROUP, texto_inicial, parse_mode="markdown")
 	elif comando in ('/list'):
 		markup = InlineKeyboardMarkup(row_width = 1)
 		markup.add(InlineKeyboardButton("❌ - Cerrar", callback_data="cerrar"))
 		containers = docker_manager.list_containers(comando=comando)
-		bot.send_message(chatId, display_containers(containers), reply_markup=markup, parse_mode="markdown")
+		bot.send_message(TELEGRAM_GROUP, display_containers(containers), reply_markup=markup, parse_mode="markdown")
 	elif comando in ('/run'):
 		markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
 		botones = []
@@ -186,7 +225,7 @@ def command_controller(message):
 
 		markup.add(*botones)
 		markup.add(InlineKeyboardButton("❌ - Cerrar", callback_data="cerrar"))
-		bot.send_message(chatId, textoMensaje, reply_markup=markup, disable_web_page_preview=True, parse_mode="html")
+		bot.send_message(TELEGRAM_GROUP, textoMensaje, reply_markup=markup, disable_web_page_preview=True, parse_mode="html")
 	elif comando in ('/stop'):
 		markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
 		botones = []
@@ -197,7 +236,7 @@ def command_controller(message):
 
 		markup.add(*botones)
 		markup.add(InlineKeyboardButton("❌ - Cerrar", callback_data="cerrar"))
-		bot.send_message(chatId, textoMensaje, reply_markup=markup, disable_web_page_preview=True, parse_mode="html")
+		bot.send_message(TELEGRAM_GROUP, textoMensaje, reply_markup=markup, disable_web_page_preview=True, parse_mode="html")
 	elif comando in ('/logs'):
 		markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
 		botones = []
@@ -208,7 +247,7 @@ def command_controller(message):
 
 		markup.add(*botones)
 		markup.add(InlineKeyboardButton("❌ - Cerrar", callback_data="cerrar"))
-		bot.send_message(chatId, textoMensaje, reply_markup=markup, disable_web_page_preview=True, parse_mode="html")
+		bot.send_message(TELEGRAM_GROUP, textoMensaje, reply_markup=markup, disable_web_page_preview=True, parse_mode="html")
 	elif comando in ('/logfile'):
 		markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
 		botones = []
@@ -219,7 +258,7 @@ def command_controller(message):
 
 		markup.add(*botones)
 		markup.add(InlineKeyboardButton("❌ - Cerrar", callback_data="cerrar"))
-		bot.send_message(chatId, textoMensaje, reply_markup=markup, disable_web_page_preview=True, parse_mode="html")
+		bot.send_message(TELEGRAM_GROUP, textoMensaje, reply_markup=markup, disable_web_page_preview=True, parse_mode="html")
 	elif comando in ('/compose'):
 		markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
 		botones = []
@@ -230,7 +269,7 @@ def command_controller(message):
 
 		markup.add(*botones)
 		markup.add(InlineKeyboardButton("❌ - Cerrar", callback_data="cerrar"))
-		bot.send_message(chatId, textoMensaje, reply_markup=markup, disable_web_page_preview=True, parse_mode="html")
+		bot.send_message(TELEGRAM_GROUP, textoMensaje, reply_markup=markup, disable_web_page_preview=True, parse_mode="html")
 
 	elif comando in ('/info'):
 		markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
@@ -242,80 +281,79 @@ def command_controller(message):
 
 		markup.add(*botones)
 		markup.add(InlineKeyboardButton("❌ - Cerrar", callback_data="cerrar"))
-		bot.send_message(chatId, textoMensaje, reply_markup=markup, disable_web_page_preview=True, parse_mode="html")
-	
+		bot.send_message(TELEGRAM_GROUP, textoMensaje, reply_markup=markup, disable_web_page_preview=True, parse_mode="html")
+
 	elif comando in ('/version'):
-		x = bot.send_message(chatId, f'<i>Versión: {VERSION}</i>\nDesarrollado con ❤️ por @dgongut\nSi encuentras un bug estaré encantado de saberlo.', parse_mode="HTML")
+		x = bot.send_message(TELEGRAM_GROUP, f'<i>Versión: {VERSION}</i>\nDesarrollado con ❤️ por @dgongut\nSi encuentras un bug estaré encantado de saberlo.', parse_mode="HTML")
 		time.sleep(10)
-		bot.delete_message(chatId, x.message_id)
+		bot.delete_message(TELEGRAM_GROUP, x.message_id)
 
 
 @bot.callback_query_handler(func=lambda mensaje: True)
 def button_controller(call):
 	"""Se ha pulsado un boton"""
-	chatId = call.from_user.id
 	messageId = call.message.id
 
 	if call.data == "cerrar":
-		bot.delete_message(chatId, messageId)
+		bot.delete_message(TELEGRAM_GROUP, messageId)
 		return
 
 	# RUN
 	comando, containerId, containerName = call.data.split("|")
 	if comando == "run":
 		result = docker_manager.start_container(container_id=containerId, container_name=containerName)
-		bot.delete_message(chatId, messageId)
+		bot.delete_message(TELEGRAM_GROUP, messageId)
 		if result:
-			bot.send_message(chatId, result, parse_mode="markdown")
+			bot.send_message(TELEGRAM_GROUP, result, parse_mode="markdown")
 
 	# STOP
 	elif comando == "stop":
 		result = docker_manager.stop_container(container_id=containerId, container_name=containerName)
-		bot.delete_message(chatId, messageId)
+		bot.delete_message(TELEGRAM_GROUP, messageId)
 		if result:
-			bot.send_message(chatId, result, parse_mode="markdown")
+			bot.send_message(TELEGRAM_GROUP, result, parse_mode="markdown")
 	
 	# LOGS
 	elif comando == "logs":
 		markup = InlineKeyboardMarkup(row_width = 1)
 		markup.add(InlineKeyboardButton("❌ - Cerrar", callback_data="cerrar"))
 		result = docker_manager.show_logs(container_id=containerId, container_name=containerName)
-		bot.delete_message(chatId, messageId)
-		bot.send_message(chatId, result, reply_markup=markup, parse_mode="markdown")
+		bot.delete_message(TELEGRAM_GROUP, messageId)
+		bot.send_message(TELEGRAM_GROUP, result, reply_markup=markup, parse_mode="markdown")
 
 	# LOGS EN FICHERO
 	elif comando == "logfile":
 		markup = InlineKeyboardMarkup(row_width = 1)
 		markup.add(InlineKeyboardButton("❌ - Eliminar", callback_data="cerrar"))
 		result = docker_manager.show_logs_raw(container_id=containerId, container_name=containerName)
-		bot.delete_message(chatId, messageId)
+		bot.delete_message(TELEGRAM_GROUP, messageId)
 		fichero_temporal = io.BytesIO(result.encode('utf-8'))
 		fecha_hora_actual = datetime.now()
 		formato = "%Y.%m.%d_%H.%M.%S"
 		fecha_hora_formateada = fecha_hora_actual.strftime(formato)
 		fichero_temporal.name = f"logs_{containerName}_{fecha_hora_formateada}.txt"
-		x = bot.send_message(chatId, "_Cargando archivo... Espera por favor_", parse_mode="markdown")
-		bot.send_document(chat_id=chatId, document=fichero_temporal, reply_markup=markup, caption=f'📃 Logs de {containerName}')
-		bot.delete_message(chatId, x.message_id)
+		x = bot.send_message(TELEGRAM_GROUP, "_Cargando archivo... Espera por favor_", parse_mode="markdown")
+		bot.send_document(chat_id=TELEGRAM_GROUP, document=fichero_temporal, reply_markup=markup, caption=f'📃 Logs de {containerName}')
+		bot.delete_message(TELEGRAM_GROUP, x.message_id)
 	
 	# COMPOSE
 	elif comando == "compose":
 		markup = InlineKeyboardMarkup(row_width = 1)
 		markup.add(InlineKeyboardButton("❌ - Cerrar", callback_data="cerrar"))
 		result = docker_manager.get_docker_compose(container_id=containerId, container_name=containerName)
-		bot.delete_message(chatId, messageId)
-		bot.send_message(chatId, result, reply_markup=markup, parse_mode="markdown")
+		bot.delete_message(TELEGRAM_GROUP, messageId)
+		bot.send_message(TELEGRAM_GROUP, result, reply_markup=markup, parse_mode="markdown")
 
 	# INFO
 	elif comando == "info":
 		markup = InlineKeyboardMarkup(row_width = 1)
 		markup.add(InlineKeyboardButton("❌ - Cerrar", callback_data="cerrar"))
 		result = docker_manager.get_info(container_id=containerId, container_name=containerName)
-		bot.delete_message(chatId, messageId)
-		bot.send_message(chatId, result, reply_markup=markup, parse_mode="markdown")
+		bot.delete_message(TELEGRAM_GROUP, messageId)
+		bot.send_message(TELEGRAM_GROUP, result, reply_markup=markup, parse_mode="markdown")
 
-def is_admin(chatId):
-    return str(chatId) == str(TELEGRAM_CHAT_ID)
+def is_admin(userId):
+    return str(userId) == str(TELEGRAM_ADMIN)
 
 def display_containers(containers):
 	result = "```\n"
@@ -337,9 +375,20 @@ def get_status_emoji(statusStr):
 def debug(message, html=False):
     print(message)
     if html:
-        bot.send_message(TELEGRAM_CHAT_ID, message, disable_web_page_preview=True, parse_mode="html")
+        bot.send_message(TELEGRAM_GROUP, message, disable_web_page_preview=True, parse_mode="html")
     else:
-        bot.send_message(TELEGRAM_CHAT_ID, message, disable_web_page_preview=True)
+        bot.send_message(TELEGRAM_GROUP, message, disable_web_page_preview=True)
+
+def sanitize_text_for_filename(text):
+    sanitized = re.sub(r'[^a-zA-Z0-9._-]', '_', text)
+    sanitized = re.sub(r'_+', '_', sanitized)
+    return sanitized
+
+def write_cache_item(key, value):
+    pickle.dump(value, open(f'{DIR["cache"]}{sanitize_text_for_filename(key)}', 'wb'))
+
+def read_cache_item(key):
+    return pickle.load(open(f'{DIR["cache"]}{sanitize_text_for_filename(key)}', 'rb'))
 
 def generate_docker_compose(contenedor):
     nombre_contenedor = contenedor.name
@@ -384,8 +433,13 @@ def generate_docker_compose(contenedor):
     return yaml_data
 
 if __name__ == '__main__':
-	monitor = DockerEventMonitor(bot, TELEGRAM_CHAT_ID)
-	monitor.monitorear_contenedores()
+	print("DEBUG: Arrancando bot")
+	eventMonitor = DockerEventMonitor(bot, TELEGRAM_GROUP)
+	eventMonitor.demonio_event()
+	print("DEBUG: Demonio monitor activo")
+	updateMonitor = DockerUpdateMonitor(bot, TELEGRAM_GROUP)
+	updateMonitor.demonio_update()
+	print("DEBUG: Demonio update activo")
 	bot.set_my_commands([ # Comandos a mostrar en el menú de Telegram
 		telebot.types.BotCommand("/start", "Menú principal"),
 		telebot.types.BotCommand("/list", "Listado completo de los contenedores"),
@@ -397,4 +451,5 @@ if __name__ == '__main__':
 		telebot.types.BotCommand("/info", "Muestra información de un contenedor"),
 		telebot.types.BotCommand("/version", "Muestra la versión actual")
 		])
+	print("DEBUG: Iniciando interfaz")
 	bot.infinity_polling(timeout=60)
