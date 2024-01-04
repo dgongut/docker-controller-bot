@@ -12,7 +12,7 @@ import yaml
 import time
 import threading
 
-VERSION = "0.9.0"
+VERSION = "0.91.0"
 
 BUTTON_COLUMNS = 2
 
