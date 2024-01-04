@@ -10,8 +10,11 @@ import docker
 import io
 import yaml
 import time
+import threading
 
 VERSION = "0.9.0"
+
+BUTTON_COLUMNS = 2
 
 # Comprobación inicial de variables
 if "abc" == TELEGRAM_TOKEN:
@@ -27,9 +30,7 @@ class DockerManager:
 		self.client = docker.from_env()
 
 	def list_containers(self, comando):
-		if comando == "/list" or comando == "/logs" or comando == "/logfile" or comando == "/compose":
-			containers = self.client.containers.list(all=True)
-		elif comando == "/run":
+		if comando == "/run":
 			status = ['paused', 'exited']
 			filters = {'status': status}
 			containers = self.client.containers.list(filters=filters)
@@ -37,13 +38,15 @@ class DockerManager:
 			status = ['running', 'restarting']
 			filters = {'status': status}
 			containers = self.client.containers.list(filters=filters)
+		else:
+			containers = self.client.containers.list(all=True)
 		return containers
 
 	def stop_container(self, container_id, container_name):
 		try:
 			container = self.client.containers.get(container_id)
 			container.stop()
-			return f"He *detenido* el contenedor `{container_name}`."
+			return None
 		except docker.errors.NotFound:
 			return f"❌ No se ha encontrado el contenedor `{container_name}`."
 
@@ -51,7 +54,7 @@ class DockerManager:
 		try:
 			container = self.client.containers.get(container_id)
 			container.start()
-			return f"He *iniciado* el contenedor `{container_name}`."
+			return None
 		except docker.errors.NotFound:
 			return f"❌ No se ha encontrado el contenedor `{container_name}`."
 
@@ -73,18 +76,79 @@ class DockerManager:
 	def get_docker_compose(self, container_id, container_name):
 		try:
 			container = self.client.containers.get(container_id)
-			return f"El docker-compose de `{container_name}`:\n\n```docker-compose.yaml\n{generar_docker_compose(container)}```"
+			return f"El docker-compose de `{container_name}`:\n\n```docker-compose.yaml\n{generate_docker_compose(container)}```"
 		except docker.errors.NotFound:
 			return f"❌ No se ha encontrado el contenedor `{container_name}`."
+		
+	def get_info(self, container_id, container_name):
+		try:
+			container = self.client.containers.get(container_id)
+			if container.status == "running":
+				stats = container.stats(stream=False)
+				used_cpu = stats['cpu_stats']['cpu_usage']['total_usage'] / stats['cpu_stats']['system_cpu_usage'] * 100
+				used_ram_kb = int(stats['memory_stats']['usage'])
+				used_ram_mb = used_ram_kb / 1024 / 1024
+
+				if used_ram_mb > 1024:
+					used_ram_gb = used_ram_mb / 1024
+					ram = f"{used_ram_gb:.2f} GB\n"
+				else:
+					ram = f"{used_ram_mb:.2f} MB\n"
+			
+			used_image = container.attrs['Config']['Image']
+			try:
+				local_image = self.client.images.get(used_image)
+				remote_image = self.client.images.pull(used_image + ":latest")
+				if local_image.id != remote_image.id:
+					image_status = "Actualización pendiente ⬆️"
+				else:
+					image_status = "Está actualizada ✅"
+			except docker.errors.ImageNotFound:
+				image_status = ""
+
+			text = '```\n'
+			text += f"Estado: {get_status_emoji(container.status)} ({container.status})\n\n"
+			if container.status == "running":
+				text += f"CPU: {used_cpu:.2f}%\n"
+				text += f"Memoria RAM usada: {ram}\n"
+			text += f"Imagen usada:\n{used_image}\n{image_status}```"
+			return f"📜 Información de `{container_name}`:\n{text}"
+		except docker.errors.NotFound:
+			return f"❌ No se ha encontrado el contenedor `{container_name}`."
+		
+class DockerEventMonitor:
+	def __init__(self, bot, chat_id):
+		self.client = docker.from_env()
+		self.bot = bot
+		self.chat_id = chat_id
+
+	def detectar_eventos_contenedores(self):
+		for event in self.client.events(decode=True):
+			if 'status' in event and 'Actor' in event and 'Attributes' in event['Actor']:
+				container_name = event['Actor']['Attributes'].get('name', '')
+				status = event['status']
+
+				message = None
+				if status == "start":
+					message = f"El contenedor `{container_name}` se ha *iniciado*"
+				elif status == "stop":
+					message = f"El contenedor `{container_name}` se ha *detenido*"
+				
+				if message:
+					self.bot.send_message(self.chat_id, message, parse_mode="markdown")
+
+	def monitorear_contenedores(self):
+		thread = threading.Thread(target=self.detectar_eventos_contenedores, daemon=True)
+		thread.start()
 
 # Instanciamos el bot y el enlace con el docker
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 docker_manager = DockerManager()
 
-@bot.message_handler(commands=["start", "list", "run", "stop", "logs", "logfile", "compose", "version"])
+@bot.message_handler(commands=["start", "list", "run", "stop", "logs", "logfile", "compose", "info", "version"])
 def command_controller(message):
 	chatId = message.chat.id
-	comando = message.text.split()[0]
+	comando = message.text.split("@")[0]
 	messageId = message.id
 
 	if comando not in ('/start'):
@@ -99,11 +163,12 @@ def command_controller(message):
 		texto_inicial = f'*🫡 Docker Controller Bot a su servicio*\n\n'
 		texto_inicial += f'Puedes utilizar diversos comandos:\n\n'
 		texto_inicial += f' · /list Listado completo de los contenedores\n'
-		texto_inicial += f' · /run Arranca contenedores detenidos\n'
-		texto_inicial += f' · /stop Detener los contenedores\n'
-		texto_inicial += f' · /logs Mira los ultimos logs de tus contenedores\n'
-		texto_inicial += f' · /logfile Mira los ultimos logs de tus contenedores en formato fichero\n'
+		texto_inicial += f' · /run Inicia un contenedor\n'
+		texto_inicial += f' · /stop Detiene un contenedor\n'
+		texto_inicial += f' · /logs Muestra los últimos logs de un contenedor\n'
+		texto_inicial += f' · /logfile Muestra los últimos logs de un contenedor en formato fichero\n'
 		texto_inicial += f' · /compose Extrae el docker-compose de un contenedor. Esta función se encuentra en fase _experimental_.\n'
+		texto_inicial += f' · /info Muestra información de un contenedor.\n'
 		texto_inicial += f' · /version Muestra la versión actual.\n'
 		bot.send_message(chatId, texto_inicial, parse_mode="markdown")
 	elif comando in ('/list'):
@@ -112,7 +177,7 @@ def command_controller(message):
 		containers = docker_manager.list_containers(comando=comando)
 		bot.send_message(chatId, display_containers(containers), reply_markup=markup, parse_mode="markdown")
 	elif comando in ('/run'):
-		markup = InlineKeyboardMarkup(row_width = 1)
+		markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
 		botones = []
 		containers = docker_manager.list_containers(comando=comando)
 		textoMensaje = "🟢 Pulsa en un contenedor para iniciarlo"
@@ -123,7 +188,7 @@ def command_controller(message):
 		markup.add(InlineKeyboardButton("❌ - Cerrar", callback_data="cerrar"))
 		bot.send_message(chatId, textoMensaje, reply_markup=markup, disable_web_page_preview=True, parse_mode="html")
 	elif comando in ('/stop'):
-		markup = InlineKeyboardMarkup(row_width = 1)
+		markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
 		botones = []
 		containers = docker_manager.list_containers(comando=comando)
 		textoMensaje = "🔴 Pulsa en un contenedor para detenerlo"
@@ -134,7 +199,7 @@ def command_controller(message):
 		markup.add(InlineKeyboardButton("❌ - Cerrar", callback_data="cerrar"))
 		bot.send_message(chatId, textoMensaje, reply_markup=markup, disable_web_page_preview=True, parse_mode="html")
 	elif comando in ('/logs'):
-		markup = InlineKeyboardMarkup(row_width = 1)
+		markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
 		botones = []
 		containers = docker_manager.list_containers(comando=comando)
 		textoMensaje = "📃 Pulsa en un contenedor para ver sus últimos logs"
@@ -145,7 +210,7 @@ def command_controller(message):
 		markup.add(InlineKeyboardButton("❌ - Cerrar", callback_data="cerrar"))
 		bot.send_message(chatId, textoMensaje, reply_markup=markup, disable_web_page_preview=True, parse_mode="html")
 	elif comando in ('/logfile'):
-		markup = InlineKeyboardMarkup(row_width = 1)
+		markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
 		botones = []
 		containers = docker_manager.list_containers(comando=comando)
 		textoMensaje = "📃 Pulsa en un contenedor para ver sus logs en modo fichero"
@@ -156,7 +221,7 @@ def command_controller(message):
 		markup.add(InlineKeyboardButton("❌ - Cerrar", callback_data="cerrar"))
 		bot.send_message(chatId, textoMensaje, reply_markup=markup, disable_web_page_preview=True, parse_mode="html")
 	elif comando in ('/compose'):
-		markup = InlineKeyboardMarkup(row_width = 1)
+		markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
 		botones = []
 		containers = docker_manager.list_containers(comando=comando)
 		textoMensaje = "📃 Pulsa en un contenedor para ver su docker-compose.\n\nEsta función se encuentra en fase <b>experimental</b> y puede contener errores, se recomienda verificar el docker-compose."
@@ -166,6 +231,19 @@ def command_controller(message):
 		markup.add(*botones)
 		markup.add(InlineKeyboardButton("❌ - Cerrar", callback_data="cerrar"))
 		bot.send_message(chatId, textoMensaje, reply_markup=markup, disable_web_page_preview=True, parse_mode="html")
+
+	elif comando in ('/info'):
+		markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
+		botones = []
+		containers = docker_manager.list_containers(comando=comando)
+		textoMensaje = "📜 Pulsa en un contenedor para ver su información."
+		for container in containers:
+			botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status)} {container.name}', callback_data=f'info|{container.id[:5]}|{container.name}'))
+
+		markup.add(*botones)
+		markup.add(InlineKeyboardButton("❌ - Cerrar", callback_data="cerrar"))
+		bot.send_message(chatId, textoMensaje, reply_markup=markup, disable_web_page_preview=True, parse_mode="html")
+	
 	elif comando in ('/version'):
 		x = bot.send_message(chatId, f'<i>Versión: {VERSION}</i>\nDesarrollado con ❤️ por @dgongut\nSi encuentras un bug estaré encantado de saberlo.', parse_mode="HTML")
 		time.sleep(10)
@@ -187,13 +265,15 @@ def button_controller(call):
 	if comando == "run":
 		result = docker_manager.start_container(container_id=containerId, container_name=containerName)
 		bot.delete_message(chatId, messageId)
-		bot.send_message(chatId, result, parse_mode="markdown")
+		if result:
+			bot.send_message(chatId, result, parse_mode="markdown")
 
 	# STOP
 	elif comando == "stop":
 		result = docker_manager.stop_container(container_id=containerId, container_name=containerName)
 		bot.delete_message(chatId, messageId)
-		bot.send_message(chatId, result, parse_mode="markdown")
+		if result:
+			bot.send_message(chatId, result, parse_mode="markdown")
 	
 	# LOGS
 	elif comando == "logs":
@@ -226,6 +306,14 @@ def button_controller(call):
 		bot.delete_message(chatId, messageId)
 		bot.send_message(chatId, result, reply_markup=markup, parse_mode="markdown")
 
+	# INFO
+	elif comando == "info":
+		markup = InlineKeyboardMarkup(row_width = 1)
+		markup.add(InlineKeyboardButton("❌ - Cerrar", callback_data="cerrar"))
+		result = docker_manager.get_info(container_id=containerId, container_name=containerName)
+		bot.delete_message(chatId, messageId)
+		bot.send_message(chatId, result, reply_markup=markup, parse_mode="markdown")
+
 def is_admin(chatId):
     return str(chatId) == str(TELEGRAM_CHAT_ID)
 
@@ -253,7 +341,7 @@ def debug(message, html=False):
     else:
         bot.send_message(TELEGRAM_CHAT_ID, message, disable_web_page_preview=True)
 
-def generar_docker_compose(contenedor):
+def generate_docker_compose(contenedor):
     nombre_contenedor = contenedor.name
     imagen_contenedor = contenedor.image.tags[0] if contenedor.image.tags else 'imagen_desconocida'
     
@@ -296,14 +384,17 @@ def generar_docker_compose(contenedor):
     return yaml_data
 
 if __name__ == '__main__':
+	monitor = DockerEventMonitor(bot, TELEGRAM_CHAT_ID)
+	monitor.monitorear_contenedores()
 	bot.set_my_commands([ # Comandos a mostrar en el menú de Telegram
-		telebot.types.BotCommand("/start", "Mensaje de bienvenida"),
+		telebot.types.BotCommand("/start", "Menú principal"),
 		telebot.types.BotCommand("/list", "Listado completo de los contenedores"),
-		telebot.types.BotCommand("/run", "Arranca contenedores detenidos"),
-		telebot.types.BotCommand("/stop", "Detener los contenedores"),
+		telebot.types.BotCommand("/run", "Inicia un contenedor"),
+		telebot.types.BotCommand("/stop", "Detiene un contenedor"),
 		telebot.types.BotCommand("/logs", "Muestra los últimos logs de un contenedor"),
 		telebot.types.BotCommand("/logfile", "Muestra los logs completos de un contenedor en formato fichero"),
 		telebot.types.BotCommand("/compose", "Extrae el docker-compose de un contenedor"),
-		telebot.types.BotCommand("/version", "Consulta la versión de bot")
+		telebot.types.BotCommand("/info", "Muestra información de un contenedor"),
+		telebot.types.BotCommand("/version", "Muestra la versión actual")
 		])
 	bot.infinity_polling(timeout=60)
