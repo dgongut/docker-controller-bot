@@ -8,6 +8,7 @@ Lleva el control de tus contenedores docker desde un único lugar.
  - ✅ Notificaciones cuando un contenedor se cae o se inicia
  - ✅ Notificaciones cuando un contenedor tiene una actualización pendiente
  - ✅ Actualizaciones de los contenedores
+ - ✅ Actualizaciones de los contenedores
 
 ¿Lo buscas en [docker](https://hub.docker.com/r/dgongut/docker-controller-bot)?
 
