@@ -2,11 +2,12 @@
 
 Lleva el control de tus contenedores docker desde un único lugar.
  - ✅ Listar contenedores
- - ✅ Arrancar o parar contenedores
+ - ✅ Arrancar, parar y contenedores
  - ✅ Obtener los logs tanto de manera directa como a través de fichero
  - ✅ Extraer el docker-compose de tus contenedores
  - ✅ Notificaciones cuando un contenedor se cae o se inicia
  - ✅ Notificaciones cuando un contenedor tiene una actualización pendiente
+ - ✅ Actualizaciones de los contenedores
 
 ¿Lo buscas en [docker](https://hub.docker.com/r/dgongut/docker-controller-bot)?
 
