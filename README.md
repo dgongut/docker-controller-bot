@@ -17,7 +17,8 @@ Lleva el control de tus contenedores docker desde un único lugar.
 |:------------- |:---------------:| :-------------|
 |TELEGRAM_TOKEN |✅| Token del bot |
 |TELEGRAM_ADMIN |✅| ChatId del administrador (se puede obtener hablándole al bot Rose escribiendo /id) |
-|TELEGRAM_GROUP |❌| ChatId del grupo. Si este bot va a formar parte de un grupo, es necesario especificar el chatId de dicho grupo | 
+|TELEGRAM_GROUP |❌| ChatId del grupo. Si este bot va a formar parte de un grupo, es necesario especificar el chatId de dicho grupo |
+|CHECK_UPDATE_EVERY_HOURS |❌| Tiempo de espera en horas entre chequeo de actualizaciones (4 horas por defecto) | 
 
 ### Anotaciones
 La función de extracción de docker-compose se encuentra en una fase temprana de desarrollo y puede contener errores.
