@@ -13,7 +13,7 @@ import time
 import threading
 import pickle
 
-VERSION = "0.95.0 (RC)"
+VERSION = "0.96.0 (RC2)"
 
 BUTTON_COLUMNS = 2
 CONTAINER_ID_LENGTH = 5
@@ -442,40 +442,34 @@ def command_controller(message):
 def button_controller(call):
 	"""Se ha pulsado un boton"""
 	messageId = call.message.id
+	bot.delete_message(TELEGRAM_GROUP, messageId)
 
 	if call.data == "cerrar":
-		bot.delete_message(TELEGRAM_GROUP, messageId)
 		return
 
 	# RUN
 	comando, containerId, containerName = call.data.split("|")
 	if comando == "run":
-		bot.delete_message(TELEGRAM_GROUP, messageId)
 		run(containerId, containerName)
 
 	# STOP
 	elif comando == "stop":
-		bot.delete_message(TELEGRAM_GROUP, messageId)
 		stop(containerId, containerName)
 	
 	# LOGS
 	elif comando == "logs":
-		bot.delete_message(TELEGRAM_GROUP, messageId)
 		logs(containerId, containerName)
 
 	# LOGS EN FICHERO
 	elif comando == "logfile":
-		bot.delete_message(TELEGRAM_GROUP, messageId)
 		log_file(containerId, containerName)
 	
 	# COMPOSE
 	elif comando == "compose":
-		bot.delete_message(TELEGRAM_GROUP, messageId)
 		compose(containerId, containerName)
 
 	# INFO
 	elif comando == "info":
-		bot.delete_message(TELEGRAM_GROUP, messageId)
 		info(containerId, containerName)
 	
 	# CONFIRM UPDATE
@@ -483,13 +477,11 @@ def button_controller(call):
 		markup = InlineKeyboardMarkup(row_width = 1)
 		markup.add(InlineKeyboardButton("⬆️ - Sí, actualizar", callback_data=f"update|{containerId}|{containerName}"))
 		markup.add(InlineKeyboardButton("❌ - Cancelar", callback_data="cerrar"))
-		bot.delete_message(TELEGRAM_GROUP, messageId)
 		text = f"⚠️ ¿Estás seguro de que quieres actualizar el contenedor `{containerName}` con la nueva imagen disponible?\n\nSiempre se recomienda comprobar si la configuración actual es compatible con la nueva versión del contenedor.\n\nEsta acción no se puede deshacer desde el bot."
 		bot.send_message(TELEGRAM_GROUP, text, reply_markup=markup, parse_mode="markdown")
 	
 	# UPDATE
 	elif comando == "update":
-		bot.delete_message(TELEGRAM_GROUP, messageId)
 		x = bot.send_message(TELEGRAM_GROUP, f"_Actualizando_ `{containerName}`...", parse_mode="markdown")
 		result = docker_manager.update(container_id=containerId, container_name=containerName, message=x, bot=bot)
 		bot.delete_message(TELEGRAM_GROUP, x.message_id)
@@ -497,11 +489,10 @@ def button_controller(call):
 
 	# CONFIRM DELETE
 	elif comando == "confirmDelete":
-		confirm_delete(messageId, containerId, containerName)
+		confirm_delete(containerId, containerName)
 	
 	# DELETE
 	elif comando == "delete":
-		bot.delete_message(TELEGRAM_GROUP, messageId)
 		result = docker_manager.delete(container_id=containerId, container_name=containerName)
 		bot.send_message(TELEGRAM_GROUP, result, parse_mode="markdown")
 
