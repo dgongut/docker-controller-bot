@@ -13,7 +13,7 @@ import time
 import threading
 import pickle
 
-VERSION = "0.97.0 (RC3)"
+VERSION = "1.0.0 🚀"
 
 BUTTON_COLUMNS = 2
 CONTAINER_ID_LENGTH = 5
@@ -67,43 +67,43 @@ class DockerManager:
 			container = self.client.containers.get(container_id)
 			container.stop()
 			return None
-		except docker.errors.NotFound as e:
-			debug(f"ERROR: No se ha encontrado el contenedor {container_name}. Error: [{e}]")
-			return f"❌ No se ha encontrado el contenedor `{container_name}`. Consulta los logs del bot para mayor información."
+		except Exception as e:
+			debug(f"ERROR: No se ha podido detener el contenedor {container_name}. Error: [{e}]")
+			return f"❌ No se ha podido detener el contenedor `{container_name}`. Consulta los logs del bot para mayor información."
 
 	def start_container(self, container_id, container_name):
 		try:
 			container = self.client.containers.get(container_id)
 			container.start()
 			return None
-		except docker.errors.NotFound as e:
-			debug(f"ERROR: No se ha encontrado el contenedor {container_name}. Error: [{e}]")
-			return f"❌ No se ha encontrado el contenedor `{container_name}`. Consulta los logs del bot para mayor información."
+		except Exception as e:
+			debug(f"ERROR: No se ha podido iniciar el contenedor {container_name}. Error: [{e}]")
+			return f"❌ No se ha podido iniciar el contenedor `{container_name}`. Consulta los logs del bot para mayor información."
 
 	def show_logs(self, container_id, container_name):
 		try:
 			container = self.client.containers.get(container_id)
 			logs = container.logs().decode("utf-8")
 			return f"📃 Estos son los últimos logs de `{container_name}`:\n\n```{container_name}\n{logs[-3500:]}```"
-		except docker.errors.NotFound as e:
-			debug(f"ERROR: No se ha encontrado el contenedor {container_name}. Error: [{e}]")
-			return f"❌ No se ha encontrado el contenedor `{container_name}`. Consulta los logs del bot para mayor información."
+		except Exception as e:
+			debug(f"ERROR: No se han podido mostrar los logs del contenedor {container_name}. Error: [{e}]")
+			return f"❌ No se han podido mostrar los logs del contenedor `{container_name}`. Consulta los logs del bot para mayor información."
 		
 	def show_logs_raw(self, container_id, container_name):
 		try:
 			container = self.client.containers.get(container_id)
 			return container.logs().decode("utf-8")
-		except docker.errors.NotFound as e:
-			debug(f"ERROR: No se ha encontrado el contenedor {container_name}. Error: [{e}]")
-			return f"❌ No se ha encontrado el contenedor `{container_name}`. Consulta los logs del bot para mayor información."
+		except Exception as e:
+			debug(f"ERROR: No se han podido mostrar los logs del contenedor {container_name}. Error: [{e}]")
+			return f"❌ No se han podido mostrar los logs del contenedor `{container_name}`. Consulta los logs del bot para mayor información."
 		
 	def get_docker_compose(self, container_id, container_name):
 		try:
 			container = self.client.containers.get(container_id)
-			return f"📃 El docker-compose de `{container_name}`:\n\n```docker-compose.yaml\n{generate_docker_compose(container)}```"
-		except docker.errors.NotFound as e:
-			debug(f"ERROR: No se ha encontrado el contenedor {container_name}. Error: [{e}]")
-			return f"❌ No se ha encontrado el contenedor `{container_name}`. Consulta los logs del bot para mayor información."
+			return generate_docker_compose(container)
+		except Exception as e:
+			debug(f"ERROR: No se ha podido mostrar el docker-compose del contenedor {container_name}. Error: [{e}]")
+			return f"❌ No se ha podido mostrar el docker-compose del contenedor `{container_name}`. Consulta los logs del bot para mayor información."
 		
 	def get_info(self, container_id, container_name):
 		try:
@@ -151,9 +151,9 @@ class DockerManager:
 				text += f"RAM: {ram}\n"
 			text += f"Imagen usada:\n{used_image}:{used_tag}\n{image_status}```"
 			return f"📜 Información de `{container_name}`:\n{text}", possible_update
-		except docker.errors.NotFound as e:
-			debug(f"ERROR: No se ha encontrado el contenedor {container_name}. Error: [{e}]")
-			return f"❌ No se ha encontrado el contenedor `{container_name}`. Consulta los logs del bot para mayor información."
+		except Exception as e:
+			debug(f"ERROR: No se ha podido mostrar la información del contenedor {container_name}. Error: [{e}]")
+			return f"❌ No se ha podido mostrar la información del contenedor `{container_name}`. Consulta los logs del bot para mayor información."
 		
 	def update(self, container_id, container_name, message, bot):
 		try:
@@ -169,25 +169,13 @@ class DockerManager:
 			used_image, used_tag = container_attrs['Image'].split(":") if ":" in container_attrs['Image'] else (container_attrs['Image'], 'latest')
 			image_with_tag = f"{used_image}:{used_tag}"
 			container_is_running = container.status != 'stop'
+			print(f"DEBUG: Actualizando contenedor {container_name}, actualmente se encuentra activo: [{container_is_running}]")
 
-			debug(f"DEBUG: Comprobando actualizaciones de {container.name} ({image_with_tag})")
 			try:
-				bot.edit_message_text(f"_Actualizando_ `{container_name}`...\nDescargando y verificando actualización...", TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
-				local_image = self.client.images.get(used_image)
-				debug(f"DEBUG: Haciendo pull de la imagen [{image_with_tag}]")
-				remote_image = self.client.images.pull(f'{image_with_tag}')
-				debug("DEBUG: Pull completado")
-				if local_image.id == remote_image.id:
-					write_cache_item(used_image, UPDATED_CONTAINER_TEXT)
-					return f"✅ Finalmente el contenedor `{container_name}` ya se encontraba actualizado. No es necesario actualizarlo."
-			except Exception as e:
-				debug(f"ERROR: No se pudo comprobar la actualización. Error: [{e}]")
-				image_status = ""
-				write_cache_item(used_image, image_status)
-				return f"❌ Lamentablemente ha ocurrido un error al verificar la actualización de `{container_name}`. Consulta los logs del bot para mayor información."
-
-			debug(f"DEBUG: Actualizando contenedor {container_name}, actualmente se encuentra activo: [{container_is_running}]")
-			try:
+				print(f"DEBUG: Haciendo pull de la imagen [{image_with_tag}]")
+				bot.edit_message_text(f"_Actualizando_ `{container_name}`...\nDescargando...", TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+				self.client.images.pull(f"{image_with_tag}")
+				print("DEBUG: Pull completado")
 				if container_is_running:
 					bot.edit_message_text(f"_Actualizando_ `{container_name}`...\nDeteniendo contenedor...", TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
 					debug(f"DEBUG: El contenedor {container_name} está en ejecución. Se detendrá.")
@@ -226,9 +214,9 @@ class DockerManager:
 				return f"❌ Lamentablemente ha ocurrido un error al crear y/o ejecutar el nuevo contenedor de {container_name}. Consulta los logs del bot para mayor información."
 			write_cache_item(used_image, UPDATED_CONTAINER_TEXT)
 			return f"✅ Contenedor `{container_name}` actualizado con éxito."
-		except docker.errors.NotFound:
-			debug(f"ERROR: No se ha encontrado el contenedor {container_name} para actualizarlo.")
-			return f"❌ No se ha encontrado el contenedor `{container_name}`. Consulta los logs del bot para mayor información."
+		except Exception as e:
+			debug(f"ERROR: No se ha podido actualizar el contenedor {container_name}. Error: [{e}]")
+			return f"❌ No se ha podido actualizar el contenedor `{container_name}`. Consulta los logs del bot para mayor información."
 
 	def delete(self, container_id, container_name):
 		try:
@@ -239,9 +227,9 @@ class DockerManager:
 				container.stop()
 			container.remove()
 			return f"✅ El contenedor `{container_name}` se ha *eliminado* correctamente"
-		except docker.errors.NotFound as e:
-			debug(f"ERROR: No se ha encontrado el contenedor {container_name}. Error: [{e}]")
-			return f"❌ No se ha encontrado el contenedor `{container_name}`. Consulta los logs del bot para mayor información."
+		except Exception as e:
+			debug(f"ERROR: No se ha podido eliminar el contenedor {container_name}. Error: [{e}]")
+			return f"❌ No se ha podido eliminar el contenedor `{container_name}`. Consulta los logs del bot para mayor información."
 		
 class DockerEventMonitor:
 	def __init__(self, bot, chat_id):
@@ -280,8 +268,8 @@ class DockerUpdateMonitor:
 		self.chat_id = chat_id
 
 	def detectar_actualizaciones(self):
-		containers = self.client.containers.list(all=True)
 		while True:
+			containers = self.client.containers.list(all=True)
 			for container in containers:
 				container_attrs = container.attrs['Config']
 				used_image, used_tag = container_attrs['Image'].split(":") if ":" in container_attrs['Image'] else (container_attrs['Image'], 'latest')
@@ -292,7 +280,6 @@ class DockerUpdateMonitor:
 					if local_image.id != remote_image.id:
 						old_image_status = read_cache_item(used_image)
 						image_status = NEED_UPDATE_CONTAINER_TEXT
-						self.client.images.remove(remote_image.id) # Borramos la imagen para no ocupar espacio en disco
 						if image_status == old_image_status:
 							continue
 						markup = InlineKeyboardMarkup(row_width = 1)
@@ -566,9 +553,13 @@ def log_file(containerId, containerName):
 def compose(containerId, containerName):
 	debug(f"DEBUG: Ejecutando [compose] de [{containerName}]")
 	markup = InlineKeyboardMarkup(row_width = 1)
-	markup.add(InlineKeyboardButton("❌ - Cerrar", callback_data="cerrar"))
+	markup.add(InlineKeyboardButton("❌ - Eliminar", callback_data="cerrar"))
 	result = docker_manager.get_docker_compose(container_id=containerId, container_name=containerName)
-	bot.send_message(TELEGRAM_GROUP, result, reply_markup=markup, parse_mode="markdown")
+	fichero_temporal = io.BytesIO(result.encode('utf-8'))
+	fichero_temporal.name = "docker-compose.txt"
+	x = bot.send_message(TELEGRAM_GROUP, "_Cargando archivo... Espera por favor_", parse_mode="markdown")
+	bot.send_document(chat_id=TELEGRAM_GROUP, document=fichero_temporal, reply_markup=markup, caption=f'📃 El docker-compose de {containerName}. Recuerda, esta función se encuentra en fase experimental.')
+	bot.delete_message(TELEGRAM_GROUP, x.message_id)
 
 def info(containerId, containerName):
 	debug(f"DEBUG: Ejecutando [info] de [{containerName}]")
@@ -645,47 +636,48 @@ def write_cache_item(key, value):
 def read_cache_item(key):
 	return pickle.load(open(f'{DIR["cache"]}{sanitize_text_for_filename(key)}', 'rb'))
 
-def generate_docker_compose(contenedor):
-	nombre_contenedor = contenedor.name
-	imagen_contenedor = contenedor.image.tags[0] if contenedor.image.tags else 'imagen_desconocida'
-	
-	puertos_mapeados = {}
-	for puerto_externo, puertos_internos in contenedor.attrs['NetworkSettings']['Ports'].items():
-		if puertos_internos:
-			puerto_interno = puertos_internos[0]['HostPort']
-			protocolo = puertos_internos[0]['HostIp']
-			if protocolo != '0.0.0.0':
-				puertos_mapeados[f"{puerto_interno}/{protocolo}"] = puerto_externo
-			else:
-				puertos_mapeados[f"{puerto_interno}"] = puerto_externo
+def generate_docker_compose(container):
+	container_attrs = container.attrs['Config']
+	container_command = container_attrs.get('Cmd', None)
+	container_environment = container_attrs.get('Env', None)
+	container_volumes = container.attrs['HostConfig'].get('Binds', None)
+	container_network_mode = container.attrs['HostConfig'].get('NetworkMode', None)
+	container_ports = container.attrs['HostConfig'].get('PortBindings', None)
+	container_restart_policy = container.attrs['HostConfig'].get('RestartPolicy', None)
+	container_devices = container.attrs['HostConfig'].get('Devices', None)
+	used_image, used_tag = container_attrs['Image'].split(":") if ":" in container_attrs['Image'] else (container_attrs['Image'], 'latest')
+	image_with_tag = f"{used_image}:{used_tag}"
 
-	variables_entorno = contenedor.attrs['Config']['Env']
-	variables_entorno = [var for var in variables_entorno if '=' in var]
-
-	volumenes = []
-	for volumen in contenedor.attrs['Mounts']:
-		origen = volumen['Source']
-		destino = volumen['Destination']
-		modo = volumen['Mode']
-
-		if '/var/lib/docker/volumes' not in origen:
-			volumenes.append(f"{origen}:{destino}:{modo}")
-
-	compose_data = {
+	docker_compose = {
 		'version': '3',
 		'services': {
-			nombre_contenedor: {
-				'container_name': nombre_contenedor,
-				'image': imagen_contenedor,
-				**({'environment': variables_entorno} if variables_entorno else {}),
-				**({'ports': puertos_mapeados} if puertos_mapeados else {}),
-				**({'volumes': volumenes} if volumenes else {}),
+			container.name: {
+				'image': image_with_tag,
+				'container_name': container.name
 			}
 		}
 	}
 
-	yaml_data = yaml.safe_dump(compose_data, default_flow_style=False, sort_keys=False)
+	add_if_present(docker_compose['services'][container.name], 'command', container_command)
+	add_if_present(docker_compose['services'][container.name], 'environment', container_environment)
+	add_if_present(docker_compose['services'][container.name], 'volumes', container_volumes)
+	add_if_present(docker_compose['services'][container.name], 'network_mode', container_network_mode)
+	add_if_present(docker_compose['services'][container.name], 'restart', str(container_restart_policy.get('Name', '')))
+	add_if_present(docker_compose['services'][container.name], 'devices', container_devices)
+
+	if container_ports:
+		docker_compose['services'][container.name]['ports'] = []
+		for container_port, host_bindings in container_ports.items():
+			for host_binding in host_bindings:
+				port_info = f"{host_binding.get('HostPort', '')}:{container_port}"
+				docker_compose['services'][container.name]['ports'].append(port_info)
+
+	yaml_data = yaml.safe_dump(docker_compose, default_flow_style=False, sort_keys=False)
 	return yaml_data
+
+def add_if_present(dictionary, key, value):
+	if value:
+		dictionary[key] = value
 
 if __name__ == '__main__':
 	debug("DEBUG: Arrancando Docker-Controler-Bot")
