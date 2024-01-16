@@ -13,7 +13,7 @@ import time
 import threading
 import pickle
 
-VERSION = "1.0.0 🚀"
+VERSION = "1.1.0"
 
 BUTTON_COLUMNS = 2
 CONTAINER_ID_LENGTH = 5
@@ -31,6 +31,12 @@ if "abc" == TELEGRAM_ADMIN:
 
 if "abc" == TELEGRAM_GROUP:
 	TELEGRAM_GROUP = TELEGRAM_ADMIN
+
+try:
+	CHECK_UPDATES = bool(int(CHECK_UPDATES_RAW))
+except:
+	print("ERROR: La variable CHECK_UPDATES indica al programa si realizará o no un chequeo de las actualizaciones, los valores posibles son 1 ó 0. 1 es activo, 0 desactivado.")
+	sys.exit(1)
 
 try:
 	CHECK_UPDATE_EVERY_HOURS = float(CHECK_UPDATE_EVERY_HOURS)
@@ -51,10 +57,10 @@ class DockerManager:
 
 	def list_containers(self, comando=None):
 		if comando == "/run":
-			status = ['paused', 'exited']
+			status = ['paused', 'exited', 'created', 'dead']
 			filters = {'status': status}
 			containers = self.client.containers.list(filters=filters)
-		elif comando == "/stop":
+		elif comando == "/stop" or comando == "/restart":
 			status = ['running', 'restarting']
 			filters = {'status': status}
 			containers = self.client.containers.list(filters=filters)
@@ -64,46 +70,61 @@ class DockerManager:
 
 	def stop_container(self, container_id, container_name):
 		try:
+			if CONTAINER_NAME == container_name:
+				return f"❌ No se puede detener el propio bot."
 			container = self.client.containers.get(container_id)
 			container.stop()
 			return None
 		except Exception as e:
-			debug(f"ERROR: No se ha podido detener el contenedor {container_name}. Error: [{e}]")
-			return f"❌ No se ha podido detener el contenedor `{container_name}`. Consulta los logs del bot para mayor información."
+			error(f"No se ha podido detener el contenedor {container_name}. Error: [{e}]")
+			return f"❌ No se ha podido detener el contenedor *{container_name}*. Consulta los logs del bot para mayor información."
+		
+	def restart_container(self, container_id, container_name):
+		try:
+			if CONTAINER_NAME == container_name:
+				return f"❌ No se puede reiniciar el propio bot."
+			container = self.client.containers.get(container_id)
+			container.restart()
+			return None
+		except Exception as e:
+			error(f"No se ha podido reiniciar el contenedor {container_name}. Error: [{e}]")
+			return f"❌ No se ha podido reiniciar el contenedor *{container_name}*. Consulta los logs del bot para mayor información."
 
 	def start_container(self, container_id, container_name):
 		try:
+			if CONTAINER_NAME == container_name:
+				return f"❌ No está permitido interactuar con el propio bot."
 			container = self.client.containers.get(container_id)
 			container.start()
 			return None
 		except Exception as e:
-			debug(f"ERROR: No se ha podido iniciar el contenedor {container_name}. Error: [{e}]")
-			return f"❌ No se ha podido iniciar el contenedor `{container_name}`. Consulta los logs del bot para mayor información."
+			error(f"No se ha podido iniciar el contenedor {container_name}. Error: [{e}]")
+			return f"❌ No se ha podido iniciar el contenedor *{container_name}*. Consulta los logs del bot para mayor información."
 
 	def show_logs(self, container_id, container_name):
 		try:
 			container = self.client.containers.get(container_id)
 			logs = container.logs().decode("utf-8")
-			return f"📃 Estos son los últimos logs de `{container_name}`:\n\n```{container_name}\n{logs[-3500:]}```"
+			return f"📃 Estos son los últimos logs de *{container_name}*:\n\n```{container_name}\n{logs[-3500:]}```"
 		except Exception as e:
-			debug(f"ERROR: No se han podido mostrar los logs del contenedor {container_name}. Error: [{e}]")
-			return f"❌ No se han podido mostrar los logs del contenedor `{container_name}`. Consulta los logs del bot para mayor información."
+			error(f"No se han podido mostrar los logs del contenedor {container_name}. Error: [{e}]")
+			return f"❌ No se han podido mostrar los logs del contenedor *{container_name}*. Consulta los logs del bot para mayor información."
 		
 	def show_logs_raw(self, container_id, container_name):
 		try:
 			container = self.client.containers.get(container_id)
 			return container.logs().decode("utf-8")
 		except Exception as e:
-			debug(f"ERROR: No se han podido mostrar los logs del contenedor {container_name}. Error: [{e}]")
-			return f"❌ No se han podido mostrar los logs del contenedor `{container_name}`. Consulta los logs del bot para mayor información."
+			error(f"No se han podido mostrar los logs del contenedor {container_name}. Error: [{e}]")
+			return f"❌ No se han podido mostrar los logs del contenedor *{container_name}*. Consulta los logs del bot para mayor información."
 		
 	def get_docker_compose(self, container_id, container_name):
 		try:
 			container = self.client.containers.get(container_id)
 			return generate_docker_compose(container)
 		except Exception as e:
-			debug(f"ERROR: No se ha podido mostrar el docker-compose del contenedor {container_name}. Error: [{e}]")
-			return f"❌ No se ha podido mostrar el docker-compose del contenedor `{container_name}`. Consulta los logs del bot para mayor información."
+			error(f"No se ha podido mostrar el docker-compose del contenedor {container_name}. Error: [{e}]")
+			return f"❌ No se ha podido mostrar el docker-compose del contenedor *{container_name}*. Consulta los logs del bot para mayor información."
 		
 	def get_info(self, container_id, container_name):
 		try:
@@ -132,31 +153,38 @@ class DockerManager:
 				else:
 					ram = f"{used_ram_mb:.2f}/{limit_mb:.2f} MB ({memory_usage_percentage}%)"
 			
-			container_attrs = container.attrs['Config']
-			used_image, used_tag = container_attrs['Image'].split(":") if ":" in container_attrs['Image'] else (container_attrs['Image'], 'latest')
-			try:
-				image_status = read_cache_item(used_image)
-			except Exception as e:
-				debug(f"DEBUG: Se ha consultado por la actualización de {container.name} y no está disponible: [{e}]")
-				image_status = ""
-
+			image_status = ""
 			possible_update = False
-			if NEED_UPDATE_CONTAINER_TEXT in image_status:
-				possible_update = True
+			container_attrs = container.attrs['Config']
+			image_with_tag = container_attrs['Image']
+			if CHECK_UPDATES:
+				try:
+					image_status = read_cache_item(image_with_tag, container_name)
+				except Exception as e:
+					debug(f"Se ha consultado por la actualización de {container.name} y no está disponible: [{e}]")
+
+				if NEED_UPDATE_CONTAINER_TEXT in image_status:
+					possible_update = True
 
 			text = '```\n'
 			text += f"Estado: {get_status_emoji(container.status)} ({container.status})\n\n"
 			if container.status == "running":
-				text += f"CPU: {used_cpu}%\n"
-				text += f"RAM: {ram}\n"
-			text += f"Imagen usada:\n{used_image}:{used_tag}\n{image_status}```"
-			return f"📜 Información de `{container_name}`:\n{text}", possible_update
+				text += f"- CPU: {used_cpu}%\n\n"
+				text += f"- RAM: {ram}\n\n"
+			text += f"- Imagen usada:\n{image_with_tag}\n\n"
+			text += f"- ID de la imagen: {container.image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}"
+			if CHECK_UPDATES:
+				text += f"\n\n{image_status}"
+			text += "```"
+			return f"📜 Información de *{container_name}*:\n{text}", possible_update
 		except Exception as e:
-			debug(f"ERROR: No se ha podido mostrar la información del contenedor {container_name}. Error: [{e}]")
-			return f"❌ No se ha podido mostrar la información del contenedor `{container_name}`. Consulta los logs del bot para mayor información."
+			error(f"No se ha podido mostrar la información del contenedor {container_name}. Error: [{e}]")
+			return f"❌ No se ha podido mostrar la información del contenedor *{container_name}*.\n\nConsulta los logs del bot para mayor información.", False
 		
 	def update(self, container_id, container_name, message, bot):
 		try:
+			if CONTAINER_NAME == container_name:
+				return f"❌ No se puede actualizar el propio bot."
 			container = self.client.containers.get(container_id)
 			container_attrs = container.attrs['Config']
 			container_command = container.attrs['Config']['Cmd']
@@ -166,31 +194,37 @@ class DockerManager:
 			container_ports = container.attrs['HostConfig']['PortBindings']
 			container_restart_policy = container.attrs['HostConfig']['RestartPolicy']
 			container_devices = container.attrs['HostConfig']['Devices']
-			used_image, used_tag = container_attrs['Image'].split(":") if ":" in container_attrs['Image'] else (container_attrs['Image'], 'latest')
-			image_with_tag = f"{used_image}:{used_tag}"
-			container_is_running = container.status != 'stop'
-			print(f"DEBUG: Actualizando contenedor {container_name}, actualmente se encuentra activo: [{container_is_running}]")
+			image_with_tag = container_attrs['Image']
+			container_is_running = container.status == 'running'
+			debug(f"Actualizando contenedor {container_name}, actualmente se encuentra activo: [{container_is_running}]")
 
 			try:
-				print(f"DEBUG: Haciendo pull de la imagen [{image_with_tag}]")
-				bot.edit_message_text(f"_Actualizando_ `{container_name}`...\nDescargando...", TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
-				self.client.images.pull(f"{image_with_tag}")
-				print("DEBUG: Pull completado")
+				debug(f"Haciendo pull de la imagen [{image_with_tag}]")
+				bot.edit_message_text(f"_Actualizando_ *{container_name}*...\nDescargando...", TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+				local_image = container.image.id
+				remote_image = self.client.images.pull(image_with_tag)
+				debug(f"Pull de {image_with_tag} completado")
 				if container_is_running:
-					bot.edit_message_text(f"_Actualizando_ `{container_name}`...\nDeteniendo contenedor...", TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
-					debug(f"DEBUG: El contenedor {container_name} está en ejecución. Se detendrá.")
+					bot.edit_message_text(f"_Actualizando_ *{container_name}*...\nDeteniendo contenedor...", TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+					debug(f"El contenedor {container_name} está en ejecución. Se detendrá.")
 					container.stop()
 
 				try:
-					debug("DEBUG: Eliminando contenedor antiguo")
-					bot.edit_message_text(f"_Actualizando_ `{container_name}`...\nEliminando contenedor...", TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+					debug("Eliminando contenedor antiguo")
+					bot.edit_message_text(f"_Actualizando_ *{container_name}*...\nEliminando contenedor...", TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
 					container.remove()
-					debug("DEBUG: Contenedor antiguo eliminado")
+					debug("Contenedor antiguo eliminado")
 				except docker.errors.APIError as e:
-					debug(f"ERROR: Error al eliminar el contenedor. Error: {e}")
-					return f"❌ Lamentablemente ha ocurrido un error al eliminar el contenedor `{container_name}`. Consulta los logs del bot para mayor información."
+					error(f"Error al eliminar el contenedor. Error: {e}")
+					return f"❌ Lamentablemente ha ocurrido un error al eliminar el contenedor *{container_name}*. Consulta los logs del bot para mayor información."
 				
-				bot.edit_message_text(f"_Actualizando_ `{container_name}`...\nCreando contenedor...", TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+				debug(f"Eliminando la imagen anterior [{local_image.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}]")
+				try:
+					self.client.images.remove(local_image)
+				except Exception as e:
+					debug(f"La imagen local de {container_name} no puede eliminarse. Motivo: [{e}]")
+				bot.edit_message_text(f"_Actualizando_ *{container_name}*...\nCreando contenedor...", TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+				debug(f"Creando el contenedor con la nueva imagen [{remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}]")
 				new_container = self.client.containers.create(
 					image_with_tag,
 					name=container_name,
@@ -203,33 +237,35 @@ class DockerManager:
 					devices=container_devices,
 					detach=True
 				)
-				debug("DEBUG: El contenedor nuevo se ha creado exitosamente.")
+				debug("El contenedor nuevo se ha creado exitosamente.")
 				if container_is_running:
-					debug("DEBUG: El contenedor estaba iniciado anteriormente, lo inicio.")
+					debug("El contenedor estaba iniciado anteriormente, lo inicio.")
 					new_container.start()
 
-				debug(f"DEBUG: Contenedor {container_name} actualizado.")
+				debug(f"Contenedor {container_name} actualizado.")
 			except Exception as e:
-				debug(f"ERROR: Error al crear y/o ejecutar el nuevo contenedor. Error: [{e}]\n\n\nLa información del contenedor es: [{container_attrs}]")
+				error(f"Error al crear y/o ejecutar el nuevo contenedor. Error: [{e}]\n\n\nLa información del contenedor es: [{container_attrs}]")
 				return f"❌ Lamentablemente ha ocurrido un error al crear y/o ejecutar el nuevo contenedor de {container_name}. Consulta los logs del bot para mayor información."
-			write_cache_item(used_image, UPDATED_CONTAINER_TEXT)
-			return f"✅ Contenedor `{container_name}` actualizado con éxito."
+			write_cache_item(image_with_tag, container_name, UPDATED_CONTAINER_TEXT)
+			return f"✅ Contenedor *{container_name}* actualizado con éxito."
 		except Exception as e:
-			debug(f"ERROR: No se ha podido actualizar el contenedor {container_name}. Error: [{e}]")
-			return f"❌ No se ha podido actualizar el contenedor `{container_name}`. Consulta los logs del bot para mayor información."
+			error(f"No se ha podido actualizar el contenedor {container_name}. Error: [{e}]")
+			return f"❌ No se ha podido actualizar el contenedor *{container_name}*. Consulta los logs del bot para mayor información."
 
 	def delete(self, container_id, container_name):
 		try:
+			if CONTAINER_NAME == container_name:
+				return f"❌ No se puede eliminar el propio bot."
 			container = self.client.containers.get(container_id)
 			container_is_running = container.status != 'stop'
 			if container_is_running:
-				debug(f"DEBUG: El contenedor {container_name} está en ejecución. Deteniendo antes de su eliminación.")
+				debug(f"El contenedor {container_name} está en ejecución. Deteniendo antes de su eliminación.")
 				container.stop()
 			container.remove()
-			return f"✅ El contenedor `{container_name}` se ha *eliminado* correctamente"
+			return f"✅ El contenedor *{container_name}* se ha *eliminado* correctamente"
 		except Exception as e:
-			debug(f"ERROR: No se ha podido eliminar el contenedor {container_name}. Error: [{e}]")
-			return f"❌ No se ha podido eliminar el contenedor `{container_name}`. Consulta los logs del bot para mayor información."
+			error(f"No se ha podido eliminar el contenedor {container_name}. Error: [{e}]")
+			return f"❌ No se ha podido eliminar el contenedor *{container_name}*. Consulta los logs del bot para mayor información."
 		
 class DockerEventMonitor:
 	def __init__(self, bot, chat_id):
@@ -245,9 +281,11 @@ class DockerEventMonitor:
 
 				message = None
 				if status == "start":
-					message = f"🟢 El contenedor `{container_name}` se ha *iniciado*"
+					message = f"🟢 El contenedor *{container_name}* se ha *iniciado*"
 				elif status == "stop":
-					message = f"🔴 El contenedor `{container_name}` se ha *detenido*"
+					message = f"🔴 El contenedor *{container_name}* se ha *detenido*"
+				elif status == "create":
+					message = f"🔵 El contenedor *{container_name}* se ha *creado*"
 				
 				if message:
 					self.bot.send_message(self.chat_id, message, parse_mode="markdown")
@@ -257,7 +295,7 @@ class DockerEventMonitor:
 			thread = threading.Thread(target=self.detectar_eventos_contenedores, daemon=True)
 			thread.start()
 		except Exception as e:
-			debug(f"ERROR: Se ha producido un error en el demonio de eventos. Relanzando... Error: [{e}]")
+			error(f"Se ha producido un error en el demonio de eventos. Relanzando... Error: [{e}]")
 			self.demonio_event()
 
 
@@ -272,26 +310,36 @@ class DockerUpdateMonitor:
 			containers = self.client.containers.list(all=True)
 			for container in containers:
 				container_attrs = container.attrs['Config']
-				used_image, used_tag = container_attrs['Image'].split(":") if ":" in container_attrs['Image'] else (container_attrs['Image'], 'latest')
-				debug(f"DEBUG: Comprobando actualizaciones de {container.name} ({used_image}:{used_tag})")
+				image_with_tag = container_attrs['Image']
 				try:
-					local_image = self.client.images.get(used_image)
-					remote_image = self.client.images.pull(f'{used_image}:{used_tag}')
-					if local_image.id != remote_image.id:
-						old_image_status = read_cache_item(used_image)
+					local_image = container.image.id
+					remote_image = self.client.images.pull(image_with_tag)
+					debug(f"Comprobando actualización: {container.name} ({image_with_tag}): IMAGEN LOCAL [{local_image.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}] - IMAGEN REMOTA [{remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}]")
+					if local_image != remote_image.id:
+						old_image_status = read_cache_item(image_with_tag, container.name)
 						image_status = NEED_UPDATE_CONTAINER_TEXT
+						debug(f"¡Actualización de {container.name} detectada! Eliminando la imagen descargada [{remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}]")
+						try:
+							self.client.images.remove(remote_image.id)
+						except:
+							pass # Si no se puede borrar es porque esta siendo usada por otro contenedor
 						if image_status == old_image_status:
+							debug("Ya se avisó de esta actualización. No se notifica.")
 							continue
-						markup = InlineKeyboardMarkup(row_width = 1)
-						markup.add(InlineKeyboardButton("⬆️ - Actualizar", callback_data=f"confirmUpdate|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}"))
-						self.bot.send_message(self.chat_id, f"⬆️ *Actualización disponible*: `{container.name}`", reply_markup=markup, parse_mode="markdown")
+						debug("Notificando de la actualización...")
+						if CONTAINER_NAME == container.name:
+							self.bot.send_message(self.chat_id, f"⬆️ *Actualización disponible*:\n*{container.name}*\n\nDe momento, para actualizar el bot en sí mismo es necesario hacerlo desde el servidor.", parse_mode="markdown")
+						else:
+							markup = InlineKeyboardMarkup(row_width = 1)
+							markup.add(InlineKeyboardButton("⬆️ - Actualizar", callback_data=f"confirmUpdate|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}"))
+							self.bot.send_message(self.chat_id, f"⬆️ *Actualización disponible*:\n*{container.name}*", reply_markup=markup, parse_mode="markdown")
 					else:
 						image_status = UPDATED_CONTAINER_TEXT
 				except Exception as e:
-					debug(f"ERROR: No se pudo comprobar la actualización: [{e}]")
+					error(f"No se pudo comprobar la actualización: [{e}]")
 					image_status = ""
-				write_cache_item(used_image, image_status)
-			debug(f"DEBUG: Comprobaciones de actualizaciones completadas, esperando {CHECK_UPDATE_EVERY_HOURS} horas.")
+				write_cache_item(image_with_tag, container.name, image_status)
+			debug(f"Comprobaciones de actualizaciones completadas, esperando {CHECK_UPDATE_EVERY_HOURS} horas.")
 			time.sleep(CHECK_UPDATE_EVERY_HOURS * 3600)
 
 	def demonio_update(self):
@@ -299,7 +347,7 @@ class DockerUpdateMonitor:
 			thread = threading.Thread(target=self.detectar_actualizaciones, daemon=True)
 			thread.start()
 		except Exception as e:
-			debug(f"ERROR: Se ha producido un error en el demonio de actualizaciones. Relanzando... Error: [{e}]")
+			error(f"Se ha producido un error en el demonio de actualizaciones. Relanzando... Error: [{e}]")
 			self.demonio_update()
 		
 
@@ -307,7 +355,7 @@ class DockerUpdateMonitor:
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 docker_manager = DockerManager()
 
-@bot.message_handler(commands=["start", "list", "run", "stop", "delete", "logs", "logfile", "compose", "info", "version"])
+@bot.message_handler(commands=["start", "list", "run", "stop", "restart", "delete", "logs", "logfile", "compose", "info", "version"])
 def command_controller(message):
 	userId = message.from_user.id
 	comando = message.text.split(' ', 1)[0].split('@', 1)[0]
@@ -316,12 +364,12 @@ def command_controller(message):
 	container_id = None
 	if container_name:
 		container_id = get_container_id_by_name(container_name)
-	debug(f"DEBUG: Comando introducido: {comando}")
-	debug(f"DEBUG: USUARIO: {userId}")
-	debug(f"DEBUG: CHAT/GRUPO: {message.chat.id}")
+	debug(f"Comando introducido: {comando}")
+	debug(f"USUARIO: {userId}")
+	debug(f"CHAT/GRUPO: {message.chat.id}")
 		
 	if not is_admin(userId):
-		debug(f"ATENCION: El usuario {userId} (@{message.from_user.username}) no es un administrador y ha tratado de usar el bot.")
+		warning(f"El usuario {userId} (@{message.from_user.username}) no es un administrador y ha tratado de usar el bot.")
 		bot.send_message(userId, '❌ Este bot no te pertenece.\n\nSi quieres controlar tus contenedores docker a través de telegram despliégame en tu servidor.\n\nEcha un vistazo en [DockerHub](https://hub.docker.com/r/dgongut/docker-controller-bot) donde encontrarás un docker-compose. \n\n¿Eres curioso? El código se encuentra publicado en [GitHub](https://github.com/dgongut/docker-controller-bot).\n\nSi tienes dudas, pregúntame, soy @dgongut', parse_mode="markdown", disable_web_page_preview=True)
 		return
 	
@@ -335,12 +383,15 @@ def command_controller(message):
 		texto_inicial += f' · /list Listado completo de los contenedores.\n'
 		texto_inicial += f' · /run Inicia un contenedor.\n'
 		texto_inicial += f' · /stop Detiene un contenedor.\n'
+		texto_inicial += f' · /restart Reinicia un contenedor.\n'
 		texto_inicial += f' · /delete Elimina un contenedor.\n'
 		texto_inicial += f' · /logs Muestra los últimos logs de un contenedor.\n'
 		texto_inicial += f' · /logfile Muestra los últimos logs de un contenedor en formato fichero.\n'
 		texto_inicial += f' · /compose Extrae el docker-compose de un contenedor. Esta función se encuentra en fase _experimental_.\n'
 		texto_inicial += f' · /info Muestra información de un contenedor.\n'
 		texto_inicial += f' · /version Muestra la versión actual.\n'
+		if (CONTAINER_NAME == "abc"):
+			texto_inicial += f'\n\n*⚠️⚠️Se ha detectado que no está cumplimentada la variable CONTAINER_NAME en el docker-compose del bot.\n\nPara un correcto funcionamiento es indispensable añadirla.\nEl valor a introducir ha de ser el nombre que se le haya puesto al contenedor de este bot.⚠️⚠️*'
 		bot.send_message(TELEGRAM_GROUP, texto_inicial, parse_mode="markdown")
 	elif comando in ('/list'):
 		markup = InlineKeyboardMarkup(row_width = 1)
@@ -370,7 +421,25 @@ def command_controller(message):
 			containers = docker_manager.list_containers(comando=comando)
 			textoMensaje = "🔴 Pulsa en un contenedor para detenerlo"
 			for container in containers:
+				if CONTAINER_NAME == container.name:
+					continue
 				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status)} {container.name}', callback_data=f'stop|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+
+			markup.add(*botones)
+			markup.add(InlineKeyboardButton("❌ - Cerrar", callback_data="cerrar"))
+			bot.send_message(TELEGRAM_GROUP, textoMensaje, reply_markup=markup, disable_web_page_preview=True, parse_mode="markdown")
+	elif comando in ('/restart'):
+		if container_id:
+			restart(container_id, container_name)
+		else:
+			markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
+			botones = []
+			containers = docker_manager.list_containers(comando=comando)
+			textoMensaje = "🟢 Pulsa en un contenedor para reiniciarlo"
+			for container in containers:
+				if CONTAINER_NAME == container.name:
+					continue
+				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status)} {container.name}', callback_data=f'restart|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
 
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton("❌ - Cerrar", callback_data="cerrar"))
@@ -455,10 +524,15 @@ def command_controller(message):
 
 @bot.callback_query_handler(func=lambda mensaje: True)
 def button_controller(call):
-	"""Se ha pulsado un boton"""
 	messageId = call.message.id
-	bot.delete_message(TELEGRAM_GROUP, messageId)
+	userId = call.from_user.id
 
+	if not is_admin(userId):
+		warning(f"El usuario {userId} (@{call.from_user.username}) no es un administrador y ha tratado de usar el bot.")
+		bot.send_message(userId, '❌ Este bot no te pertenece.\n\nSi quieres controlar tus contenedores docker a través de telegram despliégame en tu servidor.\n\nEcha un vistazo en [DockerHub](https://hub.docker.com/r/dgongut/docker-controller-bot) donde encontrarás un docker-compose. \n\n¿Eres curioso? El código se encuentra publicado en [GitHub](https://github.com/dgongut/docker-controller-bot).\n\nSi tienes dudas, pregúntame, soy @dgongut', parse_mode="markdown", disable_web_page_preview=True)
+		return
+
+	bot.delete_message(TELEGRAM_GROUP, messageId)
 	if call.data == "cerrar":
 		return
 
@@ -470,6 +544,10 @@ def button_controller(call):
 	# STOP
 	elif comando == "stop":
 		stop(containerId, containerName)
+	
+	# RESTART
+	elif comando == "restart":
+		restart(containerId, containerName)
 	
 	# LOGS
 	elif comando == "logs":
@@ -492,12 +570,12 @@ def button_controller(call):
 		markup = InlineKeyboardMarkup(row_width = 1)
 		markup.add(InlineKeyboardButton("⬆️ - Sí, actualizar", callback_data=f"update|{containerId}|{containerName}"))
 		markup.add(InlineKeyboardButton("❌ - Cancelar", callback_data="cerrar"))
-		text = f"⚠️ ¿Estás seguro de que quieres actualizar el contenedor `{containerName}` con la nueva imagen disponible?\n\nSiempre se recomienda comprobar si la configuración actual es compatible con la nueva versión del contenedor.\n\nEsta acción no se puede deshacer desde el bot."
+		text = f"⚠️ ¿Estás seguro de que quieres actualizar el contenedor *{containerName}* con la nueva imagen disponible?\n\nSiempre se recomienda comprobar si la configuración actual es compatible con la nueva versión del contenedor.\n\nEsta acción no se puede deshacer desde el bot."
 		bot.send_message(TELEGRAM_GROUP, text, reply_markup=markup, parse_mode="markdown")
 	
 	# UPDATE
 	elif comando == "update":
-		x = bot.send_message(TELEGRAM_GROUP, f"_Actualizando_ `{containerName}`...", parse_mode="markdown")
+		x = bot.send_message(TELEGRAM_GROUP, f"_Actualizando_ *{containerName}*...", parse_mode="markdown")
 		result = docker_manager.update(container_id=containerId, container_name=containerName, message=x, bot=bot)
 		bot.delete_message(TELEGRAM_GROUP, x.message_id)
 		bot.send_message(TELEGRAM_GROUP, result, parse_mode="markdown")
@@ -508,36 +586,44 @@ def button_controller(call):
 	
 	# DELETE
 	elif comando == "delete":
-		x = bot.send_message(TELEGRAM_GROUP, f"_Eliminando_ `{containerName}`...", parse_mode="markdown")
+		x = bot.send_message(TELEGRAM_GROUP, f"_Eliminando_ *{containerName}*...", parse_mode="markdown")
 		result = docker_manager.delete(container_id=containerId, container_name=containerName)
 		bot.delete_message(TELEGRAM_GROUP, x.message_id)
 		bot.send_message(TELEGRAM_GROUP, result, parse_mode="markdown")
 
 def run(containerId, containerName):
-	debug(f"DEBUG: Ejecutando [run] de [{containerName}]")
-	x = bot.send_message(TELEGRAM_GROUP, f"_Iniciando_ `{containerName}`...", parse_mode="markdown")
+	debug(f"Ejecutando [run] de [{containerName}]")
+	x = bot.send_message(TELEGRAM_GROUP, f"_Iniciando_ *{containerName}*...", parse_mode="markdown")
 	result = docker_manager.start_container(container_id=containerId, container_name=containerName)
 	bot.delete_message(TELEGRAM_GROUP, x.message_id)
 	if result:
 		bot.send_message(TELEGRAM_GROUP, result, parse_mode="markdown")
 
 def stop(containerId, containerName):
-	debug(f"DEBUG: Ejecutando [stop] de [{containerName}]")
-	x = bot.send_message(TELEGRAM_GROUP, f"_Deteniendo_ `{containerName}`...", parse_mode="markdown")
+	debug(f"Ejecutando [stop] de [{containerName}]")
+	x = bot.send_message(TELEGRAM_GROUP, f"_Deteniendo_ *{containerName}*...", parse_mode="markdown")
 	result = docker_manager.stop_container(container_id=containerId, container_name=containerName)
 	bot.delete_message(TELEGRAM_GROUP, x.message_id)
 	if result:
 		bot.send_message(TELEGRAM_GROUP, result, parse_mode="markdown")
 
+def restart(containerId, containerName):
+	debug(f"Ejecutando [restart] de [{containerName}]")
+	x = bot.send_message(TELEGRAM_GROUP, f"_Reiniciando_ *{containerName}*...", parse_mode="markdown")
+	result = docker_manager.restart_container(container_id=containerId, container_name=containerName)
+	bot.delete_message(TELEGRAM_GROUP, x.message_id)
+	if result:
+		bot.send_message(TELEGRAM_GROUP, result, parse_mode="markdown")
+
 def logs(containerId, containerName):
-	debug(f"DEBUG: Ejecutando [logs] de [{containerName}]")
+	debug(f"Ejecutando [logs] de [{containerName}]")
 	markup = InlineKeyboardMarkup(row_width = 1)
 	markup.add(InlineKeyboardButton("❌ - Cerrar", callback_data="cerrar"))
 	result = docker_manager.show_logs(container_id=containerId, container_name=containerName)
 	bot.send_message(TELEGRAM_GROUP, result, reply_markup=markup, parse_mode="markdown")
 
 def log_file(containerId, containerName):
-	debug(f"DEBUG: Ejecutando [log_file] de [{containerName}]")
+	debug(f"Ejecutando [log_file] de [{containerName}]")
 	markup = InlineKeyboardMarkup(row_width = 1)
 	markup.add(InlineKeyboardButton("❌ - Eliminar", callback_data="cerrar"))
 	result = docker_manager.show_logs_raw(container_id=containerId, container_name=containerName)
@@ -551,7 +637,7 @@ def log_file(containerId, containerName):
 	bot.delete_message(TELEGRAM_GROUP, x.message_id)
 
 def compose(containerId, containerName):
-	debug(f"DEBUG: Ejecutando [compose] de [{containerName}]")
+	debug(f"Ejecutando [compose] de [{containerName}]")
 	markup = InlineKeyboardMarkup(row_width = 1)
 	markup.add(InlineKeyboardButton("❌ - Eliminar", callback_data="cerrar"))
 	result = docker_manager.get_docker_compose(container_id=containerId, container_name=containerName)
@@ -562,9 +648,9 @@ def compose(containerId, containerName):
 	bot.delete_message(TELEGRAM_GROUP, x.message_id)
 
 def info(containerId, containerName):
-	debug(f"DEBUG: Ejecutando [info] de [{containerName}]")
+	debug(f"Ejecutando [info] de [{containerName}]")
 	markup = InlineKeyboardMarkup(row_width = 1)
-	x = bot.send_message(TELEGRAM_GROUP, f"_Obteniendo información de_ `{containerName}`...", parse_mode="markdown")
+	x = bot.send_message(TELEGRAM_GROUP, f"_Obteniendo información de_ *{containerName}*...", parse_mode="markdown")
 	result, possible_update = docker_manager.get_info(container_id=containerId, container_name=containerName)
 	bot.delete_message(TELEGRAM_GROUP, x.message_id)
 	if possible_update:
@@ -573,11 +659,11 @@ def info(containerId, containerName):
 	bot.send_message(TELEGRAM_GROUP, result, reply_markup=markup, parse_mode="markdown")
 
 def confirm_delete(containerId, containerName):
-	debug(f"DEBUG: Ejecutando [confirmDelete] de [{containerName}]")
+	debug(f"Ejecutando [confirmDelete] de [{containerName}]")
 	markup = InlineKeyboardMarkup(row_width = 1)
 	markup.add(InlineKeyboardButton("⚠️ - Eliminar contenedor", callback_data=f"delete|{containerId}|{containerName}"))
 	markup.add(InlineKeyboardButton("❌ - Cancelar", callback_data="cerrar"))
-	text = f"⚠️ ¿Estás seguro de que quieres eliminar el contenedor `{containerName}`?\n\nEsta acción no se puede deshacer."
+	text = f"⚠️ ¿Estás seguro de que quieres eliminar el contenedor *{containerName}*?\n\nEsta acción no se puede deshacer."
 	bot.send_message(TELEGRAM_GROUP, text, reply_markup=markup, parse_mode="markdown")
 
 def is_admin(userId):
@@ -586,15 +672,19 @@ def is_admin(userId):
 def display_containers(containers):
 	result = "```\n"
 	for container in containers:
-		result += f"{get_status_emoji(container.status)} {container.name}"
-		used_image = container.attrs['Config']['Image'].split(":")[0]
+		if CONTAINER_NAME == container.name:
+			result += f"👑 {container.name}"
+		else:
+			result += f"{get_status_emoji(container.status)} {container.name}"
+		image_with_tag = container.attrs['Config']['Image']
 		update = False
-		try:
-			image_status = read_cache_item(used_image)
-			if "⬆️" in image_status:
-				update = True
-		except:
-			update = False
+		if CHECK_UPDATES:
+			try:
+				image_status = read_cache_item(image_with_tag, container.name)
+				if "⬆️" in image_status:
+					update = True
+			except:
+				pass
 
 		if update:
 			result += " ⬆️"
@@ -604,25 +694,33 @@ def display_containers(containers):
 
 def get_status_emoji(statusStr):
 	status = "🟢"
-	if statusStr == "exited":
+	if statusStr == "exited" or statusStr == "dead":
 		status = "🔴"
-	elif statusStr == "restarting":
+	elif statusStr == "restarting" or statusStr == "removing":
 		status = "🟡"
 	elif statusStr == "paused":
 		status = "🟠"
+	elif statusStr == "created":
+		status = "🔵"
 	return status
 
 def debug(message):
-	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - {message}')
+	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
+
+def error(message):
+	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - ERROR: {message}')
+
+def warning(message):
+	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - ATENCION: {message}')
 
 def get_container_id_by_name(container_name):
-	debug(f"DEBUG: buscando id del contenedor [{container_name}]")
+	debug(f"buscando id del contenedor [{container_name}]")
 	containers = docker_manager.list_containers()
 	for container in containers:
 		if container.name == container_name:
-			debug(f"DEBUG: Contenedor [{container_name}] encontrado")
+			debug(f"Contenedor [{container_name}] encontrado")
 			return container.id[:CONTAINER_ID_LENGTH]
-	debug(f"DEBUG: Contenedor [{container_name}] no encontrado")
+	debug(f"Contenedor [{container_name}] no encontrado")
 	return None
 
 def sanitize_text_for_filename(text):
@@ -630,11 +728,17 @@ def sanitize_text_for_filename(text):
 	sanitized = re.sub(r'_+', '_', sanitized)
 	return sanitized
 
-def write_cache_item(key, value):
-	pickle.dump(value, open(f'{DIR["cache"]}{sanitize_text_for_filename(key)}', 'wb'))
+def write_cache_item(image_with_tag, container_name, value):
+	try:
+		pickle.dump(value, open(f'{DIR["cache"]}{sanitize_text_for_filename(image_with_tag)}_{sanitize_text_for_filename(container_name)}', 'wb'))
+	except Exception as e:
+		error(f"Error al escribir en caché. Clave [{key}]")
 
-def read_cache_item(key):
-	return pickle.load(open(f'{DIR["cache"]}{sanitize_text_for_filename(key)}', 'rb'))
+def read_cache_item(image_with_tag, container_name):
+	try:
+		return pickle.load(open(f'{DIR["cache"]}{sanitize_text_for_filename(image_with_tag)}_{sanitize_text_for_filename(container_name)}', 'rb'))
+	except:
+		return ""
 
 def generate_docker_compose(container):
 	container_attrs = container.attrs['Config']
@@ -645,8 +749,7 @@ def generate_docker_compose(container):
 	container_ports = container.attrs['HostConfig'].get('PortBindings', None)
 	container_restart_policy = container.attrs['HostConfig'].get('RestartPolicy', None)
 	container_devices = container.attrs['HostConfig'].get('Devices', None)
-	used_image, used_tag = container_attrs['Image'].split(":") if ":" in container_attrs['Image'] else (container_attrs['Image'], 'latest')
-	image_with_tag = f"{used_image}:{used_tag}"
+	image_with_tag = container_attrs['Image']
 
 	docker_compose = {
 		'version': '3',
@@ -680,18 +783,22 @@ def add_if_present(dictionary, key, value):
 		dictionary[key] = value
 
 if __name__ == '__main__':
-	debug("DEBUG: Arrancando Docker-Controler-Bot")
+	debug("Arrancando Docker-Controler-Bot")
 	eventMonitor = DockerEventMonitor(bot, TELEGRAM_GROUP)
 	eventMonitor.demonio_event()
-	debug("DEBUG: Demonio monitor activo")
-	updateMonitor = DockerUpdateMonitor(bot, TELEGRAM_GROUP)
-	updateMonitor.demonio_update()
-	debug("DEBUG: Demonio update activo")
+	debug("Demonio de monitorización de estado activado")
+	if CHECK_UPDATES:
+		updateMonitor = DockerUpdateMonitor(bot, TELEGRAM_GROUP)
+		updateMonitor.demonio_update()
+		debug("Demonio de actualizaciones activado")
+	else:
+		debug("Demonio de actualizaciones desactivado")
 	bot.set_my_commands([
 		telebot.types.BotCommand("/start", "Menú principal"),
 		telebot.types.BotCommand("/list", "Listado completo de los contenedores"),
 		telebot.types.BotCommand("/run", "Inicia un contenedor"),
 		telebot.types.BotCommand("/stop", "Detiene un contenedor"),
+		telebot.types.BotCommand("/restart", "Reinicia un contenedor"),
 		telebot.types.BotCommand("/delete", "Elimina un contenedor"),
 		telebot.types.BotCommand("/logs", "Muestra los últimos logs de un contenedor"),
 		telebot.types.BotCommand("/logfile", "Muestra los logs completos de un contenedor en formato fichero"),
@@ -699,5 +806,5 @@ if __name__ == '__main__':
 		telebot.types.BotCommand("/info", "Muestra información de un contenedor"),
 		telebot.types.BotCommand("/version", "Muestra la versión actual")
 		])
-	debug("DEBUG: Iniciando interconexión con Telegram")
+	debug("Iniciando interconexión con Telegram")
 	bot.infinity_polling(timeout=60)
