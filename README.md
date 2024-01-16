@@ -1,5 +1,7 @@
 # docker-controller-bot
 
+![alt text](https://i.ibb.co/5jPfTQ1/Docker-Controller-Bot-shadow.png)
+
 Lleva el control de tus contenedores docker desde un único lugar.
  - ✅ Listar contenedores
  - ✅ Arrancar, parar y eliminar contenedores
