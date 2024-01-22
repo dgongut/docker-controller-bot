@@ -13,7 +13,7 @@ import time
 import threading
 import pickle
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 BUTTON_COLUMNS = 2
 CONTAINER_ID_LENGTH = 5
@@ -184,70 +184,105 @@ class DockerManager:
 	def update(self, container_id, container_name, message, bot):
 		try:
 			if CONTAINER_NAME == container_name:
-				return f"❌ No se puede actualizar el propio bot."
-			container = self.client.containers.get(container_id)
-			container_attrs = container.attrs['Config']
-			container_command = container.attrs['Config']['Cmd']
-			container_environment = container.attrs['Config']['Env']
-			container_volumes = container.attrs['HostConfig']['Binds']
-			container_network_mode = container.attrs['HostConfig']['NetworkMode']
-			container_ports = container.attrs['HostConfig']['PortBindings']
-			container_restart_policy = container.attrs['HostConfig']['RestartPolicy']
-			container_devices = container.attrs['HostConfig']['Devices']
-			image_with_tag = container_attrs['Image']
-			container_is_running = container.status == 'running'
-			debug(f"Actualizando contenedor {container_name}, actualmente se encuentra activo: [{container_is_running}]")
-
-			try:
-				debug(f"Haciendo pull de la imagen [{image_with_tag}]")
-				bot.edit_message_text(f"_Actualizando_ *{container_name}*...\nDescargando...", TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
-				local_image = container.image.id
-				remote_image = self.client.images.pull(image_with_tag)
-				debug(f"Pull de {image_with_tag} completado")
-				if container_is_running:
-					bot.edit_message_text(f"_Actualizando_ *{container_name}*...\nDeteniendo contenedor...", TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
-					debug(f"El contenedor {container_name} está en ejecución. Se detendrá.")
-					container.stop()
-
+				container_environment = {'CONTAINER_NAME': container_name}
+				container_volumes = {'/var/run/docker.sock': {'bind': '/var/run/docker.sock', 'mode': 'rw'}}
+				new_container = self.client.containers.run(
+						UPDATER_IMAGE,
+						name=UPDATER_CONTAINER_NAME,
+						environment=container_environment,
+						volumes=container_volumes,
+						network_mode="bridge",
+						detach=True
+					)
+				return "⚙️ Ahora el bot se reiniciará.\n\nEspera un momento por favor, esto puede tardar hasta 1 minuto.\n\nEl bot avisará cuando vuelva a estar disponible."
+			else:
+				client = self.client
+				container = client.containers.get(container_id)
+				container_attrs = container.attrs['Config']
+				container_command = container_attrs['Cmd']
+				container_environment = container_attrs['Env']
+				host_config = container.attrs['HostConfig']
+				container_volumes = host_config['Binds']
+				container_network_mode = host_config['NetworkMode']
+				container_ports = host_config['PortBindings']
+				container_restart_policy = host_config['RestartPolicy']
+				container_devices = host_config['Devices']
+				container_labels = container_attrs['Labels']
+				privileged_mode = host_config.get('Privileged', False)
+				tmpfs_mounts = {
+					mount['Target']: f"size={mount['TmpfsOptions']['SizeBytes']}"
+					for mount in host_config.get('Mounts', [])
+					if mount.get('Type') == 'tmpfs' and mount['TmpfsOptions'].get('SizeBytes')
+				}
+				cap_add_list = host_config.get('CapAdd', None)
+				image_with_tag = container_attrs['Image']
+				container_is_running = container.status == 'running'
+				debug(f"Actualizando contenedor {container_name}")
 				try:
-					debug("Eliminando contenedor antiguo")
-					bot.edit_message_text(f"_Actualizando_ *{container_name}*...\nEliminando contenedor...", TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
-					container.remove()
-					debug("Contenedor antiguo eliminado")
-				except docker.errors.APIError as e:
-					error(f"Error al eliminar el contenedor. Error: {e}")
-					return f"❌ Lamentablemente ha ocurrido un error al eliminar el contenedor *{container_name}*. Consulta los logs del bot para mayor información."
-				
-				debug(f"Eliminando la imagen anterior [{local_image.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}]")
-				try:
-					self.client.images.remove(local_image)
+					debug(f"Haciendo pull de la imagen [{image_with_tag}]")
+					bot.edit_message_text(f"_Actualizando_ *{container_name}*...\nDescargando...", TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+					local_image = container.image.id
+					remote_image = client.images.pull(image_with_tag)
+					debug(f"Pull de {image_with_tag} completado")
+					if container_is_running:
+						bot.edit_message_text(f"_Actualizando_ *{container_name}*...\nDeteniendo contenedor...", TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+						debug(f"El contenedor {container_name} está en ejecución. Se detendrá.")
+						container.stop()
+
+					debug(f"Creando el contenedor con la nueva imagen [{remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}]")
+					bot.edit_message_text(f"_Actualizando_ *{container_name}*...\nCreando contenedor...", TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+					new_container = client.containers.create(
+						image_with_tag,
+						name=f'{container_name}_update-DCB',
+						command=container_command,
+						environment=container_environment,
+						volumes=container_volumes,
+						network_mode=container_network_mode,
+						ports=container_ports,
+						restart_policy=container_restart_policy,
+						devices=container_devices,
+						labels=container_labels,
+						privileged=privileged_mode,
+						tmpfs=tmpfs_mounts,
+						cap_add=cap_add_list,
+						detach=True
+					)
+					debug("El contenedor nuevo se ha creado exitosamente.")
+					debug(f"Contenedor {container_name} actualizado.")
+
+					if container_is_running:
+						debug("El contenedor estaba iniciado anteriormente, lo inicio.")
+						bot.edit_message_text(f"_Actualizando_ *{container_name}*...\nIniciando contenedor...", TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+						new_container.start()
+
+					try:
+						debug("Eliminando contenedor antiguo")
+						bot.edit_message_text(f"_Actualizando_ *{container_name}*...\nEliminando contenedor antiguo...", TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+						container.remove()
+						debug("Contenedor antiguo eliminado")
+					except docker.errors.APIError as e:
+						error(f"Error al eliminar el contenedor.")
+						return f"❌ Lamentablemente ha ocurrido un error al eliminar el contenedor *{container_name}*. Consulta los logs del bot para mayor información."
+
+					debug(f"Eliminando la imagen anterior [{local_image.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}]")
+					try:
+						client.images.remove(local_image)
+					except Exception as e:
+						debug(f"La imagen local de {container_name} no puede eliminarse. Motivo: [{e}]")
+
+					try:
+						debug(f"Renombrando nuevo contenedor [{container_name}_update-DCB] -> [{container_name}]")
+						new_container.rename(container_name)
+						debug("Contenedor nuevo renombrado con éxito")
+					except docker.errors.APIError as e:
+						error(f"Error al renombrar el nuevo contenedor. Error: {e}")
+						return f"❌ Lamentablemente ha ocurrido un error al renombrar el nuevo contenedor de {container_name}. Consulta los logs del bot para mayor información."
+					write_cache_item(image_with_tag, container_name, UPDATED_CONTAINER_TEXT)
+					return f"✅ Contenedor *{container_name}* actualizado con éxito."
 				except Exception as e:
-					debug(f"La imagen local de {container_name} no puede eliminarse. Motivo: [{e}]")
-				bot.edit_message_text(f"_Actualizando_ *{container_name}*...\nCreando contenedor...", TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
-				debug(f"Creando el contenedor con la nueva imagen [{remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}]")
-				new_container = self.client.containers.create(
-					image_with_tag,
-					name=container_name,
-					command=container_command,
-					environment=container_environment,
-					volumes=container_volumes,
-					network_mode=container_network_mode,
-					ports=container_ports,
-					restart_policy=container_restart_policy,
-					devices=container_devices,
-					detach=True
-				)
-				debug("El contenedor nuevo se ha creado exitosamente.")
-				if container_is_running:
-					debug("El contenedor estaba iniciado anteriormente, lo inicio.")
-					new_container.start()
-
-				debug(f"Contenedor {container_name} actualizado.")
-			except Exception as e:
-				error(f"Error al crear y/o ejecutar el nuevo contenedor. Error: [{e}]\n\n\nLa información del contenedor es: [{container_attrs}]")
-				return f"❌ Lamentablemente ha ocurrido un error al crear y/o ejecutar el nuevo contenedor de {container_name}. Consulta los logs del bot para mayor información."
-			write_cache_item(image_with_tag, container_name, UPDATED_CONTAINER_TEXT)
-			return f"✅ Contenedor *{container_name}* actualizado con éxito."
+					container.start()
+					error(f"Error al crear y/o ejecutar el nuevo contenedor. La información del contenedor es: [{container_attrs}]")
+					raise e
 		except Exception as e:
 			error(f"No se ha podido actualizar el contenedor {container_name}. Error: [{e}]")
 			return f"❌ No se ha podido actualizar el contenedor *{container_name}*. Consulta los logs del bot para mayor información."
@@ -276,7 +311,7 @@ class DockerEventMonitor:
 	def detectar_eventos_contenedores(self):
 		for event in self.client.events(decode=True):
 			if 'status' in event and 'Actor' in event and 'Attributes' in event['Actor']:
-				container_name = event['Actor']['Attributes'].get('name', '')
+				container_name = event['Actor']['Attributes'].get('name', '').replace("_update-DCB", "")
 				status = event['status']
 
 				message = None
@@ -327,12 +362,9 @@ class DockerUpdateMonitor:
 							debug("Ya se avisó de esta actualización. No se notifica.")
 							continue
 						debug("Notificando de la actualización...")
-						if CONTAINER_NAME == container.name:
-							self.bot.send_message(self.chat_id, f"⬆️ *Actualización disponible*:\n*{container.name}*\n\nDe momento, para actualizar el bot en sí mismo es necesario hacerlo desde el servidor.", parse_mode="markdown")
-						else:
-							markup = InlineKeyboardMarkup(row_width = 1)
-							markup.add(InlineKeyboardButton("⬆️ - Actualizar", callback_data=f"confirmUpdate|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}"))
-							self.bot.send_message(self.chat_id, f"⬆️ *Actualización disponible*:\n*{container.name}*", reply_markup=markup, parse_mode="markdown")
+						markup = InlineKeyboardMarkup(row_width = 1)
+						markup.add(InlineKeyboardButton("⬆️ - Actualizar", callback_data=f"confirmUpdate|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}"))
+						self.bot.send_message(self.chat_id, f"⬆️ *Actualización disponible*:\n*{container.name}*", reply_markup=markup, parse_mode="markdown")
 					else:
 						image_status = UPDATED_CONTAINER_TEXT
 				except Exception as e:
@@ -714,7 +746,7 @@ def warning(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - ATENCION: {message}')
 
 def get_container_id_by_name(container_name):
-	debug(f"buscando id del contenedor [{container_name}]")
+	debug(f"Buscando id del contenedor [{container_name}]")
 	containers = docker_manager.list_containers()
 	for container in containers:
 		if container.name == container_name:
@@ -782,6 +814,26 @@ def add_if_present(dictionary, key, value):
 	if value:
 		dictionary[key] = value
 
+def delete_updater():
+	if (CONTAINER_NAME == "abc"):
+		return
+	container_id = get_container_id_by_name(UPDATER_CONTAINER_NAME)
+	if container_id:
+		client = docker.from_env()
+		container = client.containers.get(container_id)
+		if container.status == "running":
+			error("Este bot no debería haberse iniciado mientras el updater está corriendo. Ignorando...")
+			return
+
+		try:
+			container.remove()
+		except Exception as e:
+			error(f"No se ha podido eliminar el contenedor {UPDATER_CONTAINER_NAME}. Error: [{e}]")
+
+		updater_image = container.image.id
+		client.images.remove(updater_image)
+		bot.send_message(TELEGRAM_GROUP, f"✅ Contenedor *{CONTAINER_NAME}* actualizado con éxito.", parse_mode="markdown")
+
 if __name__ == '__main__':
 	debug("Arrancando Docker-Controler-Bot")
 	eventMonitor = DockerEventMonitor(bot, TELEGRAM_GROUP)
@@ -807,4 +859,5 @@ if __name__ == '__main__':
 		telebot.types.BotCommand("/version", "Muestra la versión actual")
 		])
 	debug("Iniciando interconexión con Telegram")
+	delete_updater()
 	bot.infinity_polling(timeout=60)
