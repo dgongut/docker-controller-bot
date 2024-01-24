@@ -43,5 +43,6 @@ services:
             - /var/run/docker.sock:/var/run/docker.sock
         image: dgongut/docker-controller-bot:latest
         container_name: docker-controller-bot
+        restart: always
         tty: true
 ```
