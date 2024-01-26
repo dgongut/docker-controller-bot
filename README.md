@@ -44,5 +44,6 @@ services:
         image: dgongut/docker-controller-bot:latest
         container_name: docker-controller-bot
         restart: always
+        network_mode: host
         tty: true
 ```
