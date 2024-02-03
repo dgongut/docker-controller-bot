@@ -20,6 +20,7 @@ Lleva el control de tus contenedores docker desde un único lugar.
 |TELEGRAM_TOKEN |✅| Token del bot |
 |TELEGRAM_ADMIN |✅| ChatId del administrador (se puede obtener hablándole al bot Rose escribiendo /id) |
 |TELEGRAM_GROUP |❌| ChatId del grupo. Si este bot va a formar parte de un grupo, es necesario especificar el chatId de dicho grupo |
+|TELEGRAM_THREAD |❌| Thread del tema dentro de un supergrupo; valor numérico (2,3,4..). Por defecto 1 |
 |CONTAINER_NAME |✅| Nombre del contenedor, lo que se le ponga en container_name en el docker-compose ha de ir aquí también |
 |CHECK_UPDATES |❌| Si se desea que compruebe actualizaciones. 0 no - 1 sí. Por defecto 1|
 |CHECK_UPDATE_EVERY_HOURS |❌| Tiempo de espera en horas entre chequeo de actualizaciones (4 horas por defecto) | 
@@ -37,6 +38,7 @@ services:
             - TELEGRAM_ADMIN=
             - CONTAINER_NAME=docker-controller-bot
             #- TELEGRAM_GROUP=
+            #- TELEGRAM_THREAD=1
             #- CHECK_UPDATES=1
             #- CHECK_UPDATE_EVERY_HOURS=4
         volumes:
