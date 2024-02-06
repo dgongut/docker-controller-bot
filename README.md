@@ -14,7 +14,7 @@ Lleva el control de tus contenedores docker desde un único lugar.
 ¿Lo buscas en [docker](https://hub.docker.com/r/dgongut/docker-controller-bot)?
 
 ## Configuración en config.py
-                    
+
 | CLAVE  | OBLIGATORIO | VALOR |
 |:------------- |:---------------:| :-------------|
 |TELEGRAM_TOKEN |✅| Token del bot |
@@ -24,6 +24,7 @@ Lleva el control de tus contenedores docker desde un único lugar.
 |CONTAINER_NAME |✅| Nombre del contenedor, lo que se le ponga en container_name en el docker-compose ha de ir aquí también |
 |CHECK_UPDATES |❌| Si se desea que compruebe actualizaciones. 0 no - 1 sí. Por defecto 1|
 |CHECK_UPDATE_EVERY_HOURS |❌| Tiempo de espera en horas entre chequeo de actualizaciones (4 horas por defecto) | 
+|BUTTON_COLUMNS |❌| Numero de columnas de botones en las listas de contenedores (2 columnas por defecto) | 
 
 ### Anotaciones
 La función de extracción de docker-compose se encuentra en una fase temprana de desarrollo y puede contener errores.
@@ -41,6 +42,7 @@ services:
             #- TELEGRAM_THREAD=1
             #- CHECK_UPDATES=1
             #- CHECK_UPDATE_EVERY_HOURS=4
+            #- BUTTON_COLUMNS=2
         volumes:
             - /var/run/docker.sock:/var/run/docker.sock
         image: dgongut/docker-controller-bot:latest

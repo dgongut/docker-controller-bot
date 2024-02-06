@@ -13,12 +13,7 @@ import time
 import threading
 import pickle
 
-VERSION = "1.3.0"
-
-BUTTON_COLUMNS = 2
-CONTAINER_ID_LENGTH = 5
-UPDATED_CONTAINER_TEXT = "Contenedor actualizado ✅"
-NEED_UPDATE_CONTAINER_TEXT = "Actualización disponible ⬆️"
+VERSION = "1.3.1"
 
 # Comprobación inicial de variables
 if "abc" == TELEGRAM_TOKEN:
@@ -61,7 +56,8 @@ class DockerManager:
 	def __init__(self):
 		self.client = docker.from_env()
 
-	def list_containers(self, comando=None):
+	def list_containers(self, comando=""):
+		comando = comando.split('@', 1)[0]
 		if comando == "/run":
 			status = ['paused', 'exited', 'created', 'dead']
 			filters = {'status': status}
@@ -72,7 +68,8 @@ class DockerManager:
 			containers = self.client.containers.list(filters=filters)
 		else:
 			containers = self.client.containers.list(all=True)
-		return containers
+		sorted_containers = sorted(containers, key=lambda x: x.name.lower())
+		return sorted_containers
 
 	def stop_container(self, container_id, container_name):
 		try:
@@ -177,6 +174,7 @@ class DockerManager:
 			if container.status == "running":
 				text += f"- CPU: {used_cpu}%\n\n"
 				text += f"- RAM: {ram}\n\n"
+			text += f"- ID del contenedor: {container_id}\n\n"
 			text += f"- Imagen usada:\n{image_with_tag}\n\n"
 			text += f"- ID de la imagen: {container.image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}"
 			if CHECK_UPDATES:
@@ -398,7 +396,7 @@ docker_manager = DockerManager()
 @bot.message_handler(commands=["start", "list", "run", "stop", "restart", "delete", "logs", "logfile", "compose", "info", "version"])
 def command_controller(message):
 	userId = message.from_user.id
-	comando = message.text.split(' ', 1)[0].split('@', 1)[0]
+	comando = message.text.split(' ', 1)[0]
 	messageId = message.id
 	container_name = " ".join(message.text.split()[1:])
 	container_id = None
@@ -413,11 +411,11 @@ def command_controller(message):
 		send_message(chat_id=userId, message='❌ Este bot no te pertenece.\n\nSi quieres controlar tus contenedores docker a través de telegram despliégame en tu servidor.\n\nEcha un vistazo en [DockerHub](https://hub.docker.com/r/dgongut/docker-controller-bot) donde encontrarás un docker-compose. \n\n¿Eres curioso? El código se encuentra publicado en [GitHub](https://github.com/dgongut/docker-controller-bot).\n\nSi tienes dudas, pregúntame, soy @dgongut')
 		return
 	
-	if comando not in ('/start'):
+	if comando not in ('/start', f'/start@{bot.get_me().username}'):
 		delete_message(messageId)
 
 	# Listar contenedores
-	if comando in ('/start'):
+	if comando in ('/start', f'/start@{bot.get_me().username}'):
 		texto_inicial = f'*🫡 Docker Controller Bot a su servicio*\n\n'
 		texto_inicial += f'Comandos disponibles:\n\n'
 		texto_inicial += f' · /list Listado completo de los contenedores.\n'
@@ -433,12 +431,12 @@ def command_controller(message):
 		if (CONTAINER_NAME == "abc"):
 			texto_inicial += f'\n\n*⚠️⚠️Se ha detectado que no está cumplimentada la variable CONTAINER_NAME en el docker-compose del bot.\n\nPara un correcto funcionamiento es indispensable añadirla.\nEl valor a introducir ha de ser el nombre que se le haya puesto al contenedor de este bot.⚠️⚠️*'
 		send_message(message=texto_inicial)
-	elif comando in ('/list'):
+	elif comando in ('/list', f'/list@{bot.get_me().username}'):
 		markup = InlineKeyboardMarkup(row_width = 1)
 		markup.add(InlineKeyboardButton("❌ - Cerrar", callback_data="cerrar"))
 		containers = docker_manager.list_containers(comando=comando)
 		send_message(message=display_containers(containers), reply_markup=markup)
-	elif comando in ('/run'):
+	elif comando in ('/run', f'/run@{bot.get_me().username}'):
 		if container_id:
 			run(container_id, container_name)
 		else:
@@ -452,7 +450,7 @@ def command_controller(message):
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton("❌ - Cerrar", callback_data="cerrar"))
 			send_message(message=textoMensaje, reply_markup=markup)
-	elif comando in ('/stop'):
+	elif comando in ('/stop', f'/stop@{bot.get_me().username}'):
 		if container_id:
 			stop(container_id, container_name)
 		else:
@@ -468,7 +466,7 @@ def command_controller(message):
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton("❌ - Cerrar", callback_data="cerrar"))
 			send_message(message=textoMensaje, reply_markup=markup)
-	elif comando in ('/restart'):
+	elif comando in ('/restart', f'/restart@{bot.get_me().username}'):
 		if container_id:
 			restart(container_id, container_name)
 		else:
@@ -484,7 +482,7 @@ def command_controller(message):
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton("❌ - Cerrar", callback_data="cerrar"))
 			send_message(message=textoMensaje, reply_markup=markup)
-	elif comando in ('/logs'):
+	elif comando in ('/logs', f'/logs@{bot.get_me().username}'):
 		if container_id:
 			logs(container_id, container_name)
 		else:
@@ -498,7 +496,7 @@ def command_controller(message):
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton("❌ - Cerrar", callback_data="cerrar"))
 			send_message(message=textoMensaje, reply_markup=markup)
-	elif comando in ('/logfile'):
+	elif comando in ('/logfile', f'/logfile@{bot.get_me().username}'):
 		if container_id:
 			log_file(container_id, container_name)
 		else:
@@ -512,7 +510,7 @@ def command_controller(message):
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton("❌ - Cerrar", callback_data="cerrar"))
 			send_message(message=textoMensaje, reply_markup=markup)
-	elif comando in ('/compose'):
+	elif comando in ('/compose', f'/compose@{bot.get_me().username}'):
 		if container_id:
 			compose(container_id, container_name)
 		else:
@@ -526,7 +524,7 @@ def command_controller(message):
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton("❌ - Cerrar", callback_data="cerrar"))
 			send_message(message=textoMensaje, reply_markup=markup)
-	elif comando in ('/info'):
+	elif comando in ('/info', f'/info@{bot.get_me().username}'):
 		if container_id:
 			info(container_id, container_name)
 		else:
@@ -540,7 +538,7 @@ def command_controller(message):
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton("❌ - Cerrar", callback_data="cerrar"))
 			send_message(message=textoMensaje, reply_markup=markup)
-	elif comando in ('/delete'):
+	elif comando in ('/delete', f'/delete@{bot.get_me().username}'):
 		if container_id:
 			confirm_delete(container_id, container_name)
 		else:
@@ -554,7 +552,7 @@ def command_controller(message):
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton("❌ - Cerrar", callback_data="cerrar"))
 			send_message(message=textoMensaje, reply_markup=markup)
-	elif comando in ('/version'):
+	elif comando in ('/version', f'/start@{bot.get_me().username}'):
 		x = send_message(message=f'⚙️ _Versión: {VERSION}_\nDesarrollado con ❤️ por @dgongut\n\nSi encuentras cualquier fallo o sugerencia contáctame.\n\nPuedes encontrar todo lo relacionado con este bot en [DockerHub](https://hub.docker.com/r/dgongut/docker-controller-bot) o en [GitHub](https://github.com/dgongut/docker-controller-bot)')
 		time.sleep(15)
 		delete_message(x.message_id)
@@ -853,15 +851,11 @@ def delete_updater():
 	if container_id:
 		client = docker.from_env()
 		container = client.containers.get(container_id)
-		if container.status == "running":
-			error("Este bot no debería haberse iniciado mientras el updater está corriendo. Ignorando...")
-			return
-
 		try:
+			container.stop()
 			container.remove()
 		except Exception as e:
 			error(f"No se ha podido eliminar el contenedor {UPDATER_CONTAINER_NAME}. Error: [{e}]")
-
 		updater_image = container.image.id
 		client.images.remove(updater_image)
 		send_message(message=f"✅ Contenedor *{CONTAINER_NAME}* actualizado con éxito.")
@@ -892,5 +886,9 @@ if __name__ == '__main__':
 		])
 	debug("Iniciando interconexión con Telegram")
 	delete_updater()
-	send_message(message=f"🫡 *{CONTAINER_NAME}\n🟢 Activo*\n_⚙️ (v{VERSION})_")
+	if (CONTAINER_NAME == "abc"):
+		send_message(message=f"🫡 *Docker-Controler-Bot\n⚠️ Necesita atención. Por favor mira los logs.*\n_⚙️ v{VERSION}_")
+		warning("Para un correcto funcionamiento del bot es necesario establecer en el docker compose la variable CONTAINER_NAME con el nombre de este contenedor.")
+	else:
+		send_message(message=f"🫡 *{CONTAINER_NAME}\n🟢 Activo*\n_⚙️ v{VERSION}_")
 	bot.infinity_polling(timeout=60)
