@@ -1,6 +1,14 @@
 # docker-controller-bot
-
-![alt text](https://i.ibb.co/5jPfTQ1/Docker-Controller-Bot-shadow.png)
+[![](https://badgen.net/badge/icon/github?icon=github&label)](https://github.com/dgongut/docker-controller-bot)
+[![](https://badgen.net/badge/icon/docker?icon=docker&label)](https://hub.docker.com/r/dgongut/docker-controller-bot)
+[![Docker Pulls](https://badgen.net/docker/pulls/dgongut/docker-controller-bot?icon=docker&label=pulls)](https://hub.docker.com/r/dgongut/docker-controller-bot/)
+[![Docker Stars](https://badgen.net/docker/stars/dgongut/docker-controller-bot?icon=docker&label=stars)](https://hub.docker.com/r/dgongut/docker-controller-bot/)
+[![Docker Image Size](https://badgen.net/docker/size/dgongut/docker-controller-bot?icon=docker&label=image%20size)](https://hub.docker.com/r/dgongut/docker-controller-bot/)
+![Github stars](https://badgen.net/github/stars/dgongut/docker-controller-bot?icon=github&label=stars)
+![Github forks](https://badgen.net/github/forks/dgongut/docker-controller-bot?icon=github&label=forks)
+![Github last-commit](https://img.shields.io/github/last-commit/dgongut/docker-controller-bot)
+![Github last-commit](https://badgen.net/github/license/dgongut/docker-controller-bot)
+![alt text](https://github.com/dgongut/pictures/blob/main/Docker-Controller-Bot/mockup.png)
 
 Lleva el control de tus contenedores docker desde un único lugar.
  - ✅ Listar contenedores
