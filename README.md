@@ -62,3 +62,6 @@ services:
         network_mode: host
         tty: true
 ```
+
+### Agradecimientos
+Traducción al neerlandés: [ManCaveMedia](https://github.com/ManCaveMedia)
