@@ -410,7 +410,7 @@ class DockerUpdateMonitor:
 				except Exception as e:
 					error(get_text("error_checking_update_with_error", e))
 					image_status = ""
-				write_cache_item(image_with_tag, container.name, get_text("NEED_UPDATE_CONTAINER_TEXT"))
+				write_cache_item(image_with_tag, container.name, image_status)
 			debug(get_text("debug_waiting_next_check_updates", CHECK_UPDATE_EVERY_HOURS))
 			time.sleep(CHECK_UPDATE_EVERY_HOURS * 3600)
 
