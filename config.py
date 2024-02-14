@@ -11,5 +11,4 @@ UPDATER_IMAGE = "dgongut/docker-container-updater:latest"
 UPDATER_CONTAINER_NAME = "UPDATER-Docker-Controler-Bot"
 BUTTON_COLUMNS = int(os.environ.get("BUTTON_COLUMNS"))
 CONTAINER_ID_LENGTH = 5
-UPDATED_CONTAINER_TEXT = "Contenedor actualizado ✅"
-NEED_UPDATE_CONTAINER_TEXT = "Actualización disponible ⬆️"
+LANGUAGE = os.environ.get("LANGUAGE")
