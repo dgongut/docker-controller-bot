@@ -302,7 +302,7 @@ class DockerManager:
 						new_container.start()
 
 					try:
-						debug(get_text("debug_container_deleting_old_container"))
+						debug(get_text("debug_container_deleting_old_container", container.name))
 						bot.edit_message_text(get_text("updating_deleting_old", container.name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
 						container.remove()
 					except docker.errors.APIError as e:
