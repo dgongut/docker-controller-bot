@@ -114,7 +114,7 @@
    "loading_file": "_Bestand wordt geladen... Even geduld_",
    "show_info": "📜 Klik op een container om de informatie te zien.",
    "logs": "📃 $1 logs",
-   "compose": "📃 De docker-compose voor $1. Onthoud dat deze functie zich in een experimentele fase bevindt.",
+   "compose": "📃 De docker-compose van $1. Onthoud dat deze functie zich in een experimentele fase bevindt.",
    "showing_logs": "📃 Dit zijn de laatste logs voor de *$1* container:\n\n```$1\n$2```",
    "UPDATED_CONTAINER_TEXT": "Container up-to-date ✅",
    "NEED_UPDATE_CONTAINER_TEXT": "Update beschikbaar ⬆️"
