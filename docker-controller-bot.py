@@ -14,7 +14,7 @@ import threading
 import pickle
 import json
 
-VERSION = "2.0.2"
+VERSION = "2.1.0"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -79,6 +79,12 @@ try:
 	CHECK_UPDATE_EVERY_HOURS = float(CHECK_UPDATE_EVERY_HOURS)
 except ValueError:
 	error(get_text("error_bot_check_updates_interval"))
+	sys.exit(1)
+
+try:
+	EXTENDED_MESSAGES = bool(int(EXTENDED_MESSAGES_RAW))
+except:
+	error(get_text("error_bot_extended_messages"))
 	sys.exit(1)
 
 DIR = {"cache": "./cache/"}
@@ -206,7 +212,7 @@ class DockerManager:
 					possible_update = True
 
 			text = '```\n'
-			text += f'{get_text("status")}: {get_status_emoji(container.status)} ({container.status})\n\n'
+			text += f'{get_text("status")}: {get_status_emoji(container.status, container_name)} ({container.status})\n\n'
 			if container.status == "running":
 				text += f"- CPU: {used_cpu}%\n\n"
 				text += f"- RAM: {ram}\n\n"
@@ -356,7 +362,7 @@ class DockerEventMonitor:
 					message = get_text("started_container", container_name)
 				elif status == "die":
 					message = get_text("stopped_container", container_name)
-				elif status == "create":
+				elif status == "create" and EXTENDED_MESSAGES:
 					message = get_text("created_container", container_name)
 				
 				if message:
@@ -427,7 +433,7 @@ class DockerUpdateMonitor:
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 docker_manager = DockerManager()
 
-@bot.message_handler(commands=["start", "list", "run", "stop", "restart", "delete", "logs", "logfile", "compose", "info", "version"])
+@bot.message_handler(commands=["start", "list", "run", "stop", "restart", "delete", "update", "logs", "logfile", "compose", "info", "version"])
 def command_controller(message):
 	userId = message.from_user.id
 	comando = message.text.split(' ', 1)[0]
@@ -465,7 +471,7 @@ def command_controller(message):
 			botones = []
 			containers = docker_manager.list_containers(comando=comando)
 			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status)} {container.name}', callback_data=f'run|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name)} {container.name}', callback_data=f'run|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
 
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
@@ -480,7 +486,7 @@ def command_controller(message):
 			for container in containers:
 				if CONTAINER_NAME == container.name:
 					continue
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status)} {container.name}', callback_data=f'stop|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name)} {container.name}', callback_data=f'stop|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
 
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
@@ -495,7 +501,7 @@ def command_controller(message):
 			for container in containers:
 				if CONTAINER_NAME == container.name:
 					continue
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status)} {container.name}', callback_data=f'restart|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name)} {container.name}', callback_data=f'restart|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
 
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
@@ -508,7 +514,7 @@ def command_controller(message):
 			botones = []
 			containers = docker_manager.list_containers(comando=comando)
 			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status)} {container.name}', callback_data=f'logs|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name)} {container.name}', callback_data=f'logs|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
 
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
@@ -521,7 +527,7 @@ def command_controller(message):
 			botones = []
 			containers = docker_manager.list_containers(comando=comando)
 			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status)} {container.name}', callback_data=f'logfile|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name)} {container.name}', callback_data=f'logfile|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
 
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
@@ -534,7 +540,7 @@ def command_controller(message):
 			botones = []
 			containers = docker_manager.list_containers(comando=comando)
 			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status)} {container.name}', callback_data=f'compose|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name)} {container.name}', callback_data=f'compose|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
 
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
@@ -547,7 +553,7 @@ def command_controller(message):
 			botones = []
 			containers = docker_manager.list_containers(comando=comando)
 			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status)} {container.name}', callback_data=f'info|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name)} {container.name}', callback_data=f'info|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
 
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
@@ -560,11 +566,24 @@ def command_controller(message):
 			botones = []
 			containers = docker_manager.list_containers(comando=comando)
 			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status)} {container.name}', callback_data=f'confirmDelete|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name)} {container.name}', callback_data=f'confirmDelete|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
 
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
 			send_message(message=get_text("delete_container"), reply_markup=markup)
+	elif comando in ('/update', f'/update@{bot.get_me().username}'):
+		if container_id:
+			confirm_update(container_id, container_name)
+		else:
+			markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
+			botones = []
+			containers = docker_manager.list_containers(comando=comando)
+			for container in containers:
+				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name)} {container.name}', callback_data=f'confirmUpdate|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+
+			markup.add(*botones)
+			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
+			send_message(message=get_text("update_container"), reply_markup=markup)
 	elif comando in ('/version', f'/version@{bot.get_me().username}'):
 		x = send_message(message=get_text("version", VERSION))
 		time.sleep(15)
@@ -616,10 +635,7 @@ def button_controller(call):
 	
 	# CONFIRM UPDATE
 	elif comando == "confirmUpdate":
-		markup = InlineKeyboardMarkup(row_width = 1)
-		markup.add(InlineKeyboardButton(get_text("button_confirm_update"), callback_data=f"update|{containerId}|{containerName}"))
-		markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
-		send_message(message=get_text("confirm_update", containerName), reply_markup=markup)
+		confirm_update(containerId, containerName)
 	
 	# UPDATE
 	elif comando == "update":
@@ -713,16 +729,19 @@ def confirm_delete(containerId, containerName):
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 	send_message(message=get_text("confirm_delete", containerName), reply_markup=markup)
 
+def confirm_update(containerId, containerName):
+	markup = InlineKeyboardMarkup(row_width = 1)
+	markup.add(InlineKeyboardButton(get_text("button_confirm_update"), callback_data=f"update|{containerId}|{containerName}"))
+	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+	send_message(message=get_text("confirm_update", containerName), reply_markup=markup)
+
 def is_admin(userId):
 	return str(userId) == str(TELEGRAM_ADMIN)
 
 def display_containers(containers):
 	result = "```\n"
 	for container in containers:
-		if CONTAINER_NAME == container.name:
-			result += f"👑 {container.name}"
-		else:
-			result += f"{get_status_emoji(container.status)} {container.name}"
+		result += f"{get_status_emoji(container.status, container.name)} {container.name}"
 		image_with_tag = container.attrs['Config']['Image']
 		update = False
 		if CHECK_UPDATES:
@@ -739,7 +758,7 @@ def display_containers(containers):
 	result += "```"
 	return result
 
-def get_status_emoji(statusStr):
+def get_status_emoji(statusStr, containerName):
 	status = "🟢"
 	if statusStr == "exited" or statusStr == "dead":
 		status = "🔴"
@@ -749,6 +768,9 @@ def get_status_emoji(statusStr):
 		status = "🟠"
 	elif statusStr == "created":
 		status = "🔵"
+	
+	if CONTAINER_NAME == containerName:
+		status = "👑"
 	return status
 
 def get_container_id_by_name(container_name):
@@ -878,6 +900,7 @@ if __name__ == '__main__':
 		telebot.types.BotCommand("/stop", get_text("menu_stop")),
 		telebot.types.BotCommand("/restart", get_text("menu_restart")),
 		telebot.types.BotCommand("/delete", get_text("menu_delete")),
+		telebot.types.BotCommand("/update", get_text("menu_update")),
 		telebot.types.BotCommand("/logs", get_text("menu_logs")),
 		telebot.types.BotCommand("/logfile", get_text("menu_logfile")),
 		telebot.types.BotCommand("/compose", get_text("menu_compose")),
@@ -885,5 +908,11 @@ if __name__ == '__main__':
 		telebot.types.BotCommand("/version", get_text("menu_version"))
 		])
 	delete_updater()
-	send_message(message=f"🫡 *{CONTAINER_NAME}\n{get_text('active')}*\n_⚙️ v{VERSION}_")
+	starting_message = f"🫡 *{CONTAINER_NAME}\n{get_text('active')}*"
+	if CHECK_UPDATES:
+		starting_message += f"\n✅ {get_text('check_for_updates')}"
+	else:
+		starting_message += f"\n❌ {get_text('check_for_updates')}"
+	starting_message += f"\n_⚙️ v{VERSION}_"
+	send_message(message=starting_message)
 	bot.infinity_polling(timeout=60)
