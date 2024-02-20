@@ -40,7 +40,7 @@ Lleva el control de tus contenedores docker desde un único lugar.
 ### Anotaciones
 La función de extracción de docker-compose se encuentra en una fase temprana de desarrollo y puede contener errores.
 
-### Ejemplo de Docker-Compose
+### Ejemplo de Docker-Compose para su ejecución normal
 ```yaml
 version: '3.3'
 services:
@@ -68,8 +68,8 @@ services:
 ### Agradecimientos
 Traducción al neerlandés: [ManCaveMedia](https://github.com/ManCaveMedia)
 
-## Como ejecutarlo en local
-Para su ejecución en local se necesitan crear 2 ficheros llamados respectivamente Dockerfile_local y docker-compose.yaml
+## Como ejecutarlo en local (solo para desarrolladores)
+Para su ejecución en local y probar nuevos cambios de código, se necesitan crear 2 ficheros llamados respectivamente Dockerfile_local y docker-compose.yaml
 
 La estructura de carpetas debe quedar:
 ```
@@ -87,7 +87,7 @@ docker-controller-bot/
         └── nl.json
 ```
 
-Dockerfile_local:
+Dockerfile_local
 ```
 FROM alpine:3.18.6
 
@@ -141,4 +141,5 @@ services:
 Es necesario establecer un `TELEGRAM_TOKEN` y un `TELEGRAM_ADMIN` correctos y diferentes al de la ejecución normal.
 
 Para levantarlo habría que ejecutar en esa ruta: `docker compose up -d`
+
 Para detenerlo y probar nuevos cambios habría que ejecutar en esa ruta: `docker compose down --rmi`
