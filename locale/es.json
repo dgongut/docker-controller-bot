@@ -45,6 +45,7 @@
     "debug_container_deleting_old_container": "Eliminando contenedor antiguo $1",
     "debug_deleting_image": "Eliminando la imagen [$1]",
     "debug_image_can_not_be_deleted": "La imagen local de $1 no puede eliminarse. Motivo: [$2]",
+    "debug_ignore_check_for_update": "Comprobando actualización: omitiendo $1",
     "debug_checking_update": "Comprobando actualización: $1 ($2): IMAGEN LOCAL [$3] - IMAGEN REMOTA [$4]",
     "debug_update_detected": "¡Actualización de $1 detectada! Eliminando la imagen descargada [$2]",
     "debug_update_already_notified": "Ya se avisó de esta actualización. No se notifica.",

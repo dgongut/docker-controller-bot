@@ -45,6 +45,7 @@
     "debug_container_deleting_old_container": "Deleting old container $1",
     "debug_deleting_image": "Deleting image [$1]",
     "debug_image_can_not_be_deleted": "Local image of $1 cannot be deleted. Reason: [$2]",
+    "debug_ignore_check_for_update": "Checking update: omitting $1",
     "debug_checking_update": "Checking update: $1 ($2): LOCAL IMAGE [$3] - REMOTE IMAGE [$4]",
     "debug_update_detected": "$1 update detected! Deleting downloaded image [$2]",
     "debug_update_already_notified": "This update has already been reported. It is not notified.",

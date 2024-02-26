@@ -14,7 +14,7 @@ import threading
 import pickle
 import json
 
-VERSION = "2.1.0"
+VERSION = "2.1.1"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -110,7 +110,8 @@ class DockerManager:
 			containers = self.client.containers.list(filters=filters)
 		else:
 			containers = self.client.containers.list(all=True)
-		sorted_containers = sorted(containers, key=lambda x: x.name.lower())
+		status_order = {'running': 0, 'restarting': 1, 'paused': 2, 'exited': 3, 'created': 4, 'dead': 5}
+		sorted_containers = sorted(containers, key=lambda x: (0 if x.name == CONTAINER_NAME else 1, status_order.get(x.status, 6), x.name.lower()))
 		return sorted_containers
 
 	def stop_container(self, container_id, container_name):
@@ -390,6 +391,10 @@ class DockerUpdateMonitor:
 		while True:
 			containers = self.client.containers.list(all=True)
 			for container in containers:
+				labels = container.labels
+				if LABEL_IGNORE_CHECK_UPDATES in labels:
+					debug(get_text("debug_ignore_check_for_update", container.name))
+					continue
 				container_attrs = container.attrs['Config']
 				image_with_tag = container_attrs['Image']
 				try:

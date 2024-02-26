@@ -45,6 +45,7 @@
    "debug_container_deleting_old_container": "Oude container $1 verwijderen",
    "debug_deleting_image": "image [$1] verwijderen",
    "debug_image_can_not_be_deleted": "Lokale image van $1 kan niet worden verwijderd. Reden: [$2]",
+   "debug_ignore_check_for_update": "Update controleren: overslaan $1",
    "debug_checking_update": "Update controleren: $1 ($2): LOKALE IMAGE [$3] - EXTERNE IMAGE [$4]",
    "debug_update_detected": "Update gedetecteerd voor $1! Gedownloade image [$2] verwijderen",
    "debug_update_already_notified": "Deze update is al gemeld. Er wordt geen melding van gemaakt.",

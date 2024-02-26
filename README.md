@@ -65,6 +65,9 @@ services:
         tty: true
 ```
 
+### Funciones Extra
+Añadiendo la etiqueta `DCB-Ignore-Check-Updates` a un contenedor, no se comprobarán actualizaciones para él.
+
 ### Agradecimientos
 Traducción al neerlandés: [ManCaveMedia](https://github.com/ManCaveMedia)
 
