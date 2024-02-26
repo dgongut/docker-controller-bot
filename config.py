@@ -14,3 +14,15 @@ CONTAINER_ID_LENGTH = 5
 LANGUAGE = os.environ.get("LANGUAGE")
 EXTENDED_MESSAGES_RAW = os.environ.get("EXTENDED_MESSAGES")
 LABEL_IGNORE_CHECK_UPDATES = "DCB-Ignore-Check-Updates"
+
+docker_architectures = {
+    "x86_64": "amd64",
+    "i386": "i386",
+    "386": "386",
+    "amd64": "amd64",
+    "arm": "arm32v7",
+    "arm64": "arm64",
+    "ppc64le": "ppc64le",
+    "s390x": "s390x",
+    "unknown": "unknown",
+}

@@ -18,6 +18,7 @@ Lleva el control de tus contenedores docker desde un único lugar.
  - ✅ Notificaciones cuando un contenedor se cae o se inicia
  - ✅ Notificaciones cuando un contenedor tiene una actualización pendiente
  - ✅ Actualizaciones de los contenedores
+ - ✅ Cambiar el tag (rollback o actualización)
  - ✅ Soporte de idiomas (Spanish, English, Dutch)
 
 ¿Lo buscas en [docker](https://hub.docker.com/r/dgongut/docker-controller-bot)?
