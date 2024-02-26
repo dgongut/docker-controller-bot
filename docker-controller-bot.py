@@ -15,7 +15,7 @@ import pickle
 import json
 import requests
 
-VERSION = "2.2.1"
+VERSION = "2.2.2"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -685,6 +685,10 @@ def button_controller(call):
 	elif comando == "info":
 		info(containerId, containerName)
 
+	# CONFIRM UPDATE
+	elif comando == "confirmUpdate":
+		confirm_update(containerId, containerName)
+
 	# CHECK UPDATE
 	elif comando == "checkUpdate":
 		docker_manager.force_check_update(containerId)
@@ -808,6 +812,10 @@ def change_tag_container(containerId, containerName):
 	container = client.containers.get(containerId)
 	repo = container.attrs['Config']['Image'].split(":")[0]
 	tags = get_docker_tags(repo)
+	if not tags:
+		send_message(message=get_text("error_getting_tags", containerName))
+		return
+
 	botones = []
 	for tag in tags:
 		botones.append(InlineKeyboardButton(tag, callback_data=f"confirmChangeTag|{containerId}|{containerName}|{tag}"))
@@ -815,6 +823,12 @@ def change_tag_container(containerId, containerName):
 	markup.add(*botones)
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 	send_message(message=get_text("change_tag", containerName), reply_markup=markup)
+
+def confirm_update(containerId, containerName):
+	markup = InlineKeyboardMarkup(row_width = 1)
+	markup.add(InlineKeyboardButton(get_text("button_confirm_update"), callback_data=f"update|{containerId}|{containerName}"))
+	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+	send_message(message=get_text("confirm_update", containerName), reply_markup=markup)
 
 def is_admin(userId):
 	return str(userId) == str(TELEGRAM_ADMIN)
@@ -994,7 +1008,7 @@ def get_docker_tags(repo_name):
 			return filtered_tags	
 		raise Exception(f'Error calling to {url}: {response.status_code}')
 	except Exception as e:
-		error(get_text("error_getting_tags", repo_name, str(e)))
+		error(get_text("error_getting_tags_with_error", repo_name, str(e)))
 		return None
 
 if __name__ == '__main__':
