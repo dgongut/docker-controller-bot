@@ -109,7 +109,7 @@
    "stopped_container": "🔴 Container *$1* is *gestopt*",
    "created_container": "🔵 Container *$1* is *aangemaakt*",
    "available_update": "⬆️ *Update beschikbaar*:\n*$1*",
-   "already_updated": "✅ *$1* container was al up to date",
+   "already_updated": "✅ *$1* container is up to date",
    "start_a_container": "🟢 Klik op een container om deze te starten",
    "stop_a_container": "🔴 Klik op een container om deze te stoppen",
    "restart_a_container": "🟢 Klik op een container om deze opnieuw te starten",
