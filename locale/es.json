@@ -109,7 +109,7 @@
     "stopped_container": "🔴 El contenedor *$1* se ha *detenido*",
     "created_container": "🔵 El contenedor *$1* se ha *creado*",
     "available_update": "⬆️ *Actualización disponible*:\n*$1*",
-    "already_updated": "✅ El contenedor *$1* ya se encuentra actualizado",
+    "already_updated": "✅ El contenedor *$1* está actualizado",
     "start_a_container": "🟢 Pulsa en un contenedor para iniciarlo",
     "stop_a_container": "🔴 Pulsa en un contenedor para detenerlo",
     "restart_a_container": "🟢 Pulsa en un contenedor para reiniciarlo",
