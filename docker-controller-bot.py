@@ -15,7 +15,7 @@ import pickle
 import json
 import requests
 
-VERSION = "2.2.2"
+VERSION = "2.2.3"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -478,7 +478,14 @@ def command_controller(message):
 	debug(f"COMMAND: {comando}")
 	debug(f"USER: {userId}")
 	debug(f"CHAT/GROUP: {message.chat.id}")
-		
+	message_thread_id = message.message_thread_id
+	if not message_thread_id:
+		message_thread_id = 1
+	debug(f"THREAD ID: {message_thread_id}")
+
+	if message_thread_id != TELEGRAM_THREAD:
+		return
+
 	if not is_admin(userId):
 		warning(get_text("warning_not_admin", userId, message.from_user.username))
 		send_message(chat_id=userId, message=get_text("user_not_admin"))
