@@ -36,6 +36,7 @@
     "error_getting_architecture": "Error al obtener la arquitectura del sistema. Error: [$1]",
     "error_getting_tags": "❌ No se han podido obtener los tags de *$1*. Repositorio no soportado en este momento.",
     "error_getting_tags_with_error": "Error al obtener los tags de $1. Error: [$2]",
+    "error_stats_not_available": "Estadísticas del contenedor $1 no disponibles. Error: [$2]",
     "debug_update_not_cached": "Se ha consultado por la actualización de $1 y no está disponible: [$2]",
     "debug_updating_container": "Actualizando contenedor $1",
     "debug_pulling_image": "Haciendo pull de la imagen [$1]",

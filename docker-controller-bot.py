@@ -15,7 +15,7 @@ import pickle
 import json
 import requests
 
-VERSION = "2.2.3"
+VERSION = "2.2.4"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -177,33 +177,46 @@ class DockerManager:
 		try:
 			container = self.client.containers.get(container_id)
 			if container.status == "running":
-				stats = container.stats(stream=False)
-				cpu_delta = stats["cpu_stats"]["cpu_usage"]["total_usage"] - stats["precpu_stats"]["cpu_usage"]["total_usage"]
-				system_cpu_delta = stats["cpu_stats"]["system_cpu_usage"] - stats["precpu_stats"]["system_cpu_usage"]
-				online_cpus = stats["cpu_stats"]["online_cpus"]
-				cpu_usage_percentage = (cpu_delta / system_cpu_delta) * online_cpus * 100 if system_cpu_delta > 0 and cpu_delta > 0 else 0.0
-				used_cpu = round(cpu_usage_percentage, 2)
-				memory_stats = stats["memory_stats"]
-				stats = memory_stats["stats"]
-				active_anon = stats["active_anon"]
-				active_file = stats["active_file"]
-				inactive_anon = stats["inactive_anon"]
-				inactive_file = stats["inactive_file"]
-				memory_used = active_anon + active_file + inactive_anon + inactive_file
-				used_ram_mb = memory_used / (1024 * 1024)
-				limit_mb = memory_stats["limit"] / (1024 * 1024)
-				memory_usage_percentage = round((used_ram_mb / limit_mb) * 100, 2)
-				if used_ram_mb > 1024:
-					used_ram_gb = used_ram_mb / 1024
-					limit_mb_gb = limit_mb / 1024
-					ram = f"{used_ram_gb:.2f}/{limit_mb_gb:.2f} GB ({memory_usage_percentage}%)"
-				else:
-					ram = f"{used_ram_mb:.2f}/{limit_mb:.2f} MB ({memory_usage_percentage}%)"
-			
+				used_cpu = 0.0
+				ram = "N/A"
+				try:
+					stats = container.stats(stream=False)
+					
+					if "cpu_stats" in stats and "precpu_stats" in stats:
+						cpu_delta = stats["cpu_stats"]["cpu_usage"].get("total_usage", 0) - stats["precpu_stats"]["cpu_usage"].get("total_usage", 0)
+						system_cpu_delta = stats["cpu_stats"]["system_cpu_usage"] - stats["precpu_stats"]["system_cpu_usage"]
+						online_cpus = stats["cpu_stats"]["online_cpus"]
+						if system_cpu_delta > 0 and cpu_delta > 0:
+							cpu_usage_percentage = (cpu_delta / system_cpu_delta) * online_cpus * 100
+							used_cpu = round(cpu_usage_percentage, 2)
+					
+					if "memory_stats" in stats:
+						memory_stats = stats["memory_stats"]
+						stats = memory_stats.get("stats", {})
+						active_anon = stats.get("active_anon", 0)
+						active_file = stats.get("active_file", 0)
+						inactive_anon = stats.get("inactive_anon", 0)
+						inactive_file = stats.get("inactive_file", 0)
+						memory_used = active_anon + active_file + inactive_anon + inactive_file
+						used_ram_mb = memory_used / (1024 * 1024)
+						if "limit" in memory_stats and memory_stats["limit"] > 0:
+							limit_mb = memory_stats["limit"] / (1024 * 1024)
+							memory_usage_percentage = round((used_ram_mb / limit_mb) * 100, 2)
+							if used_ram_mb > 1024:
+								used_ram_gb = used_ram_mb / 1024
+								limit_mb_gb = limit_mb / 1024
+								ram = f"{used_ram_gb:.2f}/{limit_mb_gb:.2f} GB ({memory_usage_percentage}%)"
+							else:
+								ram = f"{used_ram_mb:.2f}/{limit_mb:.2f} MB ({memory_usage_percentage}%)"
+						else:
+							ram = f"{used_ram_mb:.2f} MB"
+				except Exception as e:
+					error(get_text("error_stats_not_available", container_name, e))
+
 			image_status = ""
 			possible_update = False
-			container_attrs = container.attrs['Config']
-			image_with_tag = container_attrs['Image']
+			container_attrs = container.attrs.get('Config', {})
+			image_with_tag = container_attrs.get('Image', 'N/A')
 			if CHECK_UPDATES:
 				try:
 					image_status = read_cache_item(image_with_tag, container_name)
@@ -216,8 +229,10 @@ class DockerManager:
 			text = '```\n'
 			text += f'{get_text("status")}: {get_status_emoji(container.status, container_name)} ({container.status})\n\n'
 			if container.status == "running":
-				text += f"- CPU: {used_cpu}%\n\n"
-				text += f"- RAM: {ram}\n\n"
+				if 0.0 != used_cpu:
+					text += f"- CPU: {used_cpu}%\n\n"
+				if ("0.00 MB") not in ram:
+					text += f"- RAM: {ram}\n\n"
 			text += f'- {get_text("container_id")}: {container_id}\n\n'
 			text += f'- {get_text("used_image")}:\n{image_with_tag}\n\n'
 			text += f'- {get_text("image_id")}: {container.image.id.replace("sha256:", "")[:CONTAINER_ID_LENGTH]}'
@@ -226,8 +241,8 @@ class DockerManager:
 			text += "```"
 			return f'📜 {get_text("information")} *{container_name}*:\n{text}', possible_update
 		except Exception as e:
-			error(get_text("error_showing_compose_container_with_error", container_name, e))
-			return get_text("error_showing_compose_container", container_name), False
+			error(get_text("error_showing_info_container_with_error", container_name, e))
+			return get_text("error_showing_info_container", container_name), False
 
 	def update(self, container_id, container_name, message, bot, tag=None):
 		try:

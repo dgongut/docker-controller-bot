@@ -36,6 +36,7 @@
    "error_getting_architecture": "Fout bij het verkrijgen van systeemarchitectuur. Fout: [$1]",
    "error_getting_tags": "❌ Kon geen tags ophalen van *$1*. Repository wordt op dit moment niet ondersteund.",
    "error_getting_tags_with_error": "Fout bij het verkrijgen van $1 tags. Fout: [$2]",
+   "error_stats_not_available": "Container $1 statistieken niet beschikbaar. Fout: [$2]",
    "debug_update_not_cached": "Opgevraagd voor update $1 en deze is niet beschikbaar: [$2]",
    "debug_updating_container": "Container $1 wordt bijgewerkt",
    "debug_pulling_image": "Image ophalen [$1]",
