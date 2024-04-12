@@ -59,6 +59,7 @@ services:
             #- EXTENDED_MESSAGES=0
         volumes:
             - /var/run/docker.sock:/var/run/docker.sock
+            - /etc/localtime:/etc/localtime:ro
         image: dgongut/docker-controller-bot:latest
         container_name: docker-controller-bot
         restart: always
