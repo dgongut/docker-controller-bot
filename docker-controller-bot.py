@@ -15,7 +15,7 @@ import pickle
 import json
 import requests
 
-VERSION = "2.2.4"
+VERSION = "2.3.0"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -95,6 +95,9 @@ for key in DIR:
 	except:
 		pass
 
+# Instanciamos el bot
+bot = telebot.TeleBot(TELEGRAM_TOKEN)
+
 class DockerManager:
 	def __init__(self):
 		self.client = docker.from_env()
@@ -121,6 +124,8 @@ class DockerManager:
 				return get_text("error_can_not_do_that")
 			container = self.client.containers.get(container_id)
 			container.stop()
+			if self.has_label(container_id, container_name, LABEL_IGNORE_STATUS):
+				send_message(message=get_text("stopped_container", container_name))
 			return None
 		except Exception as e:
 			error(get_text("error_stopping_container_with_error", container_name, e))
@@ -132,6 +137,8 @@ class DockerManager:
 				return get_text("error_can_not_do_that")
 			container = self.client.containers.get(container_id)
 			container.restart()
+			if self.has_label(container_id, container_name, LABEL_IGNORE_STATUS):
+				send_message(message=get_text("restarted_container", container_name))
 			return None
 		except Exception as e:
 			error(get_text("error_restarting_container_with_error", container_name, e))
@@ -143,6 +150,8 @@ class DockerManager:
 				return get_text("error_can_not_do_that")
 			container = self.client.containers.get(container_id)
 			container.start()
+			if self.has_label(container_id, container_name, LABEL_IGNORE_STATUS):
+				send_message(message=get_text("started_container", container_name))
 			return None
 		except Exception as e:
 			error(get_text("error_starting_container_with_error", container_name, e))
@@ -359,7 +368,6 @@ class DockerManager:
 			remote_image = self.client.images.pull(image_with_tag)
 			debug(get_text("debug_checking_update", container.name, image_with_tag, local_image.replace('sha256:', '')[:CONTAINER_ID_LENGTH], remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]))
 			if local_image != remote_image.id:
-				old_image_status = read_cache_item(image_with_tag, container.name)
 				debug(get_text("debug_update_detected", container.name, remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]))
 				try:
 					self.client.images.remove(remote_image.id)
@@ -391,6 +399,20 @@ class DockerManager:
 		except Exception as e:
 			error(get_text("error_deleting_container_with_error", container_name, e))
 			return get_text("error_deleting_container", container_name)
+	
+	def has_label(self, container_id, container_name, label):
+		try:
+			container = self.client.containers.get(container_id)
+			labels = container.labels
+			if label in labels:
+				return True
+			return False
+		except Exception as e:
+			error(get_text("error_checking_label_with_error", label,container_name, e))
+			return False
+		
+# Instanciamos el DockerManager
+docker_manager = DockerManager()
 
 class DockerEventMonitor:
 	def __init__(self):
@@ -401,6 +423,9 @@ class DockerEventMonitor:
 			if 'status' in event and 'Actor' in event and 'Attributes' in event['Actor']:
 				container_name = event['Actor']['Attributes'].get('name', '')
 				status = event['status']
+				container_id = get_container_id_by_name(container_name)
+				if container_id and docker_manager.has_label(container_id=container_id, container_name=container_name, label=LABEL_IGNORE_STATUS):
+					return
 
 				message = None
 				if status == "start":
@@ -444,7 +469,16 @@ class DockerUpdateMonitor:
 					local_image = container.image.id
 					remote_image = self.client.images.pull(image_with_tag)
 					debug(get_text("debug_checking_update", container.name, image_with_tag, local_image.replace('sha256:', '')[:CONTAINER_ID_LENGTH], remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]))
-					if local_image != remote_image.id:
+					if local_image != remote_image.id: # Actualización detectada
+						if LABEL_AUTO_UPDATE in labels:
+							if EXTENDED_MESSAGES:
+								send_message(message=get_text("auto_update", container.name))
+							debug(get_text("debug_auto_update", container.name))
+							x = send_message(message=get_text("updating", container.name))
+							result = docker_manager.update(container_id=container.id, container_name=container.name, message=x, bot=bot)
+							delete_message(x.message_id)
+							send_message(message=result)
+							continue
 						old_image_status = read_cache_item(image_with_tag, container.name)
 						image_status = get_text("NEED_UPDATE_CONTAINER_TEXT")
 						debug(get_text("debug_update_detected", container.name, remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]))
@@ -459,7 +493,7 @@ class DockerUpdateMonitor:
 						markup = InlineKeyboardMarkup(row_width = 1)
 						markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}"))
 						send_message(message=get_text("available_update", container.name), reply_markup=markup)
-					else:
+					else: # Contenedor actualizado
 						image_status = get_text("UPDATED_CONTAINER_TEXT")
 				except Exception as e:
 					error(get_text("error_checking_update_with_error", e))
@@ -475,11 +509,6 @@ class DockerUpdateMonitor:
 		except Exception as e:
 			error(get_text("error_update_daemon", e))
 			self.demonio_update()
-		
-
-# Instanciamos el bot y el enlace con el docker
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
-docker_manager = DockerManager()
 
 @bot.message_handler(commands=["start", "list", "run", "stop", "restart", "delete", "checkupdate", "changetag", "logs", "logfile", "compose", "info", "version"])
 def command_controller(message):
@@ -489,7 +518,7 @@ def command_controller(message):
 	container_name = " ".join(message.text.split()[1:])
 	container_id = None
 	if container_name:
-		container_id = get_container_id_by_name(container_name)
+		container_id = get_container_id_by_name(container_name, debugging=True)
 	debug(f"COMMAND: {comando}")
 	debug(f"USER: {userId}")
 	debug(f"CHAT/GROUP: {message.chat.id}")
@@ -840,7 +869,12 @@ def change_tag_container(containerId, containerName):
 
 	botones = []
 	for tag in tags:
-		botones.append(InlineKeyboardButton(tag, callback_data=f"confirmChangeTag|{containerId}|{containerName}|{tag}"))
+		callback_data = f"confirmChangeTag|{containerId}|{containerName}|{tag}"
+		if len(callback_data) <= 64:
+			botones.append(InlineKeyboardButton(tag, callback_data=f"confirmChangeTag|{containerId}|{containerName}|{tag}"))
+		else:
+			warning(get_text("error_tag_name_too_long", containerName, tag))
+		
 
 	markup.add(*botones)
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
@@ -890,14 +924,17 @@ def get_status_emoji(statusStr, containerName):
 		status = "👑"
 	return status
 
-def get_container_id_by_name(container_name):
-	debug(get_text("debug_find_container", container_name))
+def get_container_id_by_name(container_name, debugging=False):
+	if debugging:
+		debug(get_text("debug_find_container", container_name))
 	containers = docker_manager.list_containers()
 	for container in containers:
 		if container.name == container_name:
-			debug(get_text("debug_container_found", container_name))
+			if debugging:
+				debug(get_text("debug_container_found", container_name))
 			return container.id[:CONTAINER_ID_LENGTH]
-	debug(get_text("debug_container_not_found", container_name))
+	if debugging:
+		debug(get_text("debug_container_not_found", container_name))
 	return None
 
 def sanitize_text_for_filename(text):

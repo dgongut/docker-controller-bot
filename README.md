@@ -66,8 +66,10 @@ services:
         tty: true
 ```
 
-### Funciones Extra
-Añadiendo la etiqueta `DCB-Ignore-Check-Updates` a un contenedor, no se comprobarán actualizaciones para él.
+### Funciones Extra mediante Labels/Etiquetas en otros contenedores
+ - Añadiendo la etiqueta `DCB-Ignore-Check-Updates` a un contenedor, no se comprobarán actualizaciones para él.
+ - Añadiendo la etiqueta `DCB-Ignore-Status` a un contenedor, no se notificará cuando se para o arranca excepto si se hace manualmente desde el bot.
+ - Añadiendo la etiqueta `DCB-Auto-Update` a un contenedor, se actualizará automáticamente sin preguntar.
 
 ### Agradecimientos
 Traducción al neerlandés: [ManCaveMedia](https://github.com/ManCaveMedia)
@@ -136,6 +138,7 @@ services:
             #- EXTENDED_MESSAGES=0
         volumes:
             - /var/run/docker.sock:/var/run/docker.sock:ro
+            - /etc/localtime:/etc/localtime:ro
         build:
           context: .
           dockerfile: ./Dockerfile_local

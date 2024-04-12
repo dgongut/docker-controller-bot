@@ -14,6 +14,8 @@ CONTAINER_ID_LENGTH = 5
 LANGUAGE = os.environ.get("LANGUAGE")
 EXTENDED_MESSAGES_RAW = os.environ.get("EXTENDED_MESSAGES")
 LABEL_IGNORE_CHECK_UPDATES = "DCB-Ignore-Check-Updates"
+LABEL_IGNORE_STATUS = "DCB-Ignore-Status"
+LABEL_AUTO_UPDATE = "DCB-Auto-Update"
 
 docker_architectures = {
     "x86_64": "amd64",
