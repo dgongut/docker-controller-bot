@@ -15,7 +15,7 @@ import pickle
 import json
 import requests
 
-VERSION = "2.3.0"
+VERSION = "2.3.1"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -425,7 +425,7 @@ class DockerEventMonitor:
 				status = event['status']
 				container_id = get_container_id_by_name(container_name)
 				if container_id and docker_manager.has_label(container_id=container_id, container_name=container_name, label=LABEL_IGNORE_STATUS):
-					return
+					continue
 
 				message = None
 				if status == "start":
@@ -510,7 +510,7 @@ class DockerUpdateMonitor:
 			error(get_text("error_update_daemon", e))
 			self.demonio_update()
 
-@bot.message_handler(commands=["start", "list", "run", "stop", "restart", "delete", "checkupdate", "changetag", "logs", "logfile", "compose", "info", "version"])
+@bot.message_handler(commands=["start", "list", "run", "stop", "restart", "delete", "checkupdate", "changetag", "logs", "logfile", "compose", "info", "version", "donate"])
 def command_controller(message):
 	userId = message.from_user.id
 	comando = message.text.split(' ', 1)[0]
@@ -686,6 +686,11 @@ def command_controller(message):
 		time.sleep(15)
 		delete_message(x.message_id)
 
+	elif comando in ('/donate', f'/donate@{bot.get_me().username}'):
+		x = send_message(message=get_text("donate"))
+		time.sleep(45)
+		delete_message(x.message_id)
+
 
 @bot.callback_query_handler(func=lambda mensaje: True)
 def button_controller(call):
@@ -845,7 +850,7 @@ def info(containerId, containerName):
 	send_message(message=result, reply_markup=markup)
 
 def confirm_delete(containerId, containerName):
-	debug(f"Ejecutando [confirmDelete] de [{containerName}]")
+	debug(get_text("run_command_for_container", "confirm_delete", containerName))
 	markup = InlineKeyboardMarkup(row_width = 1)
 	markup.add(InlineKeyboardButton(get_text("button_confirm_delete"), callback_data=f"delete|{containerId}|{containerName}"))
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
@@ -1094,7 +1099,8 @@ if __name__ == '__main__':
 		telebot.types.BotCommand("/logfile", get_text("menu_logfile")),
 		telebot.types.BotCommand("/compose", get_text("menu_compose")),
 		telebot.types.BotCommand("/info", get_text("menu_info")),
-		telebot.types.BotCommand("/version", get_text("menu_version"))
+		telebot.types.BotCommand("/version", get_text("menu_version")),
+		telebot.types.BotCommand("/donate", get_text("menu_donate"))
 		])
 	delete_updater()
 	starting_message = f"🫡 *{CONTAINER_NAME}\n{get_text('active')}*"
