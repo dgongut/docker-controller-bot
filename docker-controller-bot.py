@@ -15,7 +15,7 @@ import pickle
 import json
 import requests
 
-VERSION = "2.3.1"
+VERSION = "2.3.2"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -408,7 +408,7 @@ class DockerManager:
 				return True
 			return False
 		except Exception as e:
-			error(get_text("error_checking_label_with_error", label,container_name, e))
+			warning(get_text("error_checking_label_with_error", label,container_name, e))
 			return False
 		
 # Instanciamos el DockerManager
@@ -423,9 +423,12 @@ class DockerEventMonitor:
 			if 'status' in event and 'Actor' in event and 'Attributes' in event['Actor']:
 				container_name = event['Actor']['Attributes'].get('name', '')
 				status = event['status']
-				container_id = get_container_id_by_name(container_name)
-				if container_id and docker_manager.has_label(container_id=container_id, container_name=container_name, label=LABEL_IGNORE_STATUS):
-					continue
+				try:
+					container_id = get_container_id_by_name(container_name)
+					if container_id and docker_manager.has_label(container_id=container_id, container_name=container_name, label=LABEL_IGNORE_STATUS):
+						continue
+				except:
+					pass # Si no se encuentra es porque el contenedor ya no existe, por lo que se notifica igualmente
 
 				message = None
 				if status == "start":
