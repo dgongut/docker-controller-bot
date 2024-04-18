@@ -14,8 +14,9 @@ import threading
 import pickle
 import json
 import requests
+import sys
 
-VERSION = "2.3.2"
+VERSION = "2.3.3"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -55,6 +56,10 @@ if "abc" == TELEGRAM_TOKEN:
 
 if "abc" == TELEGRAM_ADMIN:
 	error(get_text("error_bot_telegram_admin"))
+	sys.exit(1)
+
+if ANONYMOUS_USER_ID == TELEGRAM_ADMIN:
+	error(get_text("error_bot_telegram_admin_anonymous"))
 	sys.exit(1)
 
 if "abc" == CONTAINER_NAME:
@@ -408,7 +413,7 @@ class DockerManager:
 				return True
 			return False
 		except Exception as e:
-			warning(get_text("error_checking_label_with_error", label,container_name, e))
+			debug(get_text("error_checking_label_with_error", label,container_name, e))
 			return False
 		
 # Instanciamos el DockerManager
@@ -1079,7 +1084,7 @@ def get_docker_tags(repo_name):
 		return None
 
 if __name__ == '__main__':
-	debug(get_text("debug_starting_bot"))
+	debug(get_text("debug_starting_bot", VERSION))
 	eventMonitor = DockerEventMonitor()
 	eventMonitor.demonio_event()
 	debug(get_text("debug_starting_monitor_daemon"))

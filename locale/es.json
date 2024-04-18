@@ -1,6 +1,7 @@
 {
     "error_bot_token": "Se necesita configurar el token del bot con la variable TELEGRAM_TOKEN",
     "error_bot_telegram_admin": "Se necesita configurar el chatId del usuario que interactuará con el bot con la variable TELEGRAM_ADMIN",
+    "error_bot_telegram_admin_anonymous": "No puedes ser anónimo para controlar el bot. En la variable TELEGRAM_ADMIN has de poner tu user id.",
     "error_bot_container_name": "Se necesita configurar el nombre del contenedor en la variable CONTAINER_NAME",
     "error_bot_telegram_thread": "La variable TELEGRAM_THREAD es el tema dentro de un supergrupo, es un valor numérico. Se ha configurado como $1.",
     "error_bot_check_updates": "La variable CHECK_UPDATES indica al programa si realizará o no un chequeo de las actualizaciones, los valores posibles son 1 ó 0. 1 es activo, 0 desactivado.",
@@ -61,7 +62,7 @@
     "debug_find_container": "Buscando id del contenedor [$1]",
     "debug_container_found": "Contenedor [$1] encontrado",
     "debug_container_not_found": "Contenedor [$1] no encontrado",
-    "debug_starting_bot": "Arrancando Docker-Controler-Bot",
+    "debug_starting_bot": "Arrancando Docker-Controler-Bot (v$1)",
     "debug_starting_monitor_daemon": "Demonio de monitorización de estado activado",
     "debug_started_update_daemon": "Demonio de actualizaciones activado",
     "debug_disabled_update_daemon": "Demonio de actualizaciones desactivado",

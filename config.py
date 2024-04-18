@@ -16,6 +16,7 @@ BUTTON_COLUMNS = int(os.environ.get("BUTTON_COLUMNS"))
 UPDATER_IMAGE = "dgongut/docker-container-updater:latest"
 UPDATER_CONTAINER_NAME = "UPDATER-Docker-Controler-Bot"
 CONTAINER_ID_LENGTH = 5
+ANONYMOUS_USER_ID = "1087968824"
 
 # LABELS
 LABEL_IGNORE_CHECK_UPDATES = "DCB-Ignore-Check-Updates"
