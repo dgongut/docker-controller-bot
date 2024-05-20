@@ -96,7 +96,7 @@ docker-controller-bot/
 
 Dockerfile_local
 ```
-FROM alpine:3.18.6
+FROM python:3.11.8
 
 ENV TELEGRAM_TOKEN abc
 ENV TELEGRAM_ADMIN abc
@@ -109,13 +109,14 @@ ENV BUTTON_COLUMNS 2
 ENV LANGUAGE ES
 ENV EXTENDED_MESSAGES 0
 
+RUN pip3 install pyparsing==3.0.9
+RUN pip3 install requests==2.31.0
+RUN pip3 install pyTelegramBotAPI==4.17.0
+RUN pip3 install docker==7.0.0
+RUN pip install PyYAML==6.0.1
+
 WORKDIR /app
 COPY src/ .
-
-RUN apk add --no-cache python3 py3-pip
-RUN pip3 install pyTelegramBotAPI
-RUN pip3 install docker
-RUN pip install PyYAML
 
 ENTRYPOINT ["python3", "docker-controller-bot.py"]
 ```
