@@ -16,7 +16,7 @@ import json
 import requests
 import sys
 
-VERSION = "2.3.3"
+VERSION = "2.4.0"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -102,6 +102,7 @@ for key in DIR:
 
 # Instanciamos el bot
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
+mute_until = 0
 
 class DockerManager:
 	def __init__(self):
@@ -129,7 +130,8 @@ class DockerManager:
 				return get_text("error_can_not_do_that")
 			container = self.client.containers.get(container_id)
 			container.stop()
-			if self.has_label(container_id, container_name, LABEL_IGNORE_STATUS):
+			global mute_until
+			if self.has_label(container_id, container_name, LABEL_IGNORE_STATUS) or time.time() < mute_until:
 				send_message(message=get_text("stopped_container", container_name))
 			return None
 		except Exception as e:
@@ -142,7 +144,8 @@ class DockerManager:
 				return get_text("error_can_not_do_that")
 			container = self.client.containers.get(container_id)
 			container.restart()
-			if self.has_label(container_id, container_name, LABEL_IGNORE_STATUS):
+			global mute_until
+			if self.has_label(container_id, container_name, LABEL_IGNORE_STATUS) or time.time() < mute_until:
 				send_message(message=get_text("restarted_container", container_name))
 			return None
 		except Exception as e:
@@ -155,7 +158,8 @@ class DockerManager:
 				return get_text("error_can_not_do_that")
 			container = self.client.containers.get(container_id)
 			container.start()
-			if self.has_label(container_id, container_name, LABEL_IGNORE_STATUS):
+			global mute_until
+			if self.has_label(container_id, container_name, LABEL_IGNORE_STATUS) or time.time() < mute_until:
 				send_message(message=get_text("started_container", container_name))
 			return None
 		except Exception as e:
@@ -428,6 +432,7 @@ class DockerEventMonitor:
 			if 'status' in event and 'Actor' in event and 'Attributes' in event['Actor']:
 				container_name = event['Actor']['Attributes'].get('name', '')
 				status = event['status']
+
 				try:
 					container_id = get_container_id_by_name(container_name)
 					if container_id and docker_manager.has_label(container_id=container_id, container_name=container_name, label=LABEL_IGNORE_STATUS):
@@ -445,6 +450,11 @@ class DockerEventMonitor:
 				
 				if message:
 					try:
+						global mute_until
+						if time.time() < mute_until:
+							debug(get_text("debug_muted_message", message))
+							continue
+
 						send_message(message=message)
 					except Exception as e:
 						error(get_text("error_sending_updates", message, e))
@@ -518,15 +528,17 @@ class DockerUpdateMonitor:
 			error(get_text("error_update_daemon", e))
 			self.demonio_update()
 
-@bot.message_handler(commands=["start", "list", "run", "stop", "restart", "delete", "checkupdate", "changetag", "logs", "logfile", "compose", "info", "version", "donate"])
+@bot.message_handler(commands=["start", "list", "run", "stop", "restart", "delete", "checkupdate", "changetag", "logs", "logfile", "compose", "mute", "info", "version", "donate"])
 def command_controller(message):
 	userId = message.from_user.id
 	comando = message.text.split(' ', 1)[0]
 	messageId = message.id
-	container_name = " ".join(message.text.split()[1:])
 	container_id = None
-	if container_name:
-		container_id = get_container_id_by_name(container_name, debugging=True)
+	if not comando in ('/mute', f'/mute@{bot.get_me().username}'):
+		container_name = " ".join(message.text.split()[1:])
+		if container_name:
+			container_id = get_container_id_by_name(container_name, debugging=True)
+
 	debug(f"COMMAND: {comando}")
 	debug(f"USER: {userId}")
 	debug(f"CHAT/GROUP: {message.chat.id}")
@@ -535,7 +547,7 @@ def command_controller(message):
 		message_thread_id = 1
 	debug(f"THREAD ID: {message_thread_id}")
 
-	if message_thread_id != TELEGRAM_THREAD:
+	if message_thread_id != TELEGRAM_THREAD and (not message.reply_to_message or message.reply_to_message.from_user.id != bot.get_me().id):
 		return
 
 	if not is_admin(userId):
@@ -637,6 +649,25 @@ def command_controller(message):
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
 			send_message(message=get_text("show_compose"), reply_markup=markup)
+	elif comando in ('/mute', f'/mute@{bot.get_me().username}'):
+		global mute_until
+		try:
+			minutes = int(message.text.split()[1])
+		except (IndexError, ValueError):
+			send_message(message=get_text("error_use_mute_command"))
+			return
+
+		if minutes == 0:
+			unmute()
+			return
+
+		mute_until = time.time() + minutes * 60
+		if minutes == 1:
+			send_message(message=get_text("muted_singular"))
+		else:
+			send_message(message=get_text("muted", minutes))
+
+		threading.Timer(minutes * 60, unmute).start()
 	elif comando in ('/info', f'/info@{bot.get_me().username}'):
 		if container_id:
 			info(container_id, container_name)
@@ -671,7 +702,7 @@ def command_controller(message):
 			botones = []
 			containers = docker_manager.list_containers(comando=comando)
 			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name)} {container.name}', callback_data=f'checkUpdate|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+				botones.append(InlineKeyboardButton(f'{get_update_emoji(container.name)} {container.name}', callback_data=f'checkUpdate|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
 
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
@@ -846,6 +877,11 @@ def compose(containerId, containerName):
 	send_document(document=fichero_temporal, reply_markup=markup, caption=get_text("compose", containerName))
 	delete_message(x.message_id)
 
+def unmute():
+    global mute_until
+    mute_until = 0
+    send_message(message=get_text("unmuted"))
+
 def info(containerId, containerName):
 	debug(get_text("run_command_for_container", "info", containerName))
 	markup = InlineKeyboardMarkup(row_width = 1)
@@ -935,6 +971,22 @@ def get_status_emoji(statusStr, containerName):
 	
 	if CONTAINER_NAME == containerName:
 		status = "👑"
+	return status
+
+def get_update_emoji(containerName):
+	status = "✅"
+
+	container_id = get_container_id_by_name(container_name=containerName)
+	if not container_id:
+		return
+	
+	client = docker.from_env()
+	container = client.containers.get(container_id)
+	image_with_tag = container.attrs['Config']['Image']
+	image_status = read_cache_item(image_with_tag, container.name)
+	if get_text("NEED_UPDATE_CONTAINER_TEXT") in image_status:
+		status = "⬆️"
+
 	return status
 
 def get_container_id_by_name(container_name, debugging=False):
@@ -1106,6 +1158,7 @@ if __name__ == '__main__':
 		telebot.types.BotCommand("/logs", get_text("menu_logs")),
 		telebot.types.BotCommand("/logfile", get_text("menu_logfile")),
 		telebot.types.BotCommand("/compose", get_text("menu_compose")),
+		telebot.types.BotCommand("/mute", get_text("menu_mute")),
 		telebot.types.BotCommand("/info", get_text("menu_info")),
 		telebot.types.BotCommand("/version", get_text("menu_version")),
 		telebot.types.BotCommand("/donate", get_text("menu_donate"))
