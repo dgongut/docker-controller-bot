@@ -1,6 +1,7 @@
 # docker-controller-bot
 [![](https://badgen.net/badge/icon/github?icon=github&label)](https://github.com/dgongut/docker-controller-bot)
 [![](https://badgen.net/badge/icon/docker?icon=docker&label)](https://hub.docker.com/r/dgongut/docker-controller-bot)
+[![](https://badgen.net/badge/icon/telegram?icon=telegram&label)](https://t.me/dockercontrollerbotnews)
 [![Docker Pulls](https://badgen.net/docker/pulls/dgongut/docker-controller-bot?icon=docker&label=pulls)](https://hub.docker.com/r/dgongut/docker-controller-bot/)
 [![Docker Stars](https://badgen.net/docker/stars/dgongut/docker-controller-bot?icon=docker&label=stars)](https://hub.docker.com/r/dgongut/docker-controller-bot/)
 [![Docker Image Size](https://badgen.net/docker/size/dgongut/docker-controller-bot?icon=docker&label=image%20size)](https://hub.docker.com/r/dgongut/docker-controller-bot/)
@@ -22,6 +23,8 @@ Lleva el control de tus contenedores docker desde un único lugar.
  - ✅ Soporte de idiomas (Spanish, English, Dutch)
 
 ¿Lo buscas en [docker](https://hub.docker.com/r/dgongut/docker-controller-bot)?
+
+**NUEVO** Canal de novedades en Telegram: [![](https://badgen.net/badge/icon/telegram?icon=telegram&label)](https://t.me/dockercontrollerbotnews)
 
 ## Configuración en config.py
 
