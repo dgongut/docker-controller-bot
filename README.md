@@ -22,16 +22,16 @@ Lleva el control de tus contenedores docker desde un único lugar.
  - ✅ Cambiar el tag (rollback o actualización)
  - ✅ Soporte de idiomas (Spanish, English, Dutch)
 
-¿Lo buscas en [docker](https://hub.docker.com/r/dgongut/docker-controller-bot)?
+¿Lo buscas en [![](https://badgen.net/badge/icon/docker?icon=docker&label)](https://hub.docker.com/r/dgongut/docker-controller-bot)?
 
-**NUEVO** Canal de novedades en Telegram: [![](https://badgen.net/badge/icon/telegram?icon=telegram&label)](https://t.me/dockercontrollerbotnews)
+**NUEVO** Canal de novedades en [![](https://badgen.net/badge/icon/telegram?icon=telegram&label)](https://t.me/dockercontrollerbotnews)
 
 ## Configuración en config.py
 
 | CLAVE  | OBLIGATORIO | VALOR |
 |:------------- |:---------------:| :-------------|
 |TELEGRAM_TOKEN |✅| Token del bot |
-|TELEGRAM_ADMIN |✅| ChatId del administrador (se puede obtener hablándole al bot Rose escribiendo /id) |
+|TELEGRAM_ADMIN |✅| ChatId del administrador (se puede obtener hablándole al bot Rose escribiendo /id). Admite múltiples administradores separados por comas. Por ejemplo 12345,54431,55944 |
 |TELEGRAM_GROUP |❌| ChatId del grupo. Si este bot va a formar parte de un grupo, es necesario especificar el chatId de dicho grupo |
 |TELEGRAM_THREAD |❌| Thread del tema dentro de un supergrupo; valor numérico (2,3,4..). Por defecto 1. Se utiliza en conjunción con la variable TELEGRAM_GROUP |
 |TELEGRAM_NOTIFICATION_CHANNEL |❌| Canal donde se publicarán exclusivamente los cambios de estado de los contenedores |
