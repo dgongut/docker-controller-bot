@@ -16,7 +16,7 @@ import json
 import requests
 import sys
 
-VERSION = "2.4.0"
+VERSION = "2.5.0"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -58,7 +58,7 @@ if "abc" == TELEGRAM_ADMIN:
 	error(get_text("error_bot_telegram_admin"))
 	sys.exit(1)
 
-if ANONYMOUS_USER_ID == TELEGRAM_ADMIN:
+if str(ANONYMOUS_USER_ID) in str(TELEGRAM_ADMIN).split(','):
 	error(get_text("error_bot_telegram_admin_anonymous"))
 	sys.exit(1)
 
@@ -67,6 +67,9 @@ if "abc" == CONTAINER_NAME:
 	sys.exit(1)
 
 if "abc" == TELEGRAM_GROUP:
+	if len(str(TELEGRAM_ADMIN).split(',')) > 1:
+		error(get_text("error_multiple_admin_only_with_group"))
+		sys.exit(1)
 	TELEGRAM_GROUP = TELEGRAM_ADMIN
 
 try:
@@ -132,7 +135,7 @@ class DockerManager:
 			container.stop()
 			global mute_until
 			if self.has_label(container_id, container_name, LABEL_IGNORE_STATUS) or time.time() < mute_until:
-				send_message(message=get_text("stopped_container", container_name))
+				send_message_to_notification_channel(message=get_text("stopped_container", container_name))
 			return None
 		except Exception as e:
 			error(get_text("error_stopping_container_with_error", container_name, e))
@@ -146,7 +149,7 @@ class DockerManager:
 			container.restart()
 			global mute_until
 			if self.has_label(container_id, container_name, LABEL_IGNORE_STATUS) or time.time() < mute_until:
-				send_message(message=get_text("restarted_container", container_name))
+				send_message_to_notification_channel(message=get_text("restarted_container", container_name))
 			return None
 		except Exception as e:
 			error(get_text("error_restarting_container_with_error", container_name, e))
@@ -160,7 +163,7 @@ class DockerManager:
 			container.start()
 			global mute_until
 			if self.has_label(container_id, container_name, LABEL_IGNORE_STATUS) or time.time() < mute_until:
-				send_message(message=get_text("started_container", container_name))
+				send_message_to_notification_channel(message=get_text("started_container", container_name))
 			return None
 		except Exception as e:
 			error(get_text("error_starting_container_with_error", container_name, e))
@@ -265,7 +268,10 @@ class DockerManager:
 	def update(self, container_id, container_name, message, bot, tag=None):
 		try:
 			if CONTAINER_NAME == container_name:
-				container_environment = {'CONTAINER_NAME': container_name}
+				if not tag:
+					container_environment = {'CONTAINER_NAME': container_name}
+				else:
+					container_environment = {'CONTAINER_NAME': container_name, 'TAG': tag}
 				container_volumes = {'/var/run/docker.sock': {'bind': '/var/run/docker.sock', 'mode': 'rw'}}
 				new_container = self.client.containers.run(
 						UPDATER_IMAGE,
@@ -455,7 +461,7 @@ class DockerEventMonitor:
 							debug(get_text("debug_muted_message", message))
 							continue
 
-						send_message(message=message)
+						send_message_to_notification_channel(message=message)
 					except Exception as e:
 						error(get_text("error_sending_updates", message, e))
 						time.sleep(20) # Posible saturación de Telegram y el send_message lanza excepción
@@ -936,7 +942,7 @@ def confirm_update(containerId, containerName):
 	send_message(message=get_text("confirm_update", containerName), reply_markup=markup)
 
 def is_admin(userId):
-	return str(userId) == str(TELEGRAM_ADMIN)
+	return str(userId) in str(TELEGRAM_ADMIN).split(',')
 
 def display_containers(containers):
 	result = "```\n"
@@ -1028,6 +1034,7 @@ def generate_docker_compose(container):
 	container_ports = container.attrs['HostConfig'].get('PortBindings', None)
 	container_restart_policy = container.attrs['HostConfig'].get('RestartPolicy', None)
 	container_devices = container.attrs['HostConfig'].get('Devices', None)
+	container_labels = container_attrs.get('Labels', None)
 	image_with_tag = container_attrs['Image']
 
 	docker_compose = {
@@ -1046,6 +1053,7 @@ def generate_docker_compose(container):
 	add_if_present(docker_compose['services'][container.name], 'network_mode', container_network_mode)
 	add_if_present(docker_compose['services'][container.name], 'restart', str(container_restart_policy.get('Name', '')))
 	add_if_present(docker_compose['services'][container.name], 'devices', container_devices)
+	add_if_present(docker_compose['services'][container.name], 'labels', container_labels)
 
 	if container_ports:
 		docker_compose['services'][container.name]['ports'] = []
@@ -1076,6 +1084,11 @@ def send_message(chat_id=TELEGRAM_GROUP, message=None, reply_markup=None, parse_
 	except Exception as e:
 		error(get_text("error_sending_message", chat_id, message, e))
 		pass
+
+def send_message_to_notification_channel(chat_id=TELEGRAM_NOTIFICATION_CHANNEL, message=None, reply_markup=None, parse_mode="markdown", disable_web_page_preview=True):
+	if "abc" == TELEGRAM_NOTIFICATION_CHANNEL:
+		return send_message(chat_id=TELEGRAM_GROUP, message=message, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
+	return send_message(chat_id=chat_id, message=message, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
 
 def send_document(chat_id=TELEGRAM_GROUP, document=None, reply_markup=None, caption=None):
 	try:
