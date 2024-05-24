@@ -26,6 +26,8 @@ Lleva el control de tus contenedores docker desde un único lugar.
 
 **NUEVO** Canal de novedades en [![](https://badgen.net/badge/icon/telegram?icon=telegram&label)](https://t.me/dockercontrollerbotnews)
 
+🖼️ Si deseas establecerle el icono al bot de telegram, te dejo [aquí](https://raw.githubusercontent.com/dgongut/pictures/main/Docker-Controller-Bot/Docker-Controller-Bot.png) el icono en alta resolución. Solo tienes que descargarlo y mandárselo al @BotFather en la opción de BotPic.
+
 ## Configuración en config.py
 
 | CLAVE  | OBLIGATORIO | VALOR |
