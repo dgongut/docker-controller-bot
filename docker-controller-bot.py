@@ -16,7 +16,7 @@ import json
 import requests
 import sys
 
-VERSION = "2.5.0"
+VERSION = "2.5.1"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -134,7 +134,7 @@ class DockerManager:
 			container = self.client.containers.get(container_id)
 			container.stop()
 			global mute_until
-			if self.has_label(container_id, container_name, LABEL_IGNORE_STATUS) or time.time() < mute_until:
+			if time.time() < mute_until:
 				send_message_to_notification_channel(message=get_text("stopped_container", container_name))
 			return None
 		except Exception as e:
@@ -148,7 +148,7 @@ class DockerManager:
 			container = self.client.containers.get(container_id)
 			container.restart()
 			global mute_until
-			if self.has_label(container_id, container_name, LABEL_IGNORE_STATUS) or time.time() < mute_until:
+			if time.time() < mute_until:
 				send_message_to_notification_channel(message=get_text("restarted_container", container_name))
 			return None
 		except Exception as e:
@@ -162,7 +162,7 @@ class DockerManager:
 			container = self.client.containers.get(container_id)
 			container.start()
 			global mute_until
-			if self.has_label(container_id, container_name, LABEL_IGNORE_STATUS) or time.time() < mute_until:
+			if time.time() < mute_until:
 				send_message_to_notification_channel(message=get_text("started_container", container_name))
 			return None
 		except Exception as e:
@@ -438,13 +438,6 @@ class DockerEventMonitor:
 			if 'status' in event and 'Actor' in event and 'Attributes' in event['Actor']:
 				container_name = event['Actor']['Attributes'].get('name', '')
 				status = event['status']
-
-				try:
-					container_id = get_container_id_by_name(container_name)
-					if container_id and docker_manager.has_label(container_id=container_id, container_name=container_name, label=LABEL_IGNORE_STATUS):
-						continue
-				except:
-					pass # Si no se encuentra es porque el contenedor ya no existe, por lo que se notifica igualmente
 
 				message = None
 				if status == "start":

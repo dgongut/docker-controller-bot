@@ -76,7 +76,6 @@ services:
 
 ### Funciones Extra mediante Labels/Etiquetas en otros contenedores
  - Añadiendo la etiqueta `DCB-Ignore-Check-Updates` a un contenedor, no se comprobarán actualizaciones para él.
- - Añadiendo la etiqueta `DCB-Ignore-Status` a un contenedor, no se notificará cuando se para o arranca excepto si se hace manualmente desde el bot.
  - Añadiendo la etiqueta `DCB-Auto-Update` a un contenedor, se actualizará automáticamente sin preguntar.
 
 ### Agradecimientos

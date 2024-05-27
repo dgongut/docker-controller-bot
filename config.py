@@ -21,7 +21,6 @@ ANONYMOUS_USER_ID = "1087968824"
 
 # LABELS
 LABEL_IGNORE_CHECK_UPDATES = "DCB-Ignore-Check-Updates"
-LABEL_IGNORE_STATUS = "DCB-Ignore-Status"
 LABEL_AUTO_UPDATE = "DCB-Auto-Update"
 
 docker_architectures = {
