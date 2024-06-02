@@ -17,7 +17,7 @@ import json
 import requests
 import sys
 
-VERSION = "3.0.0"
+VERSION = "3.0.1"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -569,8 +569,11 @@ class DockerScheduleMonitor:
 	def should_run(self, schedule, now):
 		cron = croniter(schedule, now)
 		last_execution = cron.get_prev(datetime)
-		next_execution = cron.get_next(datetime)
-		should_run = last_execution <= now < next_execution and last_execution.minute == now.minute
+		should_run = last_execution.year == now.year and \
+					last_execution.month == now.month and \
+					last_execution.day == now.day and \
+					last_execution.hour == now.hour and \
+					last_execution.minute == now.minute
 		return should_run
 
 	def demonio_schedule(self):
