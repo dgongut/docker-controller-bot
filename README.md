@@ -45,7 +45,7 @@ Lleva el control de tus contenedores docker desde un único lugar.
 |EXTENDED_MESSAGES |❌| Si se desea que muestre más mensajes de información. 0 no - 1 sí. Por defecto 0 | 
 
 ### Anotaciones
-La función de extracción de docker-compose se encuentra en una fase temprana de desarrollo y puede contener errores.
+Será necesario mapear un volumen para almacenar lo que el bot escribe en /app/schedule
 
 ### Ejemplo de Docker-Compose para su ejecución normal
 ```yaml
@@ -65,8 +65,9 @@ services:
             #- LANGUAGE=ES
             #- EXTENDED_MESSAGES=0
         volumes:
-            - /var/run/docker.sock:/var/run/docker.sock
-            - /etc/localtime:/etc/localtime:ro
+            - /var/run/docker.sock:/var/run/docker.sock # NO CAMBIAR
+            - /etc/localtime:/etc/localtime:ro # NO CAMBIAR
+            - /ruta/para/guardar/las/programaciones:/app/schedule # CAMBIAR LA PARTE IZQUIERDA
         image: dgongut/docker-controller-bot:latest
         container_name: docker-controller-bot
         restart: always
@@ -81,7 +82,9 @@ services:
 ### Agradecimientos
 Traducción al neerlandés: [ManCaveMedia](https://github.com/ManCaveMedia)
 
-## Como ejecutarlo en local (solo para desarrolladores)
+---
+
+## Solo para desarrolladores - Ejecución con código local
 Para su ejecución en local y probar nuevos cambios de código, se necesitan crear 2 ficheros llamados respectivamente Dockerfile_local y docker-compose.yaml
 
 La estructura de carpetas debe quedar:
@@ -148,8 +151,9 @@ services:
             #- LANGUAGE=ES
             #- EXTENDED_MESSAGES=0
         volumes:
-            - /var/run/docker.sock:/var/run/docker.sock:ro
-            - /etc/localtime:/etc/localtime:ro
+            - /var/run/docker.sock:/var/run/docker.sock # NO CAMBIAR
+            - /etc/localtime:/etc/localtime:ro # NO CAMBIAR
+            - /ruta/para/guardar/las/programaciones:/app/schedule # CAMBIAR LA PARTE IZQUIERDA
         build:
           context: .
           dockerfile: ./Dockerfile_local

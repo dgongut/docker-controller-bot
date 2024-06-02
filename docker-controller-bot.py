@@ -5,6 +5,7 @@ from telebot import util
 from telebot.types import InlineKeyboardMarkup
 from telebot.types import InlineKeyboardButton
 from datetime import datetime
+from croniter import croniter
 from config import *
 import docker
 import io
@@ -16,7 +17,7 @@ import json
 import requests
 import sys
 
-VERSION = "2.5.1"
+VERSION = "3.0.0"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -33,8 +34,8 @@ if LANGUAGE.lower() not in ("es", "en", "nl"):
 
 # MODULO DE TRADUCCIONES
 def load_locale(locale):
-    with open(f"/app/locale/{locale}.json", "r", encoding="utf-8") as file:
-        return json.load(file)
+	with open(f"/app/locale/{locale}.json", "r", encoding="utf-8") as file:
+		return json.load(file)
 
 def get_text(key, *args):
 	messages = load_locale(LANGUAGE.lower())
@@ -102,6 +103,9 @@ for key in DIR:
 		os.mkdir(DIR[key])
 	except:
 		pass
+
+if not os.path.exists(SCHEDULE_PATH):
+	os.makedirs(SCHEDULE_PATH)
 
 # Instanciamos el bot
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
@@ -527,13 +531,64 @@ class DockerUpdateMonitor:
 			error(get_text("error_update_daemon", e))
 			self.demonio_update()
 
-@bot.message_handler(commands=["start", "list", "run", "stop", "restart", "delete", "checkupdate", "changetag", "logs", "logfile", "compose", "mute", "info", "version", "donate"])
+class DockerScheduleMonitor:
+	def __init__(self):
+		super().__init__()
+		self.cron_file = SCHEDULE_PATH + "/" + SCHEDULE_FILE
+		self.last_run = {}
+		self._ensure_cron_file_exists()
+
+	def _ensure_cron_file_exists(self):
+		if not os.path.exists(self.cron_file):
+			with open(self.cron_file, "w") as file:
+				pass  # Create an empty file
+
+	def run(self):
+		while True:
+			try:
+				with open(self.cron_file, "r") as file:
+					lines = file.readlines()
+
+				now = datetime.now()
+				for line in lines:
+					schedule, command, name = parse_cron_line(line)
+					if schedule and command and name and self.should_run(schedule, now):
+						if command == "run":
+							containerId = get_container_id_by_name(name)
+							run(containerId, name)
+						elif command == "stop":
+							containerId = get_container_id_by_name(name)
+							stop(containerId, name)
+						elif command == "restart":
+							containerId = get_container_id_by_name(name)
+							restart(containerId, name)
+			except Exception as e:
+				error(get_text("error_reading_schedule_file", e))
+			time.sleep(60)
+
+	def should_run(self, schedule, now):
+		cron = croniter(schedule, now)
+		last_execution = cron.get_prev(datetime)
+		next_execution = cron.get_next(datetime)
+		should_run = last_execution <= now < next_execution and last_execution.minute == now.minute
+		return should_run
+
+	def demonio_schedule(self):
+		try:
+			thread = threading.Thread(target=self.run, daemon=True)
+			thread.start()
+		except Exception as e:
+			error(get_text("error_schedule_daemon", e))
+			self.demonio_schedule()
+
+@bot.message_handler(commands=["start", "list", "run", "stop", "restart", "delete", "checkupdate", "changetag", "logs", "logfile", "compose", "mute", "schedule", "info", "version", "donate"])
 def command_controller(message):
 	userId = message.from_user.id
 	comando = message.text.split(' ', 1)[0]
 	messageId = message.id
 	container_id = None
-	if not comando in ('/mute', f'/mute@{bot.get_me().username}'):
+	if not comando in ('/mute', f'/mute@{bot.get_me().username}'
+					,'/schedule', f'/schedule@{bot.get_me().username}'):
 		container_name = " ".join(message.text.split()[1:])
 		if container_name:
 			container_id = get_container_id_by_name(container_name, debugging=True)
@@ -667,6 +722,43 @@ def command_controller(message):
 			send_message(message=get_text("muted", minutes))
 
 		threading.Timer(minutes * 60, unmute).start()
+	elif comando in ('/schedule', f'/schedule@{bot.get_me().username}'):
+		full_schedule = message.text.replace(comando, '').replace('  ', ' ').lstrip()
+		if not full_schedule or full_schedule == "": # CHECK AND DELETE
+			markup = InlineKeyboardMarkup(row_width = 1)
+			empty = False
+			botones = []
+			try:
+				with open(FULL_SCHEDULE_PATH, "r") as file:
+					lines = file.readlines()
+
+				if len(lines) == 0:
+					empty = True
+				else:
+					for line in lines:
+						schedule, command, name = parse_cron_line(line)
+						if schedule and command and name:
+							botones.append(InlineKeyboardButton(f'{schedule} {command} {name}', callback_data=f'deleteSchedule|{schedule}|{command}|{name}'))
+			except Exception as e:
+				error(get_text("error_reading_schedule_file", e))
+
+			if empty:
+				send_message(message=get_text("empty_schedule"), parse_mode="html")
+			else:
+				markup.add(*botones)
+				markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
+				send_message(message=get_text("delete_schedule"), reply_markup=markup)
+		else: # SAVE
+			schedule, command, name = parse_cron_line(full_schedule)
+			if not schedule or not is_valid_cron(schedule) or not command or command not in ('run', 'stop', 'restart') or not name:
+				send_message(message=get_text("error_adding_schedule", message.text), parse_mode="html")
+				return
+			if not get_container_id_by_name(name):
+				send_message(message=get_text("container_does_not_exist", name))
+				return
+			with open(FULL_SCHEDULE_PATH, "a") as file:
+				file.write(f'{schedule} {command} {name}\n')
+			send_message(message=get_text("schedule_saved", f'{schedule} {command} {name}'))
 	elif comando in ('/info', f'/info@{bot.get_me().username}'):
 		if container_id:
 			info(container_id, container_name)
@@ -746,7 +838,10 @@ def button_controller(call):
 
 	call_data_parts = call.data.split("|")
 	if len(call_data_parts) == 4:
-		comando, containerId, containerName, tag = call_data_parts
+		if call_data_parts[0] == "deleteSchedule":
+			comando, schedule, action, containerName = call_data_parts
+		else:
+			comando, containerId, containerName, tag = call_data_parts
 	elif len(call_data_parts) == 3:
 		comando, containerId, containerName = call_data_parts
 		tag = None
@@ -820,6 +915,11 @@ def button_controller(call):
 		delete_message(x.message_id)
 		send_message(message=result)
 
+	# DELETE SCHEDULE
+	elif comando == "deleteSchedule":
+		delete_line_from_file(FULL_SCHEDULE_PATH, f'{schedule} {action} {containerName}')
+		send_message(message=get_text("deleted_schedule", f'{schedule} {action} {containerName}'))
+
 def run(containerId, containerName):
 	debug(get_text("run_command_for_container", "run", containerName))
 	x = send_message(message=get_text("starting", containerName))
@@ -877,9 +977,9 @@ def compose(containerId, containerName):
 	delete_message(x.message_id)
 
 def unmute():
-    global mute_until
-    mute_until = 0
-    send_message(message=get_text("unmuted"))
+	global mute_until
+	mute_until = 0
+	send_message(message=get_text("unmuted"))
 
 def info(containerId, containerName):
 	debug(get_text("run_command_for_container", "info", containerName))
@@ -1107,6 +1207,40 @@ def delete_updater():
 		client.images.remove(updater_image)
 		send_message(message=get_text("updated_container", CONTAINER_NAME))
 
+def check_CONTAINER_NAME():
+	container_id = get_container_id_by_name(CONTAINER_NAME)
+	if not container_id:
+		error(get_text("error_bot_container_name"))
+		sys.exit(1)
+
+def parse_cron_line(line):
+		parts = line.strip().split()
+		if len(parts) < 7:
+			return None, None, None
+		schedule = " ".join(parts[:5])
+		command = parts[5]
+		name = parts[6]
+		return schedule, command, name
+
+def is_valid_cron(cron_expression):
+	try:
+		croniter(cron_expression)
+		return True
+	except Exception:
+		return False
+
+def delete_line_from_file(file_path, line_to_delete):
+	try:
+		with open(file_path, "r") as file:
+			lines = file.readlines()
+
+		with open(file_path, "w") as file:
+			for line in lines:
+				if line.strip() != line_to_delete.strip():
+					file.write(line)
+	except Exception as e:
+		error(get_text("error_deleting_from_file_with_error", e))
+
 def get_my_architecture():
 	try:
 		client = docker.from_env()
@@ -1114,7 +1248,7 @@ def get_my_architecture():
 		architecture_docker = info['Architecture']
 		return docker_architectures.get(architecture_docker, architecture_docker)
 	except Exception as e:
-		error(get_text("error_getting_architecture", str(e)))
+		error(get_text("error_getting_architecture", e))
 		return None
 
 def get_docker_tags(repo_name):
@@ -1138,7 +1272,7 @@ def get_docker_tags(repo_name):
 			return filtered_tags	
 		raise Exception(f'Error calling to {url}: {response.status_code}')
 	except Exception as e:
-		error(get_text("error_getting_tags_with_error", repo_name, str(e)))
+		error(get_text("error_getting_tags_with_error", repo_name, e))
 		return None
 
 if __name__ == '__main__':
@@ -1152,6 +1286,11 @@ if __name__ == '__main__':
 		debug(get_text("debug_started_update_daemon"))
 	else:
 		debug(get_text("debug_disabled_update_daemon"))
+	
+	schedule = DockerScheduleMonitor()
+	schedule.demonio_schedule()
+	debug(get_text("debug_started_schedule_daemon"))
+
 	bot.set_my_commands([
 		telebot.types.BotCommand("/start", get_text("menu_start")),
 		telebot.types.BotCommand("/list", get_text("menu_list")),
@@ -1163,6 +1302,7 @@ if __name__ == '__main__':
 		telebot.types.BotCommand("/changetag", get_text("menu_change_tag")),
 		telebot.types.BotCommand("/logs", get_text("menu_logs")),
 		telebot.types.BotCommand("/logfile", get_text("menu_logfile")),
+		telebot.types.BotCommand("/schedule", get_text("menu_schedule")),
 		telebot.types.BotCommand("/compose", get_text("menu_compose")),
 		telebot.types.BotCommand("/mute", get_text("menu_mute")),
 		telebot.types.BotCommand("/info", get_text("menu_info")),
@@ -1170,11 +1310,13 @@ if __name__ == '__main__':
 		telebot.types.BotCommand("/donate", get_text("menu_donate"))
 		])
 	delete_updater()
+	check_CONTAINER_NAME()
 	starting_message = f"🫡 *{CONTAINER_NAME}\n{get_text('active')}*"
 	if CHECK_UPDATES:
 		starting_message += f"\n✅ {get_text('check_for_updates')}"
 	else:
 		starting_message += f"\n❌ {get_text('check_for_updates')}"
 	starting_message += f"\n_⚙️ v{VERSION}_"
+	starting_message += f"\n{get_text('channel')}"
 	send_message(message=starting_message)
 	bot.infinity_polling(timeout=60)

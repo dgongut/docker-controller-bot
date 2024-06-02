@@ -18,6 +18,9 @@ UPDATER_IMAGE = "dgongut/docker-container-updater:latest"
 UPDATER_CONTAINER_NAME = "UPDATER-Docker-Controler-Bot"
 CONTAINER_ID_LENGTH = 5
 ANONYMOUS_USER_ID = "1087968824"
+SCHEDULE_PATH = "/app/schedule"
+SCHEDULE_FILE = "schedule.txt"
+FULL_SCHEDULE_PATH = f'{SCHEDULE_PATH}/{SCHEDULE_FILE}'
 
 # LABELS
 LABEL_IGNORE_CHECK_UPDATES = "DCB-Ignore-Check-Updates"
