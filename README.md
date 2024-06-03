@@ -38,6 +38,7 @@ Lleva el control de tus contenedores docker desde un único lugar.
 |TELEGRAM_THREAD |❌| Thread del tema dentro de un supergrupo; valor numérico (2,3,4..). Por defecto 1. Se utiliza en conjunción con la variable TELEGRAM_GROUP |
 |TELEGRAM_NOTIFICATION_CHANNEL |❌| Canal donde se publicarán exclusivamente los cambios de estado de los contenedores |
 |CONTAINER_NAME |✅| Nombre del contenedor, lo que se le ponga en container_name en el docker-compose ha de ir aquí también |
+|TZ |✅| Timezone (Por ejemplo Europe/Madrid) |
 |CHECK_UPDATES |❌| Si se desea que compruebe actualizaciones. 0 no - 1 sí. Por defecto 1|
 |CHECK_UPDATE_EVERY_HOURS |❌| Tiempo de espera en horas entre chequeo de actualizaciones (4 horas por defecto) | 
 |BUTTON_COLUMNS |❌| Numero de columnas de botones en las listas de contenedores (2 columnas por defecto) | 
@@ -56,6 +57,7 @@ services:
             - TELEGRAM_TOKEN=
             - TELEGRAM_ADMIN=
             - CONTAINER_NAME=docker-controller-bot
+            - TZ=Europe/Madrid
             #- TELEGRAM_GROUP=
             #- TELEGRAM_THREAD=1
             #- TELEGRAM_NOTIFICATION_CHANNEL=
@@ -66,7 +68,6 @@ services:
             #- EXTENDED_MESSAGES=0
         volumes:
             - /var/run/docker.sock:/var/run/docker.sock # NO CAMBIAR
-            - /etc/localtime:/etc/localtime:ro # NO CAMBIAR
             - /ruta/para/guardar/las/programaciones:/app/schedule # CAMBIAR LA PARTE IZQUIERDA
         image: dgongut/docker-controller-bot:latest
         container_name: docker-controller-bot
@@ -118,8 +119,9 @@ ENV CONTAINER_NAME abc
 ENV BUTTON_COLUMNS 2
 ENV LANGUAGE ES
 ENV EXTENDED_MESSAGES 0
+ENV TZ UTC
 
-RUN apk add --no-cache python3 py3-pip
+RUN apk add --no-cache python3 py3-pip tzdata
 RUN pip3 install pyparsing==3.0.9
 RUN pip3 install requests==2.31.0
 RUN pip3 install pyTelegramBotAPI==4.17.0
@@ -142,6 +144,7 @@ services:
             - TELEGRAM_TOKEN=
             - TELEGRAM_ADMIN=
             - CONTAINER_NAME=TEST-docker-controller-bot
+            - TZ=Europe/Madrid
             #- TELEGRAM_GROUP=
             #- TELEGRAM_THREAD=1
             #- TELEGRAM_NOTIFICATION_CHANNEL=
@@ -152,7 +155,6 @@ services:
             #- EXTENDED_MESSAGES=0
         volumes:
             - /var/run/docker.sock:/var/run/docker.sock # NO CAMBIAR
-            - /etc/localtime:/etc/localtime:ro # NO CAMBIAR
             - /ruta/para/guardar/las/programaciones:/app/schedule # CAMBIAR LA PARTE IZQUIERDA
         build:
           context: .
