@@ -1,0 +1,13 @@
+
+services:
+    test-docker-controller-bot:
+        container_name: ${CONTAINER_NAME} # NO CAMBIAR
+        env_file:
+        - .env
+        volumes:
+            - /var/run/docker.sock:/var/run/docker.sock # NO CAMBIAR
+            - /ruta/para/guardar/las/programaciones:/app/schedule # CAMBIAR LA PARTE IZQUIERDA
+        build:
+          context: .
+          dockerfile: ./Dockerfile_local
+        tty: true

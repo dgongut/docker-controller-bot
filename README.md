@@ -12,15 +12,17 @@
 ![alt text](https://github.com/dgongut/pictures/blob/main/Docker-Controller-Bot/mockup.png)
 
 Lleva el control de tus contenedores docker desde un único lugar.
- - ✅ Listar contenedores
- - ✅ Arrancar, parar y eliminar contenedores
- - ✅ Obtener los logs tanto de manera directa como a través de fichero
- - ✅ Extraer el docker-compose de tus contenedores
- - ✅ Notificaciones cuando un contenedor se cae o se inicia
- - ✅ Notificaciones cuando un contenedor tiene una actualización pendiente
- - ✅ Actualizaciones de los contenedores
- - ✅ Cambiar el tag (rollback o actualización)
- - ✅ Soporte de idiomas (Spanish, English, Dutch)
+
+- ✅ Listar contenedores
+- ✅ Arrancar, parar y eliminar contenedores
+- ✅ Obtener los logs tanto de manera directa como a través de fichero
+- ✅ Extraer el docker-compose de tus contenedores
+- ✅ Notificaciones cuando un contenedor se cae o se inicia
+- ✅ Notificaciones cuando un contenedor tiene una actualización pendiente
+- ✅ Actualizaciones de los contenedores
+- ✅ Cambiar el tag (rollback o actualización)
+- ✅ Limpia el sistema, eliminado contenedores, imagenes y otros objetos no utilizados.
+- ✅ Soporte de idiomas (Spanish, English, Dutch)
 
 ¿Lo buscas en [![](https://badgen.net/badge/icon/docker?icon=docker&label)](https://hub.docker.com/r/dgongut/docker-controller-bot)?
 
@@ -49,6 +51,7 @@ Lleva el control de tus contenedores docker desde un único lugar.
 Será necesario mapear un volumen para almacenar lo que el bot escribe en /app/schedule
 
 ### Ejemplo de Docker-Compose para su ejecución normal
+
 ```yaml
 version: '3.3'
 services:
@@ -77,92 +80,38 @@ services:
 ```
 
 ### Funciones Extra mediante Labels/Etiquetas en otros contenedores
- - Añadiendo la etiqueta `DCB-Ignore-Check-Updates` a un contenedor, no se comprobarán actualizaciones para él.
- - Añadiendo la etiqueta `DCB-Auto-Update` a un contenedor, se actualizará automáticamente sin preguntar.
+
+- Añadiendo la etiqueta `DCB-Ignore-Check-Updates` a un contenedor, no se comprobarán actualizaciones para él.
+- Añadiendo la etiqueta `DCB-Auto-Update` a un contenedor, se actualizará automáticamente sin preguntar.
 
 ### Agradecimientos
+
 Traducción al neerlandés: [ManCaveMedia](https://github.com/ManCaveMedia)
 
 ---
 
 ## Solo para desarrolladores - Ejecución con código local
-Para su ejecución en local y probar nuevos cambios de código, se necesitan crear 2 ficheros llamados respectivamente Dockerfile_local y docker-compose.yaml
+
+
+Para su ejecución en local y probar nuevos cambios de código, se necesita renombrar el fichero `.env-example` a `.env` con los valores necesarios para su ejecución.
+Es necesario establecer un `TELEGRAM_TOKEN` y un `TELEGRAM_ADMIN` correctos y diferentes al de la ejecución normal.
 
 La estructura de carpetas debe quedar:
+
 ```
 docker-controller-bot/
-├── Dockerfile_local
-├── docker-compose.yaml
-└── src
+    ├── .env
     ├── LICENSE
     ├── README.md
     ├── config.py
     ├── docker-controller-bot.py
+    ├── Dockerfile_local
+    ├── docker-compose.yaml
     └── locale
         ├── en.json
         ├── es.json
         └── nl.json
 ```
-
-Dockerfile_local
-```
-FROM alpine:3.18.6
-
-ENV TELEGRAM_TOKEN abc
-ENV TELEGRAM_ADMIN abc
-ENV TELEGRAM_GROUP abc
-ENV TELEGRAM_NOTIFICATION_CHANNEL abc
-ENV TELEGRAM_THREAD 1
-ENV CHECK_UPDATES 1
-ENV CHECK_UPDATE_EVERY_HOURS 4
-ENV CONTAINER_NAME abc
-ENV BUTTON_COLUMNS 2
-ENV LANGUAGE ES
-ENV EXTENDED_MESSAGES 0
-ENV TZ UTC
-
-RUN apk add --no-cache python3 py3-pip tzdata
-RUN pip3 install pyparsing==3.0.9
-RUN pip3 install requests==2.31.0
-RUN pip3 install pyTelegramBotAPI==4.17.0
-RUN pip3 install docker==7.0.0
-RUN pip install PyYAML==6.0.1
-
-WORKDIR /app
-COPY src/ .
-
-ENTRYPOINT ["python3", "docker-controller-bot.py"]
-```
-
-docker-compose.yaml
-```yaml
-version: '3.3'
-services:
-    TEST-docker-controller-bot:
-        container_name: TEST-docker-controller-bot
-        environment:
-            - TELEGRAM_TOKEN=
-            - TELEGRAM_ADMIN=
-            - CONTAINER_NAME=TEST-docker-controller-bot
-            - TZ=Europe/Madrid
-            #- TELEGRAM_GROUP=
-            #- TELEGRAM_THREAD=1
-            #- TELEGRAM_NOTIFICATION_CHANNEL=
-            #- CHECK_UPDATES=1
-            #- CHECK_UPDATE_EVERY_HOURS=4
-            #- BUTTON_COLUMNS=2
-            #- LANGUAGE=ES
-            #- EXTENDED_MESSAGES=0
-        volumes:
-            - /var/run/docker.sock:/var/run/docker.sock # NO CAMBIAR
-            - /ruta/para/guardar/las/programaciones:/app/schedule # CAMBIAR LA PARTE IZQUIERDA
-        build:
-          context: .
-          dockerfile: ./Dockerfile_local
-        tty: true
-```
-
-Es necesario establecer un `TELEGRAM_TOKEN` y un `TELEGRAM_ADMIN` correctos y diferentes al de la ejecución normal.
 
 Para levantarlo habría que ejecutar en esa ruta: `docker compose up -d`
 
