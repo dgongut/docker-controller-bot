@@ -17,7 +17,7 @@ import json
 import requests
 import sys
 
-VERSION = "3.0.2"
+VERSION = "3.1.0"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -432,41 +432,41 @@ class DockerManager:
 		
 	def prune_containers(self):
 		try:
-			pcont = self.client.containers.prune()
-			send_message(message=str(pcont))
-			return get_text("prune_containers")
+			pruned_containers = self.client.containers.prune()
+			debug(get_text("debug_deleted", str(pruned_containers)))
+			return get_text("prune_containers"), str(pruned_containers)
 		except Exception as e:
 			error(get_text("error_prune_containers_with_error", e))
 			return get_text("error_prune_containers")
 		
 	def prune_images(self):
 		try:
-			pimg = self.client.images.prune(filters={'dangling': False})
-			send_message(message=str(pimg))
-			return get_text("prune_images")
+			pruned_images = self.client.images.prune(filters={'dangling': False})
+			debug(get_text("debug_deleted", str(pruned_images)))
+			return get_text("prune_images"), str(pruned_images)
 		except Exception as e:
 			error(get_text("error_prune_images_with_error", e))
 			return get_text("error_prune_images")
 		
 	def prune_networks(self):
 		try:
-			pnet = self.client.networks.prune()
-			send_message(message=str(pnet))
-			return get_text("prune_networks")
+			pruned_networks = self.client.networks.prune()
+			debug(get_text("debug_deleted", str(pruned_networks)))
+			return get_text("prune_networks"), str(pruned_networks)
 		except Exception as e:
 			error(get_text("error_prune_networks_with_error", e))
 			return get_text("error_prune_networks")		
 		
 
-	def prune_volumens(self):
+	def prune_volumes(self):
 		try:
-			pnet = self.client.volumes.prune()
-			send_message(message=str(pnet))
-			return get_text("prune_volumens")
+			pruned_volumes = self.client.volumes.prune()
+			debug(get_text("debug_deleted", str(pruned_volumes)))
+			return get_text("prune_volumes"), str(pruned_volumes)
 		except Exception as e:
 			debug(e)
-			error(get_text("error_prune_volumens_with_error", e))
-			return get_text("error_prune_volumens")	
+			error(get_text("error_prune_volumes_with_error", e))
+			return get_text("error_prune_volumes")	
 		
 # Instanciamos el DockerManager
 docker_manager = DockerManager()
@@ -600,6 +600,9 @@ class DockerScheduleMonitor:
 						elif command == "restart":
 							containerId = get_container_id_by_name(name)
 							restart(containerId, name)
+						elif command == "mute":
+							minutes = int(name)
+							mute(minutes)
 			except Exception as e:
 				error(get_text("error_reading_schedule_file", e))
 			time.sleep(60)
@@ -745,24 +748,12 @@ def command_controller(message):
 			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
 			send_message(message=get_text("show_compose"), reply_markup=markup)
 	elif comando in ('/mute', f'/mute@{bot.get_me().username}'):
-		global mute_until
 		try:
 			minutes = int(message.text.split()[1])
 		except (IndexError, ValueError):
 			send_message(message=get_text("error_use_mute_command"))
 			return
-
-		if minutes == 0:
-			unmute()
-			return
-
-		mute_until = time.time() + minutes * 60
-		if minutes == 1:
-			send_message(message=get_text("muted_singular"))
-		else:
-			send_message(message=get_text("muted", minutes))
-
-		threading.Timer(minutes * 60, unmute).start()
+		mute(minutes)
 	elif comando in ('/schedule', f'/schedule@{bot.get_me().username}'):
 		full_schedule = message.text.replace(comando, '').replace('  ', ' ').lstrip()
 		if not full_schedule or full_schedule == "": # CHECK AND DELETE
@@ -791,12 +782,18 @@ def command_controller(message):
 				send_message(message=get_text("delete_schedule"), reply_markup=markup)
 		else: # SAVE
 			schedule, command, name = parse_cron_line(full_schedule)
-			if not schedule or not is_valid_cron(schedule) or not command or command not in ('run', 'stop', 'restart') or not name:
+			if not schedule or not is_valid_cron(schedule) or not command or command not in ('run', 'stop', 'restart', 'mute') or not name:
 				send_message(message=get_text("error_adding_schedule", message.text), parse_mode="html")
 				return
-			if not get_container_id_by_name(name):
+			if 'mute' not in command and not get_container_id_by_name(name):
 				send_message(message=get_text("container_does_not_exist", name))
 				return
+			if 'mute' in command:
+				try:
+					int(name)
+				except (IndexError, ValueError):
+					send_message(message=get_text("error_use_mute_schedule"))
+					return
 			with open(FULL_SCHEDULE_PATH, "a") as file:
 				file.write(f'{schedule} {command} {name}\n')
 			send_message(message=get_text("schedule_saved", f'{schedule} {command} {name}'))
@@ -858,7 +855,7 @@ def command_controller(message):
 			botones.append(InlineKeyboardButton(get_text("button_containers"), callback_data=f'prune|confirmPruneContainers'))
 			botones.append(InlineKeyboardButton(get_text("button_images"), callback_data=f'prune|confirmPruneImages'))
 			botones.append(InlineKeyboardButton(get_text("button_networks"), callback_data=f'prune|confirmPruneNetworks'))
-			botones.append(InlineKeyboardButton(get_text("button_volumens"), callback_data=f'prune|confirmPruneVolumens'))
+			botones.append(InlineKeyboardButton(get_text("button_volumes"), callback_data=f'prune|confirmPruneVolumes'))
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
 			send_message(message=get_text("prune_system"), reply_markup=markup)
@@ -972,27 +969,61 @@ def button_controller(call):
 	elif comando == "deleteSchedule":
 		delete_line_from_file(FULL_SCHEDULE_PATH, f'{schedule} {action} {containerName}')
 		send_message(message=get_text("deleted_schedule", f'{schedule} {action} {containerName}'))
-	# System Prune Container
+
+	# PRUNE
 	elif comando == "prune":
+		# PRUNE CONTAINERS
 		if action == "confirmPruneContainers":
 			confirm_prune_containers()
 		elif action == "pruneContainers":
-			docker_manager.prune_containers()			
-	# System Prune Images
+			result, data = docker_manager.prune_containers()
+			markup = InlineKeyboardMarkup(row_width = 1)
+			markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
+			fichero_temporal = get_temporal_file(data, get_text("button_containers"))
+			x = send_message(message=get_text("loading_file"))
+			send_document(document=fichero_temporal, reply_markup=markup, caption=result)
+			delete_message(x.message_id)
+
+		# PRUNE IMAGES
 		elif action == "confirmPruneImages":
 			confirm_prune_images()
 		elif action == "pruneImages":
-			docker_manager.prune_images()
-	# System Prune Networks
+			result, data = docker_manager.prune_images()
+			markup = InlineKeyboardMarkup(row_width = 1)
+			markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
+			fichero_temporal = get_temporal_file(data, get_text("button_images"))
+			x = send_message(message=get_text("loading_file"))
+			send_document(document=fichero_temporal, reply_markup=markup, caption=result)
+			delete_message(x.message_id)
+	
+		# PRUNE NETWORKS
 		elif action == "confirmPruneNetworks":
 			confirm_prune_networks()
 		elif action == "pruneNetworks":
-			docker_manager.prune_networks()
-	# System Prune Volumens
-		elif action == "confirmPruneVolumens":
-			confirm_prune_volumens()
-		elif action == "pruneVolumens":
-			docker_manager.prune_volumens()
+			result, data = docker_manager.prune_networks()
+			markup = InlineKeyboardMarkup(row_width = 1)
+			markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
+			fichero_temporal = get_temporal_file(data, get_text("button_networks"))
+			x = send_message(message=get_text("loading_file"))
+			send_document(document=fichero_temporal, reply_markup=markup, caption=result)
+			delete_message(x.message_id)
+	
+		# PRUNE VOLUMES
+		elif action == "confirmPruneVolumes":
+			confirm_prune_volumes()
+		elif action == "pruneVolumes":
+			result, data = docker_manager.prune_volumes()
+			markup = InlineKeyboardMarkup(row_width = 1)
+			markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
+			fichero_temporal = get_temporal_file(data, get_text("button_volumes"))
+			x = send_message(message=get_text("loading_file"))
+			send_document(document=fichero_temporal, reply_markup=markup, caption=result)
+			delete_message(x.message_id)
+	
+def generate_temporal_file(data, fileName):
+	fichero_temporal = io.BytesIO(data.encode('utf-8'))
+	fichero_temporal.name = fileName
+	send_document(document=fichero_temporal, reply_markup=markup, caption=get_text("logs", containerName))
 
 def run(containerId, containerName):
 	debug(get_text("run_command_for_container", "run", containerName))
@@ -1030,14 +1061,32 @@ def log_file(containerId, containerName):
 	markup = InlineKeyboardMarkup(row_width = 1)
 	markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
 	result = docker_manager.show_logs_raw(container_id=containerId, container_name=containerName)
-	fichero_temporal = io.BytesIO(result.encode('utf-8'))
-	fecha_hora_actual = datetime.now()
-	formato = "%Y.%m.%d_%H.%M.%S"
-	fecha_hora_formateada = fecha_hora_actual.strftime(formato)
-	fichero_temporal.name = f"logs_{containerName}_{fecha_hora_formateada}.txt"
+	fichero_temporal = get_temporal_file(result, f'logs_{containerName}')
 	x = send_message(message=get_text("loading_file"))
 	send_document(document=fichero_temporal, reply_markup=markup, caption=get_text("logs", containerName))
 	delete_message(x.message_id)
+
+def get_temporal_file(data, fileName):
+	fichero_temporal = io.BytesIO(data.encode('utf-8'))
+	fecha_hora_actual = datetime.now()
+	formato = "%Y.%m.%d_%H.%M.%S"
+	fecha_hora_formateada = fecha_hora_actual.strftime(formato)
+	fichero_temporal.name = f"{fileName}_{fecha_hora_formateada}.txt"
+	return fichero_temporal
+
+def mute(minutes):
+	global mute_until
+	if minutes == 0:
+		unmute()
+		return
+
+	mute_until = time.time() + minutes * 60
+	if minutes == 1:
+		send_message(message=get_text("muted_singular"))
+	else:
+		send_message(message=get_text("muted", minutes))
+
+	threading.Timer(minutes * 60, unmute).start()
 
 def compose(containerId, containerName):
 	debug(get_text("run_command_for_container", "compose", containerName))
@@ -1067,32 +1116,32 @@ def info(containerId, containerName):
 	send_message(message=result, reply_markup=markup)
 
 def confirm_prune_containers():
-	debug(get_text("run_command_for_container", "confirm_prune_containers"))
+	debug(get_text("run_command", "confirm_prune_containers"))
 	markup = InlineKeyboardMarkup(row_width = 1)
 	markup.add(InlineKeyboardButton(get_text("button_confirm"), callback_data=f"prune|pruneContainers"))
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 	send_message(message=get_text("confirm_prune_containers"), reply_markup=markup)
 
 def confirm_prune_images():
-	debug(get_text("run_command_for_container", "confirm_prune_images"))
+	debug(get_text("run_command", "confirm_prune_images"))
 	markup = InlineKeyboardMarkup(row_width = 1)
 	markup.add(InlineKeyboardButton(get_text("button_confirm"), callback_data=f"prune|pruneImages"))
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 	send_message(message=get_text("confirm_prune_images"), reply_markup=markup)
 
 def confirm_prune_networks():
-	debug(get_text("run_command_for_container", "confirm_prune_networks"))
+	debug(get_text("run_command", "confirm_prune_networks"))
 	markup = InlineKeyboardMarkup(row_width = 1)
 	markup.add(InlineKeyboardButton(get_text("button_confirm"), callback_data=f"prune|pruneNetworks"))
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 	send_message(message=get_text("confirm_prune_networks"), reply_markup=markup)
 
-def confirm_prune_volumens():
-	debug(get_text("run_command_for_container", "confirm_prune_volumens"))
+def confirm_prune_volumes():
+	debug(get_text("run_command", "confirm_prune_volumes"))
 	markup = InlineKeyboardMarkup(row_width = 1)
-	markup.add(InlineKeyboardButton(get_text("button_confirm"), callback_data=f"prune|pruneVolumens"))
+	markup.add(InlineKeyboardButton(get_text("button_confirm"), callback_data=f"prune|pruneVolumes"))
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
-	send_message(message=get_text("confirm_prune_volumens"), reply_markup=markup)
+	send_message(message=get_text("confirm_prune_volumes"), reply_markup=markup)
 
 def confirm_delete(containerId, containerName):
 	debug(get_text("run_command_for_container", "confirm_delete", containerName))
