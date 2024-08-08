@@ -17,7 +17,7 @@ import json
 import requests
 import sys
 
-VERSION = "3.1.0"
+VERSION = "3.1.1"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -278,38 +278,57 @@ class DockerManager:
 					container_environment = {'CONTAINER_NAME': container_name, 'TAG': tag}
 				container_volumes = {'/var/run/docker.sock': {'bind': '/var/run/docker.sock', 'mode': 'rw'}}
 				new_container = self.client.containers.run(
-						UPDATER_IMAGE,
-						name=UPDATER_CONTAINER_NAME,
-						environment=container_environment,
-						volumes=container_volumes,
-						network_mode="bridge",
-						detach=True
-					)
+					UPDATER_IMAGE,
+					name=UPDATER_CONTAINER_NAME,
+					environment=container_environment,
+					volumes=container_volumes,
+					network_mode="bridge",
+					detach=True
+				)
 				return get_text("self_update_message")
 			else:
 				client = self.client
 				container = client.containers.get(container_id)
-				container_attrs = container.attrs['Config']
-				container_command = container_attrs['Cmd']
-				container_environment = container_attrs['Env']
-				host_config = container.attrs['HostConfig']
-				container_volumes = host_config['Binds']
-				container_network_mode = host_config['NetworkMode']
-				container_ports = host_config['PortBindings']
-				container_restart_policy = host_config['RestartPolicy']
-				container_devices = host_config['Devices']
-				container_labels = container_attrs['Labels']
-				privileged_mode = host_config.get('Privileged', False)
-				tmpfs_mounts = {
-					mount['Target']: f"size={mount['TmpfsOptions']['SizeBytes']}"
-					for mount in host_config.get('Mounts', [])
-					if mount.get('Type') == 'tmpfs' and mount['TmpfsOptions'].get('SizeBytes')
-				}
-				cap_add_list = host_config.get('CapAdd', None)
-				image_with_tag = container_attrs['Image']
+				container_attrs = container.attrs.get('Config', {})
+
+				container_command = container_attrs.get('Cmd', [])
+				container_environment = container_attrs.get('Env', [])
+				host_config = container.attrs.get('HostConfig', {})
+
+				container_volumes = host_config.get('Binds', []) if host_config else []
+				container_network_mode = host_config.get('NetworkMode', None) if host_config else None
+				container_ports = host_config.get('PortBindings', {}) if host_config else {}
+				container_restart_policy = host_config.get('RestartPolicy', {}) if host_config else {}
+				container_devices = host_config.get('Devices', []) if host_config else []
+				container_labels = container_attrs.get('Labels', {})
+
+				privileged_mode = host_config.get('Privileged', False) if host_config else False
+				tmpfs_mounts = {}
+				if host_config and 'Mounts' in host_config:
+					tmpfs_mounts = {
+						mount.get('Target'): f"size={mount.get('TmpfsOptions', {}).get('SizeBytes', 0)}"
+						for mount in host_config.get('Mounts', [])
+						if mount.get('Type') == 'tmpfs' and mount.get('TmpfsOptions', {}).get('SizeBytes')
+					}
+
+				cap_add_list = host_config.get('CapAdd', []) if host_config else []
+				runtime = host_config.get('Runtime', None) if host_config else None
+				image_with_tag = container_attrs.get('Image', '')
+
 				if tag:
 					image_with_tag = f'{image_with_tag.split(":")[0]}:{tag}'
+
 				container_is_running = container.status == 'running'
+
+				network_settings = container.attrs.get('NetworkSettings', {})
+
+				ipam_config = {}
+				ipv4_address = None
+				if network_settings and container_network_mode:
+					ipam_config = network_settings.get('Networks', {}).get(container_network_mode, {}).get('IPAMConfig', {})
+					if ipam_config:
+						ipv4_address = ipam_config.get('IPv4Address', None)
+
 				debug(get_text("debug_updating_container", container_name))
 				try:
 					debug(get_text("debug_pulling_image", image_with_tag))
@@ -331,6 +350,13 @@ class DockerManager:
 
 					debug(get_text("debug_creating_new_container", remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]))
 					bot.edit_message_text(get_text("updating_creating", container_name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+
+					networking_config = None
+					if ipv4_address:
+						networking_config = client.api.create_networking_config({
+							container_network_mode: client.api.create_endpoint_config(ipv4_address=ipv4_address)
+						})
+
 					new_container = client.containers.create(
 						image_with_tag,
 						name=container_name,
@@ -345,6 +371,8 @@ class DockerManager:
 						privileged=privileged_mode,
 						tmpfs=tmpfs_mounts,
 						cap_add=cap_add_list,
+						runtime=runtime,
+						networking_config=networking_config,
 						detach=True
 					)
 					debug(get_text("debug_updated_container", container_name))
