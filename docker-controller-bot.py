@@ -407,10 +407,10 @@ class DockerManager:
 			return get_text("error_updating_container", container_name)
 
 	def force_check_update(self, container_id):
-		container = self.client.containers.get(container_id)
-		container_attrs = container.attrs['Config']
-		image_with_tag = container_attrs['Image']
 		try:
+			container = self.client.containers.get(container_id)
+			container_attrs = container.attrs.get('Config', {})
+			image_with_tag = container_attrs.get('Image', '')
 			local_image = container.image.id
 			remote_image = self.client.images.pull(image_with_tag)
 			debug(get_text("debug_checking_update", container.name, image_with_tag, local_image.replace('sha256:', '')[:CONTAINER_ID_LENGTH], remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]))
@@ -1047,11 +1047,6 @@ def button_controller(call):
 			x = send_message(message=get_text("loading_file"))
 			send_document(document=fichero_temporal, reply_markup=markup, caption=result)
 			delete_message(x.message_id)
-	
-def generate_temporal_file(data, fileName):
-	fichero_temporal = io.BytesIO(data.encode('utf-8'))
-	fichero_temporal.name = fileName
-	send_document(document=fichero_temporal, reply_markup=markup, caption=get_text("logs", containerName))
 
 def run(containerId, containerName):
 	debug(get_text("run_command_for_container", "run", containerName))
