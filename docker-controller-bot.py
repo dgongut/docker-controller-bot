@@ -17,7 +17,7 @@ import json
 import requests
 import sys
 
-VERSION = "3.2.0"
+VERSION = "3.2.1"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -1436,12 +1436,17 @@ def get_docker_tags(repo_name):
 	if architecture is None:
 		return None
 
-	if repo_name.startswith("ghcr.io/"):
-		return get_docker_tags_from_GitHub(repo_name.replace("ghcr.io/", ""))
-	elif repo_name.startswith("lscr.io/"):
-		return get_docker_tags_from_DockerHub(repo_name.replace("lscr.io/", ""))
-	else:
-		return get_docker_tags_from_DockerHub(repo_name)
+	try:
+		if repo_name.startswith("ghcr.io/"):
+			return get_docker_tags_from_GitHub(repo_name.replace("ghcr.io/", ""))
+		elif repo_name.startswith("lscr.io/"):
+			return get_docker_tags_from_DockerHub(repo_name.replace("lscr.io/", ""))
+		else:
+			return get_docker_tags_from_DockerHub(repo_name)
+	except Exception as e:
+		error(get_text("error_getting_tags_with_error", repo_name, e))
+		send_message(message=get_text("error_getting_tags", repo_name))
+		return None
 
 def get_docker_tags_from_DockerHub(repo_name):
 	architecture = get_my_architecture()
@@ -1449,37 +1454,29 @@ def get_docker_tags_from_DockerHub(repo_name):
 		return None
 
 	url = f"https://hub.docker.com/v2/repositories/{repo_name}/tags?page_size=99"
-	try:
-		response = requests.get(url)
-		if response.status_code == 200:
-			data = response.json()
-			tags = data.get('results', [])
-			filtered_tags = []
-			for tag in tags:
-				images = tag.get('images', [])
-				for image in images:
-					if image['architecture'] == architecture:
-						filtered_tags.append(tag['name'])
-						break
-			return filtered_tags
-		raise Exception(f'Error calling to {url}: {response.status_code}')
-	except Exception as e:
-		error(get_text("error_getting_tags_with_error", repo_name, e))
-		return get_text("error_getting_tags", repo_name)
+	response = requests.get(url)
+	if response.status_code == 200:
+		data = response.json()
+		tags = data.get('results', [])
+		filtered_tags = []
+		for tag in tags:
+			images = tag.get('images', [])
+			for image in images:
+				if image['architecture'] == architecture:
+					filtered_tags.append(tag['name'])
+					break
+		return filtered_tags
+	raise Exception(f'Error calling to {url}: {response.status_code}')
 
 def get_docker_tags_from_GitHub(repo_name):
 	url = f"https://api.github.com/repos/{repo_name}/tags?per_page=99"
-	try:
-		response = requests.get(url)
-		if response.status_code == 200:
-			data = response.json()
-			tags = [tag['name'] for tag in data]
-			return tags
-		else:
-			raise Exception(f'Error calling to {url}: {response.status_code}')
-	except Exception as e:
-		error(get_text("error_getting_tags_with_error", repo_name, e))
-		return get_text("error_getting_tags", repo_name)
+	response = requests.get(url)
+	if response.status_code == 200:
+		data = response.json()
+		tags = [tag['name'] for tag in data]
+		return tags
+	else:
+		raise Exception(f'Error calling to {url}: {response.status_code}')
 
 if __name__ == '__main__':
 	debug(get_text("debug_starting_bot", VERSION))
