@@ -1363,12 +1363,12 @@ def send_message_to_notification_channel(chat_id=TELEGRAM_NOTIFICATION_CHANNEL, 
 		return send_message(chat_id=TELEGRAM_GROUP, message=message, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
 	return send_message(chat_id=chat_id, message=message, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
 
-def send_document(chat_id=TELEGRAM_GROUP, document=None, reply_markup=None, caption=None):
+def send_document(chat_id=TELEGRAM_GROUP, document=None, reply_markup=None, caption=None, parse_mode="markdown"):
 	try:
 		if TELEGRAM_THREAD == 1:
-			return bot.send_document(chat_id, document=document, reply_markup=reply_markup, caption=caption)
+			return bot.send_document(chat_id, document=document, reply_markup=reply_markup, caption=caption, parse_mode=parse_mode)
 		else:
-			return bot.send_document(chat_id, document=document, reply_markup=reply_markup, caption=caption, message_thread_id=TELEGRAM_THREAD)
+			return bot.send_document(chat_id, document=document, reply_markup=reply_markup, caption=caption, message_thread_id=TELEGRAM_THREAD, parse_mode=parse_mode)
 	except Exception as e:
 		error(get_text("error_sending_document", chat_id, e))
 		pass
