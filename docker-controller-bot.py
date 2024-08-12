@@ -17,7 +17,7 @@ import json
 import requests
 import sys
 
-VERSION = "3.1.1"
+VERSION = "3.2.0"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -28,8 +28,8 @@ def error(message):
 def warning(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - WARNING: {message}')
 
-if LANGUAGE.lower() not in ("es", "en", "nl"):
-	error("LANGUAGE only can be ES/EN/NL")
+if LANGUAGE.lower() not in ("es", "en", "nl", "de"):
+	error("LANGUAGE only can be ES/EN/NL/DE")
 	sys.exit(1)
 
 # MODULO DE TRADUCCIONES
@@ -41,14 +41,20 @@ def get_text(key, *args):
 	messages = load_locale(LANGUAGE.lower())
 	if key in messages:
 		translated_text = messages[key]
-		for i, arg in enumerate(args, start=1):
-			placeholder = f"${i}"
-			translated_text = translated_text.replace(placeholder, str(arg))
-		return translated_text
 	else:
-		warning(f"key ['{key}'] is not in locale {LANGUAGE}")
-		return f"key ['{key}'] is not in locale {LANGUAGE}"
+		messages_en = load_locale("en")
+		if key in messages_en:
+			warning(f"key ['{key}'] is not in locale {LANGUAGE}")
+			translated_text = messages_en[key]
+		else:
+			error(f"key ['{key}'] is not in locale {LANGUAGE} or EN")
+			return f"key ['{key}'] is not in locale {LANGUAGE} or EN"
 
+	for i, arg in enumerate(args, start=1):
+		placeholder = f"${i}"
+		translated_text = translated_text.replace(placeholder, str(arg))
+
+	return translated_text
 
 # Comprobación inicial de variables
 if "abc" == TELEGRAM_TOKEN:
@@ -1430,7 +1436,19 @@ def get_docker_tags(repo_name):
 	if architecture is None:
 		return None
 
-	url = f"https://hub.docker.com/v2/repositories/{repo_name}/tags"
+	if repo_name.startswith("ghcr.io/"):
+		return get_docker_tags_from_GitHub(repo_name.replace("ghcr.io/", ""))
+	elif repo_name.startswith("lscr.io/"):
+		return get_docker_tags_from_DockerHub(repo_name.replace("lscr.io/", ""))
+	else:
+		return get_docker_tags_from_DockerHub(repo_name)
+
+def get_docker_tags_from_DockerHub(repo_name):
+	architecture = get_my_architecture()
+	if architecture is None:
+		return None
+
+	url = f"https://hub.docker.com/v2/repositories/{repo_name}/tags?page_size=99"
 	try:
 		response = requests.get(url)
 		if response.status_code == 200:
@@ -1443,11 +1461,25 @@ def get_docker_tags(repo_name):
 					if image['architecture'] == architecture:
 						filtered_tags.append(tag['name'])
 						break
-			return filtered_tags	
+			return filtered_tags
 		raise Exception(f'Error calling to {url}: {response.status_code}')
 	except Exception as e:
 		error(get_text("error_getting_tags_with_error", repo_name, e))
-		return None
+		return get_text("error_getting_tags", repo_name)
+
+def get_docker_tags_from_GitHub(repo_name):
+	url = f"https://api.github.com/repos/{repo_name}/tags?per_page=99"
+	try:
+		response = requests.get(url)
+		if response.status_code == 200:
+			data = response.json()
+			tags = [tag['name'] for tag in data]
+			return tags
+		else:
+			raise Exception(f'Error calling to {url}: {response.status_code}')
+	except Exception as e:
+		error(get_text("error_getting_tags_with_error", repo_name, e))
+		return get_text("error_getting_tags", repo_name)
 
 if __name__ == '__main__':
 	debug(get_text("debug_starting_bot", VERSION))

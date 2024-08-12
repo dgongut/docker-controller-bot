@@ -22,7 +22,7 @@ Lleva el control de tus contenedores docker desde un único lugar.
 - ✅ Actualizaciones de los contenedores
 - ✅ Cambiar el tag (rollback o actualización)
 - ✅ Limpia el sistema, eliminado contenedores, imagenes y otros objetos no utilizados.
-- ✅ Soporte de idiomas (Spanish, English, Dutch)
+- ✅ Soporte de idiomas (Spanish, English, Dutch, German)
 
 ¿Lo buscas en [![](https://badgen.net/badge/icon/docker?icon=docker&label)](https://hub.docker.com/r/dgongut/docker-controller-bot)?
 
@@ -36,7 +36,7 @@ Lleva el control de tus contenedores docker desde un único lugar.
 |:------------- |:---------------:| :-------------|
 |TELEGRAM_TOKEN |✅| Token del bot |
 |TELEGRAM_ADMIN |✅| ChatId del administrador (se puede obtener hablándole al bot Rose escribiendo /id). Admite múltiples administradores separados por comas. Por ejemplo 12345,54431,55944 |
-|TELEGRAM_GROUP |❌| ChatId del grupo. Si este bot va a formar parte de un grupo, es necesario especificar el chatId de dicho grupo |
+|TELEGRAM_GROUP |❌| ChatId del grupo. Si este bot va a formar parte de un grupo, es necesario especificar el chatId de dicho grupo. Es necesario que el bot sea administrador del grupo |
 |TELEGRAM_THREAD |❌| Thread del tema dentro de un supergrupo; valor numérico (2,3,4..). Por defecto 1. Se utiliza en conjunción con la variable TELEGRAM_GROUP |
 |TELEGRAM_NOTIFICATION_CHANNEL |❌| Canal donde se publicarán exclusivamente los cambios de estado de los contenedores |
 |CONTAINER_NAME |✅| Nombre del contenedor, lo que se le ponga en container_name en el docker-compose ha de ir aquí también |
@@ -44,7 +44,7 @@ Lleva el control de tus contenedores docker desde un único lugar.
 |CHECK_UPDATES |❌| Si se desea que compruebe actualizaciones. 0 no - 1 sí. Por defecto 1|
 |CHECK_UPDATE_EVERY_HOURS |❌| Tiempo de espera en horas entre chequeo de actualizaciones (4 horas por defecto) | 
 |BUTTON_COLUMNS |❌| Numero de columnas de botones en las listas de contenedores (2 columnas por defecto) | 
-|LANGUAGE |❌| Idioma, puede ser ES / EN / NL. Por defecto es ES (Spanish) | 
+|LANGUAGE |❌| Idioma, puede ser ES / EN / NL / DE. Por defecto es ES (Spanish) | 
 |EXTENDED_MESSAGES |❌| Si se desea que muestre más mensajes de información. 0 no - 1 sí. Por defecto 0 | 
 
 ### Anotaciones
