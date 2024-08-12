@@ -87,6 +87,7 @@ services:
 ### Agradecimientos
 
 Traducción al neerlandés: [ManCaveMedia](https://github.com/ManCaveMedia)
+Traducción al alemán: [shedowe19](https://github.com/shedowe19)
 
 ---
 
