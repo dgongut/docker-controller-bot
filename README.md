@@ -111,6 +111,7 @@ docker-controller-bot/
     └── locale
         ├── en.json
         ├── es.json
+        ├── de.json
         └── nl.json
 ```
 
