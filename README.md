@@ -22,7 +22,7 @@ Lleva el control de tus contenedores docker desde un único lugar.
 - ✅ Actualizaciones de los contenedores
 - ✅ Cambiar el tag (rollback o actualización)
 - ✅ Limpia el sistema, eliminado contenedores, imagenes y otros objetos no utilizados.
-- ✅ Soporte de idiomas (Spanish, English, Dutch, German)
+- ✅ Soporte de idiomas (Spanish, English, Dutch, German, Russian)
 
 ¿Lo buscas en [![](https://badgen.net/badge/icon/docker?icon=docker&label)](https://hub.docker.com/r/dgongut/docker-controller-bot)?
 
@@ -88,6 +88,7 @@ services:
 
 Traducción al neerlandés: [ManCaveMedia](https://github.com/ManCaveMedia)
 Traducción al alemán: [shedowe19](https://github.com/shedowe19)
+Traducción al ruso: [leyalton](https://github.com/leyalton)
 
 ---
 
@@ -112,6 +113,7 @@ docker-controller-bot/
         ├── en.json
         ├── es.json
         ├── de.json
+        ├── ru.json
         └── nl.json
 ```
 

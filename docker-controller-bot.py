@@ -17,7 +17,7 @@ import json
 import requests
 import sys
 
-VERSION = "3.2.1"
+VERSION = "3.2.2"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -28,7 +28,7 @@ def error(message):
 def warning(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - WARNING: {message}')
 
-if LANGUAGE.lower() not in ("es", "en", "nl", "de"):
+if LANGUAGE.lower() not in ("es", "en", "nl", "de", "ru"):
 	error("LANGUAGE only can be ES/EN/NL/DE")
 	sys.exit(1)
 
@@ -113,9 +113,12 @@ for key in DIR:
 if not os.path.exists(SCHEDULE_PATH):
 	os.makedirs(SCHEDULE_PATH)
 
+if not os.path.exists(FULL_MUTE_FILE_PATH):
+	with open(FULL_MUTE_FILE_PATH, 'w') as mute_file:
+		mute_file.write("0")
+
 # Instanciamos el bot
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
-mute_until = 0
 
 class DockerManager:
 	def __init__(self):
@@ -143,8 +146,7 @@ class DockerManager:
 				return get_text("error_can_not_do_that")
 			container = self.client.containers.get(container_id)
 			container.stop()
-			global mute_until
-			if time.time() < mute_until:
+			if is_muted():
 				send_message_to_notification_channel(message=get_text("stopped_container", container_name))
 			return None
 		except Exception as e:
@@ -157,8 +159,7 @@ class DockerManager:
 				return get_text("error_can_not_do_that")
 			container = self.client.containers.get(container_id)
 			container.restart()
-			global mute_until
-			if time.time() < mute_until:
+			if is_muted():
 				send_message_to_notification_channel(message=get_text("restarted_container", container_name))
 			return None
 		except Exception as e:
@@ -171,8 +172,7 @@ class DockerManager:
 				return get_text("error_can_not_do_that")
 			container = self.client.containers.get(container_id)
 			container.start()
-			global mute_until
-			if time.time() < mute_until:
+			if is_muted():
 				send_message_to_notification_channel(message=get_text("started_container", container_name))
 			return None
 		except Exception as e:
@@ -525,8 +525,7 @@ class DockerEventMonitor:
 				
 				if message:
 					try:
-						global mute_until
-						if time.time() < mute_until:
+						if is_muted():
 							debug(get_text("debug_muted_message", message))
 							continue
 
@@ -1104,18 +1103,39 @@ def get_temporal_file(data, fileName):
 	return fichero_temporal
 
 def mute(minutes):
-	global mute_until
 	if minutes == 0:
 		unmute()
 		return
-
-	mute_until = time.time() + minutes * 60
+	with open(FULL_MUTE_FILE_PATH, 'w') as mute_file:
+		mute_file.write(str(time.time() + minutes * 60))
 	if minutes == 1:
 		send_message(message=get_text("muted_singular"))
 	else:
 		send_message(message=get_text("muted", minutes))
-
 	threading.Timer(minutes * 60, unmute).start()
+
+def unmute():
+	with open(FULL_MUTE_FILE_PATH, 'w') as mute_file:
+		mute_file.write('0')
+	send_message(message=get_text("unmuted"))
+
+def is_muted():
+	with open(FULL_MUTE_FILE_PATH, 'r') as fichero:
+		mute_until = float(fichero.readline().strip())
+		return time.time() < mute_until
+	
+def check_mute():
+	with open(FULL_MUTE_FILE_PATH, 'r+') as fichero:
+		mute_until = float(fichero.readline().strip())
+		
+		if mute_until != 0:
+			if time.time() < mute_until:
+				mute_until_seconds = mute_until - time.time()
+				threading.Timer(mute_until_seconds, unmute).start()
+			else:
+				fichero.seek(0)
+				fichero.write('0')
+				fichero.truncate()
 
 def compose(containerId, containerName):
 	debug(get_text("run_command_for_container", "compose", containerName))
@@ -1127,11 +1147,6 @@ def compose(containerId, containerName):
 	x = send_message(message=get_text("loading_file"))
 	send_document(document=fichero_temporal, reply_markup=markup, caption=get_text("compose", containerName))
 	delete_message(x.message_id)
-
-def unmute():
-	global mute_until
-	mute_until = 0
-	send_message(message=get_text("unmuted"))
 
 def info(containerId, containerName):
 	debug(get_text("run_command_for_container", "info", containerName))
@@ -1515,6 +1530,7 @@ if __name__ == '__main__':
 		])
 	delete_updater()
 	check_CONTAINER_NAME()
+	check_mute()
 	starting_message = f"🫡 *{CONTAINER_NAME}\n{get_text('active')}*"
 	if CHECK_UPDATES:
 		starting_message += f"\n✅ {get_text('check_for_updates')}"
