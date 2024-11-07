@@ -13,7 +13,7 @@ ENV LANGUAGE ES
 ENV EXTENDED_MESSAGES 0
 ENV TZ UTC
 
-ARG VERSION=3.2.2
+ARG VERSION=3.2.3
 
 WORKDIR /app
 RUN wget https://github.com/dgongut/docker-controller-bot/archive/refs/tags/v${VERSION}.tar.gz -P /tmp
@@ -22,12 +22,12 @@ RUN mv docker-controller-bot-${VERSION}/* /app
 RUN rm /tmp/v${VERSION}.tar.gz
 RUN rm -rf docker-controller-bot-${VERSION}/
 RUN apk add --no-cache python3 py3-pip tzdata
-RUN pip3 install pyparsing==3.1.4
+RUN pip3 install pyparsing==3.2.0
 RUN pip3 install requests==2.32.3
-RUN pip3 install pyTelegramBotAPI==4.17.0
+RUN pip3 install pyTelegramBotAPI==4.23.0
 RUN pip3 install docker==7.1.0
 RUN pip install PyYAML==6.0.2
-RUN pip install croniter==3.0.3
+RUN pip install croniter==5.0.1
 
 WORKDIR /app
 COPY . .

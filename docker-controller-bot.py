@@ -17,7 +17,7 @@ import json
 import requests
 import sys
 
-VERSION = "3.2.2"
+VERSION = "3.2.3"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -307,6 +307,7 @@ class DockerManager:
 				container_restart_policy = host_config.get('RestartPolicy', {}) if host_config else {}
 				container_devices = host_config.get('Devices', []) if host_config else []
 				container_labels = container_attrs.get('Labels', {})
+				container_user = container_attrs.get('User', 'root')
 
 				privileged_mode = host_config.get('Privileged', False) if host_config else False
 				tmpfs_mounts = {}
@@ -379,6 +380,7 @@ class DockerManager:
 						cap_add=cap_add_list,
 						runtime=runtime,
 						networking_config=networking_config,
+						user=container_user,
 						detach=True
 					)
 					debug(get_text("debug_updated_container", container_name))
