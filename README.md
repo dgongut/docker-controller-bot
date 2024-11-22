@@ -44,7 +44,7 @@ Lleva el control de tus contenedores docker desde un único lugar.
 |CHECK_UPDATES |❌| Si se desea que compruebe actualizaciones. 0 no - 1 sí. Por defecto 1|
 |CHECK_UPDATE_EVERY_HOURS |❌| Tiempo de espera en horas entre chequeo de actualizaciones (4 horas por defecto) | 
 |BUTTON_COLUMNS |❌| Numero de columnas de botones en las listas de contenedores (2 columnas por defecto) | 
-|LANGUAGE |❌| Idioma, puede ser ES / EN / NL / DE. Por defecto es ES (Spanish) | 
+|LANGUAGE |❌| Idioma, puede ser ES / EN / NL / DE / RU / GL. Por defecto es ES (Spanish) | 
 |EXTENDED_MESSAGES |❌| Si se desea que muestre más mensajes de información. 0 no - 1 sí. Por defecto 0 | 
 
 ### Anotaciones
@@ -115,6 +115,7 @@ docker-controller-bot/
         ├── es.json
         ├── de.json
         ├── ru.json
+        ├── gl.json
         └── nl.json
 ```
 
