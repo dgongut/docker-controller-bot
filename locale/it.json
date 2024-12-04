@@ -65,7 +65,7 @@
     "deleted_schedule": "✅ Pianificazione eliminata con successo.\n```CRON $1```",
     "deleting": "_Eliminazione_ *$1*...",
     "donate": "Questo progetto è open source e lo sviluppo nel mio tempo libero. Donare non sbloccherà funzionalità extra. È semplicemente un modo ideale per ringraziare per il lavoro dietro un progetto come questo. Se desideri farlo, [clicca qui](https://donate.dgongut.com). Grazie mille ❤️",
-    "empty_schedule": "Non ci sono pianificazioni salvate.\n\nUtilizzo:\n<code>/schedule CRON run/stop/restart container</code>\n<code>/schedule CRON mute minutes</code>\n\nEsempio:\n/schedule 0 1 * * * start micontainer\n/schedule 30 4 * * * mute 5\n\nSe non conosci le istruzioni CRON, <a href='https://crontab.guru/'>qui</a> trovi un sito per generarle <u>seguendo lo standard</u>."
+    "empty_schedule": "Non ci sono pianificazioni salvate.\n\nUtilizzo:\n<code>/schedule CRON run/stop/restart container</code>\n<code>/schedule CRON mute minutes</code>\n\nEsempio:\n/schedule 0 1 * * * start micontainer\n/schedule 30 4 * * * mute 5\n\nSe non conosci le istruzioni CRON, <a href='https://crontab.guru/'>qui</a> trovi un sito per generarle <u>seguendo lo standard</u>.",
     "error_adding_schedule": "❌ Sembra che l'istruzione inserita non segua il formato corretto. Inserito: <code>$1</code>\n\nUtilizzo:\n<code>/schedule CRON run/stop/restart container</code>\n\nEsempio:\n/schedule 0 1 * * * start micontainer\n/schedule 30 4 * * * mute 5\n\nSe non conosci le istruzioni CRON, <a href='https://crontab.guru/'>qui</a> trovi un sito per generarle <u>seguendo lo standard</u>.",
     "error_bot_check_updates": "La variabile CHECK_UPDATES indica al programma se eseguirà o meno una verifica degli aggiornamenti. I valori possibili sono 1 o 0. 1 è attivo, 0 è disabilitato.",
     "error_bot_check_updates_interval": "La variabile CHECK_UPDATE_EVERY_HOURS indica al programma ogni quante ore verificare gli aggiornamenti. Per impostazione predefinita è ogni 4 ore.",
@@ -107,7 +107,7 @@
     "error_showing_compose_container": "❌ Impossibile mostrare il docker-compose per il contenitore *$1*. Vedi i log del bot per ulteriori informazioni.",
     "error_showing_compose_container_with_error": "Impossibile mostrare il docker-compose per il contenitore $1. Errore: [$2]",
     "error_showing_info_container": "❌ Non è stato possibile visualizzare le informazioni per il contenitore *$1*. Vedi i log del bot per maggiori informazioni.",
-       "error_showing_info_container_with_error": "Impossibile visualizzare le informazioni per il contenitore $1. Errore: [$2]",
+    "error_showing_info_container_with_error": "Impossibile visualizzare le informazioni per il contenitore $1. Errore: [$2]",
     "error_showing_logs_container": "❌ Impossibile visualizzare i log per il contenitore *$1*. Consulta i log del bot per maggiori informazioni.",
     "error_showing_logs_container_with_error": "Impossibile visualizzare i log per il contenitore $1. Errore: [$2]",
     "error_starting_container": "❌ Impossibile avviare il contenitore *$1*. Consulta i log del bot per maggiori informazioni.",

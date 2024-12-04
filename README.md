@@ -117,7 +117,7 @@ docker-controller-bot/
         ├── de.json
         ├── ru.json
         ├── gl.json
-        └── nl.json
+        ├── nl.json
         └── it.json
 
 ```

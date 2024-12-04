@@ -17,7 +17,7 @@ import json
 import requests
 import sys
 
-VERSION = "3.3.0"
+VERSION = "3.4.0"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -28,8 +28,8 @@ def error(message):
 def warning(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - WARNING: {message}')
 
-if LANGUAGE.lower() not in ("es", "en", "nl", "de", "ru", "gl"):
-	error("LANGUAGE only can be ES/EN/NL/DE/RU/GL")
+if LANGUAGE.lower() not in ("es", "en", "nl", "de", "ru", "gl", "it"):
+	error("LANGUAGE only can be ES/EN/NL/DE/RU/GL/IT")
 	sys.exit(1)
 
 # MODULO DE TRADUCCIONES
