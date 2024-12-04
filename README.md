@@ -22,7 +22,7 @@ Lleva el control de tus contenedores docker desde un único lugar.
 - ✅ Actualizaciones de los contenedores
 - ✅ Cambiar el tag (rollback o actualización)
 - ✅ Limpia el sistema, eliminado contenedores, imagenes y otros objetos no utilizados.
-- ✅ Soporte de idiomas (Spanish, English, Dutch, German, Russian, Galician)
+- ✅ Soporte de idiomas (Spanish, English, Dutch, German, Russian, Galician, Italian)
 
 ¿Lo buscas en [![](https://badgen.net/badge/icon/docker?icon=docker&label)](https://hub.docker.com/r/dgongut/docker-controller-bot)?
 
@@ -44,7 +44,7 @@ Lleva el control de tus contenedores docker desde un único lugar.
 |CHECK_UPDATES |❌| Si se desea que compruebe actualizaciones. 0 no - 1 sí. Por defecto 1|
 |CHECK_UPDATE_EVERY_HOURS |❌| Tiempo de espera en horas entre chequeo de actualizaciones (4 horas por defecto) | 
 |BUTTON_COLUMNS |❌| Numero de columnas de botones en las listas de contenedores (2 columnas por defecto) | 
-|LANGUAGE |❌| Idioma, puede ser ES / EN / NL / DE / RU / GL. Por defecto es ES (Spanish) | 
+|LANGUAGE |❌| Idioma, puede ser ES / EN / NL / DE / RU / GL / IT. Por defecto es ES (Spanish) | 
 |EXTENDED_MESSAGES |❌| Si se desea que muestre más mensajes de información. 0 no - 1 sí. Por defecto 0 | 
 
 ### Anotaciones
@@ -90,6 +90,7 @@ Traducción al neerlandés: [ManCaveMedia](https://github.com/ManCaveMedia)
 Traducción al alemán: [shedowe19](https://github.com/shedowe19)
 Traducción al ruso: [leyalton](https://github.com/leyalton)
 Traducción al gallego: [monfero](https://github.com/monfero)
+Traducción al italiano: [zichichi] (https://github.com/zichichi)
 
 ---
 
@@ -117,6 +118,8 @@ docker-controller-bot/
         ├── ru.json
         ├── gl.json
         └── nl.json
+        └── it.json
+
 ```
 
 Para levantarlo habría que ejecutar en esa ruta: `docker compose up -d`
