@@ -1,2 +1,7 @@
 .env
 .DS_Store
+
+# Local development files
+__pycache__
+cache
+schedule

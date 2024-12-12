@@ -6,7 +6,7 @@ services:
         - .env
         volumes:
             - /var/run/docker.sock:/var/run/docker.sock # NO CAMBIAR
-            - /ruta/para/guardar/las/programaciones:/app/schedule # CAMBIAR LA PARTE IZQUIERDA
+            - ./:/app # CAMBIAR LA PARTE IZQUIERDA
         build:
           context: .
           dockerfile: ./Dockerfile_local
