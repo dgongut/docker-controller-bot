@@ -7,6 +7,7 @@ ENV TELEGRAM_NOTIFICATION_CHANNEL abc
 ENV TELEGRAM_THREAD 1
 ENV CHECK_UPDATES 1
 ENV CHECK_UPDATE_EVERY_HOURS 4
+ENV CHECK_UPDATE_STOPPED_CONTAINERS 1
 ENV CONTAINER_NAME abc
 ENV BUTTON_COLUMNS 2
 ENV LANGUAGE ES
@@ -21,4 +22,4 @@ RUN pip3 install -r requirements.txt
 RUN npm install -g nodemon
 
 # Legacy watch needed for nodemon to work with docker volumes
-ENTRYPOINT ["nodemon","--legacy-watch", "docker-controller-bot.py"]
+ENTRYPOINT ["nodemon", "--legacy-watch", "docker-controller-bot.py"]

@@ -3,10 +3,10 @@ services:
     test-docker-controller-bot:
         container_name: ${CONTAINER_NAME} # NO CAMBIAR
         env_file:
-        - .env
+          - .env
         volumes:
-            - /var/run/docker.sock:/var/run/docker.sock # NO CAMBIAR
-            - ./:/app # CAMBIAR LA PARTE IZQUIERDA
+          - /var/run/docker.sock:/var/run/docker.sock # NO CAMBIAR
+          - ./:/app # CAMBIAR LA PARTE IZQUIERDA
         build:
           context: .
           dockerfile: ./Dockerfile_local

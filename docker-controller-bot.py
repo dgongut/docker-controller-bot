@@ -17,7 +17,7 @@ import json
 import requests
 import sys
 
-VERSION = "3.4.0"
+VERSION = "3.5.0"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -83,24 +83,6 @@ try:
 	TELEGRAM_THREAD = int(TELEGRAM_THREAD)
 except:
 	error(get_text("error_bot_telegram_thread", TELEGRAM_THREAD))
-	sys.exit(1)
-
-try:
-	CHECK_UPDATES = bool(int(CHECK_UPDATES_RAW))
-except:
-	error(get_text("error_bot_check_updates"))
-	sys.exit(1)
-
-try:
-	CHECK_UPDATE_EVERY_HOURS = float(CHECK_UPDATE_EVERY_HOURS)
-except ValueError:
-	error(get_text("error_bot_check_updates_interval"))
-	sys.exit(1)
-
-try:
-	EXTENDED_MESSAGES = bool(int(EXTENDED_MESSAGES_RAW))
-except:
-	error(get_text("error_bot_extended_messages"))
 	sys.exit(1)
 
 DIR = {"cache": "./cache/"}
@@ -553,10 +535,15 @@ class DockerUpdateMonitor:
 		while True:
 			containers = self.client.containers.list(all=True)
 			for container in containers:
+				if (container.status == "exited" or container.status == "dead") and not CHECK_UPDATE_STOPPED_CONTAINERS:
+					debug(get_text("debug_ignore_check_for_update", container.name))
+					continue
+
 				labels = container.labels
 				if LABEL_IGNORE_CHECK_UPDATES in labels:
 					debug(get_text("debug_ignore_check_for_update", container.name))
 					continue
+
 				container_attrs = container.attrs['Config']
 				image_with_tag = container_attrs['Image']
 				try:
@@ -565,13 +552,18 @@ class DockerUpdateMonitor:
 					debug(get_text("debug_checking_update", container.name, image_with_tag, local_image.replace('sha256:', '')[:CONTAINER_ID_LENGTH], remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]))
 					if local_image != remote_image.id: # Actualización detectada
 						if LABEL_AUTO_UPDATE in labels:
-							if EXTENDED_MESSAGES:
-								send_message(message=get_text("auto_update", container.name))
+							if EXTENDED_MESSAGES and not is_muted():
+								send_message_to_notification_channel(message=get_text("auto_update", container.name))
 							debug(get_text("debug_auto_update", container.name))
-							x = send_message(message=get_text("updating", container.name))
+							x = None
+							if not is_muted():
+								x = send_message_to_notification_channel(message=get_text("updating", container.name))
 							result = docker_manager.update(container_id=container.id, container_name=container.name, message=x, bot=bot)
-							delete_message(x.message_id)
-							send_message(message=result)
+							if not is_muted():
+								delete_message(x.message_id)
+								send_message_to_notification_channel(message=result)
+							else:
+								debug(get_text("debug_muted_message", result))
 							continue
 						old_image_status = read_cache_item(image_with_tag, container.name)
 						image_status = get_text("NEED_UPDATE_CONTAINER_TEXT")
@@ -586,7 +578,10 @@ class DockerUpdateMonitor:
 						debug(get_text("debug_notifying_update"))
 						markup = InlineKeyboardMarkup(row_width = 1)
 						markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}"))
-						send_message(message=get_text("available_update", container.name), reply_markup=markup)
+						if not is_muted():
+							send_message(message=get_text("available_update", container.name), reply_markup=markup)
+						else:
+							debug(get_text("debug_muted_message", get_text("available_update", container.name)))
 					else: # Contenedor actualizado
 						image_status = get_text("UPDATED_CONTAINER_TEXT")
 				except Exception as e:

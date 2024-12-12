@@ -42,9 +42,10 @@ Lleva el control de tus contenedores docker desde un único lugar.
 |CONTAINER_NAME |✅| Nombre del contenedor, lo que se le ponga en container_name en el docker-compose ha de ir aquí también |
 |TZ |✅| Timezone (Por ejemplo Europe/Madrid) |
 |CHECK_UPDATES |❌| Si se desea que compruebe actualizaciones. 0 no - 1 sí. Por defecto 1|
-|CHECK_UPDATE_EVERY_HOURS |❌| Tiempo de espera en horas entre chequeo de actualizaciones (4 horas por defecto) | 
-|BUTTON_COLUMNS |❌| Numero de columnas de botones en las listas de contenedores (2 columnas por defecto) | 
-|LANGUAGE |❌| Idioma, puede ser ES / EN / NL / DE / RU / GL / IT. Por defecto es ES (Spanish) | 
+|CHECK_UPDATE_EVERY_HOURS |❌| Tiempo de espera en horas entre chequeo de actualizaciones. Por defecto 4 |
+|CHECK_UPDATE_STOPPED_CONTAINERS |❌| Si se desea que compruebe las actualizaciones de los contenedores detenidos. 0 no - 1 sí. Por defecto 1 | 
+|BUTTON_COLUMNS |❌| Numero de columnas de botones en las listas de contenedores. Por defecto 2 | 
+|LANGUAGE |❌| Idioma, puede ser ES / EN / NL / DE / RU / GL / IT. Por defecto ES (Spanish) | 
 |EXTENDED_MESSAGES |❌| Si se desea que muestre más mensajes de información. 0 no - 1 sí. Por defecto 0 | 
 
 ### Anotaciones
@@ -66,6 +67,7 @@ services:
             #- TELEGRAM_NOTIFICATION_CHANNEL=
             #- CHECK_UPDATES=1
             #- CHECK_UPDATE_EVERY_HOURS=4
+            #- CHECK_UPDATE_STOPPED_CONTAINERS=1
             #- BUTTON_COLUMNS=2
             #- LANGUAGE=ES
             #- EXTENDED_MESSAGES=0
@@ -105,7 +107,9 @@ La estructura de carpetas debe quedar:
 ```
 docker-controller-bot/
     ├── .env
+    ├── .gitignore
     ├── LICENSE
+    ├── requirements.txt
     ├── README.md
     ├── config.py
     ├── docker-controller-bot.py
