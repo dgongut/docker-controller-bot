@@ -13,15 +13,12 @@ ENV LANGUAGE ES
 ENV EXTENDED_MESSAGES 0
 ENV TZ UTC
 
-RUN apk add --no-cache python3 py3-pip tzdata
-RUN pip3 install pyparsing==3.2.0
-RUN pip3 install requests==2.32.3
-RUN pip3 install pyTelegramBotAPI==4.23.0
-RUN pip3 install docker==7.1.0
-RUN pip install PyYAML==6.0.2
-RUN pip install croniter==5.0.1
-
 WORKDIR /app
-COPY . .
 
-ENTRYPOINT ["python3", "docker-controller-bot.py"]
+RUN apk add --no-cache python3 py3-pip tzdata npm
+COPY requirements.txt /app/requirements.txt
+RUN pip3 install -r requirements.txt
+RUN npm install -g nodemon
+
+# Legacy watch needed for nodemon to work with docker volumes
+ENTRYPOINT ["nodemon","--legacy-watch", "docker-controller-bot.py"]
