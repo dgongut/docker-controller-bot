@@ -45,7 +45,7 @@ Lleva el control de tus contenedores docker desde un único lugar.
 |CHECK_UPDATE_EVERY_HOURS |❌| Tiempo de espera en horas entre chequeo de actualizaciones. Por defecto 4 |
 |CHECK_UPDATE_STOPPED_CONTAINERS |❌| Si se desea que compruebe las actualizaciones de los contenedores detenidos. 0 no - 1 sí. Por defecto 1 | 
 |BUTTON_COLUMNS |❌| Numero de columnas de botones en las listas de contenedores. Por defecto 2 | 
-|LANGUAGE |❌| Idioma, puede ser ES / EN / NL / DE / RU / GL / IT. Por defecto ES (Spanish) | 
+|LANGUAGE |❌| Idioma, puede ser ES / EN / NL / DE / RU / GL / IT / CAT. Por defecto ES (Spanish) | 
 |EXTENDED_MESSAGES |❌| Si se desea que muestre más mensajes de información. 0 no - 1 sí. Por defecto 0 | 
 
 ### Anotaciones
@@ -122,10 +122,13 @@ docker-controller-bot/
         ├── ru.json
         ├── gl.json
         ├── nl.json
+        ├── cat.json
         └── it.json
 
 ```
 
 Para levantarlo habría que ejecutar en esa ruta: `docker compose up -d`
 
-Para detenerlo y probar nuevos cambios habría que ejecutar en esa ruta: `docker compose down --rmi`
+Para detenerlo y eliminarlo: `docker compose down --rmi`
+
+Para probar nuevos cambios bastaría con guardar. Los cambios se refrescan en caliente.
