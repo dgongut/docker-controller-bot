@@ -63,24 +63,21 @@ def get_text(key, *args):
 
 	return translated_text
 
+
 # Comprobación inicial de variables
-if "abc" == TELEGRAM_TOKEN:
+if TELEGRAM_TOKEN is None or TELEGRAM_TOKEN == '':
 	error(get_text("error_bot_token"))
 	sys.exit(1)
-
-if "abc" == TELEGRAM_ADMIN:
+if TELEGRAM_ADMIN is None or TELEGRAM_ADMIN == '':
 	error(get_text("error_bot_telegram_admin"))
 	sys.exit(1)
-
 if str(ANONYMOUS_USER_ID) in str(TELEGRAM_ADMIN).split(','):
 	error(get_text("error_bot_telegram_admin_anonymous"))
 	sys.exit(1)
-
-if "abc" == CONTAINER_NAME:
+if CONTAINER_NAME is None or CONTAINER_NAME == '':
 	error(get_text("error_bot_container_name"))
 	sys.exit(1)
-
-if "abc" == TELEGRAM_GROUP:
+if TELEGRAM_GROUP is None or TELEGRAM_GROUP == '':
 	if len(str(TELEGRAM_ADMIN).split(',')) > 1:
 		error(get_text("error_multiple_admin_only_with_group"))
 		sys.exit(1)
@@ -1384,7 +1381,7 @@ def send_message(chat_id=TELEGRAM_GROUP, message=None, reply_markup=None, parse_
 		pass
 
 def send_message_to_notification_channel(chat_id=TELEGRAM_NOTIFICATION_CHANNEL, message=None, reply_markup=None, parse_mode="markdown", disable_web_page_preview=True):
-	if "abc" == TELEGRAM_NOTIFICATION_CHANNEL:
+	if TELEGRAM_NOTIFICATION_CHANNEL is None or TELEGRAM_NOTIFICATION_CHANNEL == '':
 		return send_message(chat_id=TELEGRAM_GROUP, message=message, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
 	return send_message(chat_id=chat_id, message=message, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
 
