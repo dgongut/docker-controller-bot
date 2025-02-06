@@ -24,5 +24,6 @@
 **/secrets.dev.yaml
 **/values.dev.yaml
 **/assets
+__pycache__
 LICENSE
 README.md
