@@ -96,8 +96,9 @@ Traducción al italiano: [zichichi] (https://github.com/zichichi)
 
 ---
 
-## Solo para desarrolladores - Ejecución con código local
+## Solo para desarrolladores
 
+### Ejecución con código local
 
 Para su ejecución en local y probar nuevos cambios de código, se necesita renombrar el fichero `.env-example` a `.env` con los valores necesarios para su ejecución.
 Es necesario establecer un `TELEGRAM_TOKEN` y un `TELEGRAM_ADMIN` correctos y diferentes al de la ejecución normal.
@@ -127,8 +128,37 @@ docker-controller-bot/
 
 ```
 
-Para levantarlo habría que ejecutar en esa ruta: `docker compose up -d`
-
+Para levantarlo habría que ejecutar en esa ruta: `docker compose -f docker-compose.debug.yaml up  -d --build --force-recreate`
 Para detenerlo y eliminarlo: `docker compose down --rmi`
 
 Para probar nuevos cambios bastaría con guardar. Los cambios se refrescan en caliente.
+
+### Depuración con VS Code
+
+Abre la carpeta del repositorio en [Visual Studio Code](https://code.visualstudio.com/) necesitaras las siguientes extensiones instaladas en VS Code:
+
+- [Docker](https://marketplace.visualstudio.com/items?itemName=ms-azuretools.vscode-docker)
+- [Python](https://marketplace.visualstudio.com/items?itemName=ms-python.python)
+
+#### Instalación de las extensiones
+
+1. Abre VS Code.
+2. Ve a la extensión de la barra lateral y busca "Docker" y "Python".
+3. Instala ambas extensiones desde el Marketplace.
+
+#### Establecer Puntos de Parada (Breakpoints)
+
+1. Abre el archivo de código que deseas depurar.
+2. Haz clic en el margen izquierdo junto a la línea de código donde quieras establecer un punto de parada. Aparecerá un punto rojo indicando el `breakpoint`.
+
+#### Iniciar la Depuración
+
+1. Ve al menú `Run` y selecciona `Start Debugging` o presiona `F5`.
+2. VS Code arrancará el `docker-compose.debug.yaml` y comenzará la depuración.
+3. La ventana de depuración se abrirá en la parte inferior, mostrando las variables, la pila de llamadas y la consola de depuración.
+
+![Depuracion](assets/debug.gif)
+
+#### Conclusión de la Depuración
+
+- Para detener la sesión de depuración, ve a `Run > Stop Debugging` o presiona `Shift+F5`

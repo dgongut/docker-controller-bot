@@ -1,0 +1,20 @@
+{
+    "configurations": [
+        {
+            "name": "Docker: Python - General",
+            "type": "debugpy",
+            "request": "attach",
+            "preLaunchTask": "docker-run: debug",
+            "connect": {
+                "host": "localhost",
+                "port": 5678
+            },
+            "pathMappings": [
+                {
+                    "localRoot": "${workspaceFolder}",
+                    "remoteRoot": "/app"
+                }
+            ],
+        }
+    ]
+}

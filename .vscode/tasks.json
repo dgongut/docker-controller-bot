@@ -1,0 +1,23 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"type": "docker-build",
+			"label": "docker-build",
+			"platform": "python",
+			"dockerBuild": {
+				"tag": "dockercontrollerbot:dev",
+				"dockerfile": "${workspaceFolder}/Dockerfile_debug",
+				"context": "${workspaceFolder}"
+			}
+		},
+		{
+			"type": "shell",
+			"label": "docker-run: debug",
+			"dependsOn": [
+				"docker-build"
+			],
+			  "command": "docker-compose  --env-file .env -f docker-compose.debug.yaml up  -d --remove-orphans --force-recreate"
+		}
+	]
+}

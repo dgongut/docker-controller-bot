@@ -1,0 +1,15 @@
+services:
+  dockercontrollerbot:
+    container_name: ${CONTAINER_NAME} # NO CAMBIAR  
+    image: dockercontrollerbot:dev
+    build:
+      context: .
+      dockerfile: ./Dockerfile_debug
+    command: ["sh", "-c", "pip install debugpy -t /tmp && python /tmp/debugpy --wait-for-client --listen 0.0.0.0:5678 /app/docker-controller-bot.py "]
+    ports:
+      - 5678:5678
+    env_file:
+        - .env
+    volumes:
+        - /var/run/docker.sock:/var/run/docker.sock # NO CAMBIAR
+        - ./:/app # CAMBIAR LA PARTE IZQUIERDA
