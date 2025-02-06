@@ -17,7 +17,7 @@ import json
 import requests
 import sys
 
-VERSION = "3.5.1"
+VERSION = "3.5.2"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -27,6 +27,13 @@ def error(message):
 
 def warning(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - WARNING: {message}')
+
+def sizeof_fmt(num, suffix="B"):
+    for unit in ("", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "Zi"):
+        if abs(num) < 1024.0:
+            return f"{num:3.1f}{unit}{suffix}"
+        num /= 1024.0
+    return f"{num:.1f}Yi{suffix}"
 
 if LANGUAGE.lower() not in ("es", "en", "nl", "de", "ru", "gl", "it", "cat"):
 	error("LANGUAGE only can be ES/EN/NL/DE/RU/GL/IT/CAT")
@@ -451,20 +458,24 @@ class DockerManager:
 	def prune_containers(self):
 		try:
 			pruned_containers = self.client.containers.prune()
-			debug(get_text("debug_deleted", str(pruned_containers)))
-			return get_text("prune_containers"), str(pruned_containers)
+			if pruned_containers:
+				file_size_bytes = sizeof_fmt(pruned_containers['SpaceReclaimed'])
+			debug(get_text("debug_deleted", str(pruned_containers), str(file_size_bytes)))
+			return "prune_containers", str(pruned_containers), str(file_size_bytes)
 		except Exception as e:
 			error(get_text("error_prune_containers_with_error", e))
-			return get_text("error_prune_containers")
+			return "error_prune_containers"
 		
 	def prune_images(self):
 		try:
 			pruned_images = self.client.images.prune(filters={'dangling': False})
-			debug(get_text("debug_deleted", str(pruned_images)))
-			return get_text("prune_images"), str(pruned_images)
+			if pruned_images:
+				file_size_bytes = sizeof_fmt(pruned_images['SpaceReclaimed'])
+			debug(get_text("debug_deleted",  str(pruned_images), str(file_size_bytes)))
+			return "prune_images",  str(pruned_images), str(file_size_bytes)
 		except Exception as e:
 			error(get_text("error_prune_images_with_error", e))
-			return get_text("error_prune_images")
+			return "error_prune_images"
 		
 	def prune_networks(self):
 		try:
@@ -479,12 +490,14 @@ class DockerManager:
 	def prune_volumes(self):
 		try:
 			pruned_volumes = self.client.volumes.prune()
-			debug(get_text("debug_deleted", str(pruned_volumes)))
-			return get_text("prune_volumes"), str(pruned_volumes)
+			if pruned_volumes:
+				file_size_bytes = sizeof_fmt(pruned_volumes['SpaceReclaimed'])
+			debug(get_text("debug_deleted",  str(pruned_volumes), str(file_size_bytes)))
+			return "prune_volumes", str(pruned_volumes), str(file_size_bytes)
 		except Exception as e:
 			debug(e)
 			error(get_text("error_prune_volumes_with_error", e))
-			return get_text("error_prune_volumes")	
+			return "error_prune_volumes"	
 		
 # Instanciamos el DockerManager
 docker_manager = DockerManager()
@@ -1006,24 +1019,24 @@ def button_controller(call):
 		if action == "confirmPruneContainers":
 			confirm_prune_containers()
 		elif action == "pruneContainers":
-			result, data = docker_manager.prune_containers()
+			result, data, size = docker_manager.prune_containers()
 			markup = InlineKeyboardMarkup(row_width = 1)
 			markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
 			fichero_temporal = get_temporal_file(data, get_text("button_containers"))
 			x = send_message(message=get_text("loading_file"))
-			send_document(document=fichero_temporal, reply_markup=markup, caption=result)
+			send_document(document=fichero_temporal, reply_markup=markup, caption=get_text(result, size))
 			delete_message(x.message_id)
 
 		# PRUNE IMAGES
 		elif action == "confirmPruneImages":
 			confirm_prune_images()
 		elif action == "pruneImages":
-			result, data = docker_manager.prune_images()
+			result, data, size = docker_manager.prune_images()
 			markup = InlineKeyboardMarkup(row_width = 1)
 			markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
 			fichero_temporal = get_temporal_file(data, get_text("button_images"))
 			x = send_message(message=get_text("loading_file"))
-			send_document(document=fichero_temporal, reply_markup=markup, caption=result)
+			send_document(document=fichero_temporal, reply_markup=markup, caption=get_text(result, size))
 			delete_message(x.message_id)
 	
 		# PRUNE NETWORKS
@@ -1042,12 +1055,12 @@ def button_controller(call):
 		elif action == "confirmPruneVolumes":
 			confirm_prune_volumes()
 		elif action == "pruneVolumes":
-			result, data = docker_manager.prune_volumes()
+			result, data, size = docker_manager.prune_volumes()
 			markup = InlineKeyboardMarkup(row_width = 1)
 			markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
 			fichero_temporal = get_temporal_file(data, get_text("button_volumes"))
 			x = send_message(message=get_text("loading_file"))
-			send_document(document=fichero_temporal, reply_markup=markup, caption=result)
+			send_document(document=fichero_temporal, reply_markup=markup, caption=get_text(result, size))
 			delete_message(x.message_id)
 
 def run(containerId, containerName):
