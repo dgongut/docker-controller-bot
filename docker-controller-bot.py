@@ -1276,7 +1276,6 @@ def confirm_update_all():
 	containers = docker_manager.list_containers()
 	containersToUpdate = ""
 	for container in containers:
-		send_message(message=f"checking: {container.name}")
 		if update_available(container):
 			containersToUpdate += f"· {container.name}\n"
 	if containersToUpdate == "":
