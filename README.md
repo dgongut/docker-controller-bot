@@ -22,7 +22,7 @@ Lleva el control de tus contenedores docker desde un único lugar.
 - ✅ Actualizaciones de los contenedores
 - ✅ Cambiar el tag (rollback o actualización)
 - ✅ Limpia el sistema, eliminado contenedores, imagenes y otros objetos no utilizados.
-- ✅ Soporte de idiomas (Spanish, English, Dutch, German, Russian, Galician, Italian)
+- ✅ Soporte de idiomas (Spanish, English, Dutch, German, Russian, Galician, Italian, Catalan)
 
 ¿Lo buscas en [![](https://badgen.net/badge/icon/docker?icon=docker&label)](https://hub.docker.com/r/dgongut/docker-controller-bot)?
 
@@ -44,6 +44,7 @@ Lleva el control de tus contenedores docker desde un único lugar.
 |CHECK_UPDATES |❌| Si se desea que compruebe actualizaciones. 0 no - 1 sí. Por defecto 1|
 |CHECK_UPDATE_EVERY_HOURS |❌| Tiempo de espera en horas entre chequeo de actualizaciones. Por defecto 4 |
 |CHECK_UPDATE_STOPPED_CONTAINERS |❌| Si se desea que compruebe las actualizaciones de los contenedores detenidos. 0 no - 1 sí. Por defecto 1 | 
+|GROUPED_UPDATES |❌| Si se desea que agrupe los mensajes de las actualizaciones en uno solo. 0 no - 1 sí. Por defecto 1 | 
 |BUTTON_COLUMNS |❌| Numero de columnas de botones en las listas de contenedores. Por defecto 2 | 
 |LANGUAGE |❌| Idioma, puede ser ES / EN / NL / DE / RU / GL / IT / CAT. Por defecto ES (Spanish) | 
 |EXTENDED_MESSAGES |❌| Si se desea que muestre más mensajes de información. 0 no - 1 sí. Por defecto 0 | 
@@ -68,6 +69,7 @@ services:
             #- CHECK_UPDATES=1
             #- CHECK_UPDATE_EVERY_HOURS=4
             #- CHECK_UPDATE_STOPPED_CONTAINERS=1
+            #- GROUPED_UPDATES=1
             #- BUTTON_COLUMNS=2
             #- LANGUAGE=ES
             #- EXTENDED_MESSAGES=0
@@ -125,7 +127,6 @@ docker-controller-bot/
         ├── nl.json
         ├── cat.json
         └── it.json
-
 ```
 
 Para levantarlo habría que ejecutar en esa ruta: `docker compose -f docker-compose.debug.yaml up  -d --build --force-recreate`
