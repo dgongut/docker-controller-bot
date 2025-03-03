@@ -17,7 +17,7 @@ import json
 import requests
 import sys
 
-VERSION = "3.5.2"
+VERSION = "3.6.0"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -458,10 +458,10 @@ class DockerManager:
 			if pruned_containers:
 				file_size_bytes = sizeof_fmt(pruned_containers['SpaceReclaimed'])
 			debug(get_text("debug_deleted", str(pruned_containers), str(file_size_bytes)))
-			return "prune_containers", str(pruned_containers), str(file_size_bytes)
+			return get_text("prune_containers", str(file_size_bytes)), str(pruned_containers)
 		except Exception as e:
 			error(get_text("error_prune_containers_with_error", e))
-			return "error_prune_containers"
+			return get_text("error_prune_containers")
 		
 	def prune_images(self):
 		try:
@@ -469,10 +469,10 @@ class DockerManager:
 			if pruned_images:
 				file_size_bytes = sizeof_fmt(pruned_images['SpaceReclaimed'])
 			debug(get_text("debug_deleted",  str(pruned_images), str(file_size_bytes)))
-			return "prune_images",  str(pruned_images), str(file_size_bytes)
+			return get_text("prune_images", str(file_size_bytes)), str(pruned_images)
 		except Exception as e:
 			error(get_text("error_prune_images_with_error", e))
-			return "error_prune_images"
+			return get_text("error_prune_images")
 		
 	def prune_networks(self):
 		try:
@@ -490,11 +490,10 @@ class DockerManager:
 			if pruned_volumes:
 				file_size_bytes = sizeof_fmt(pruned_volumes['SpaceReclaimed'])
 			debug(get_text("debug_deleted",  str(pruned_volumes), str(file_size_bytes)))
-			return "prune_volumes", str(pruned_volumes), str(file_size_bytes)
+			return get_text("prune_volumes", str(file_size_bytes)), str(pruned_volumes)
 		except Exception as e:
-			debug(e)
 			error(get_text("error_prune_volumes_with_error", e))
-			return "error_prune_volumes"	
+			return get_text("error_prune_volumes")
 		
 # Instanciamos el DockerManager
 docker_manager = DockerManager()
@@ -544,6 +543,8 @@ class DockerUpdateMonitor:
 	def detectar_actualizaciones(self):
 		while True:
 			containers = self.client.containers.list(all=True)
+			grouped_updates_containers = []
+			grouped_notification_now = False
 			for container in containers:
 				if (container.status == "exited" or container.status == "dead") and not CHECK_UPDATE_STOPPED_CONTAINERS:
 					debug(get_text("debug_ignore_check_for_update", container.name))
@@ -582,22 +583,39 @@ class DockerUpdateMonitor:
 							self.client.images.remove(remote_image.id)
 						except:
 							pass # Si no se puede borrar es porque esta siendo usada por otro contenedor
+
+						if GROUPED_UPDATES:
+							grouped_updates_containers.append(container.name)
+
 						if image_status == old_image_status:
 							debug(get_text("debug_update_already_notified"))
 							continue
-						debug(get_text("debug_notifying_update"))
-						markup = InlineKeyboardMarkup(row_width = 1)
-						markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}"))
-						if not is_muted():
-							send_message(message=get_text("available_update", container.name), reply_markup=markup)
-						else:
-							debug(get_text("debug_muted_message", get_text("available_update", container.name)))
+
+						grouped_notification_now = True
+						if not GROUPED_UPDATES:
+							debug(get_text("debug_notifying_update"))
+							markup = InlineKeyboardMarkup(row_width = 1)
+							markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}"))
+							if not is_muted():
+								send_message(message=get_text("available_update", container.name), reply_markup=markup)
+							else:
+								debug(get_text("debug_muted_message", get_text("available_update", container.name)))
 					else: # Contenedor actualizado
 						image_status = get_text("UPDATED_CONTAINER_TEXT")
 				except Exception as e:
 					error(get_text("error_checking_update_with_error", e))
 					image_status = ""
 				write_cache_item(image_with_tag, container.name, image_status)
+			if GROUPED_UPDATES and grouped_updates_containers and grouped_notification_now:
+				containers = ""
+				for container_name in grouped_updates_containers:
+					containers += f"· {container_name}\n"
+				markup = InlineKeyboardMarkup(row_width = 1)
+				markup.add(InlineKeyboardButton(get_text("button_update_all"), callback_data="confirmUpdateAll"))
+				if not is_muted():
+					send_message(message=get_text("available_update", containers), reply_markup=markup)
+				else:
+					debug(get_text("debug_muted_message", get_text("available_update", container.name)))
 			debug(get_text("debug_waiting_next_check_updates", CHECK_UPDATE_EVERY_HOURS))
 			time.sleep(CHECK_UPDATE_EVERY_HOURS * 3600)
 
@@ -665,7 +683,7 @@ class DockerScheduleMonitor:
 			error(get_text("error_schedule_daemon", e))
 			self.demonio_schedule()
 
-@bot.message_handler(commands=["start", "list", "run", "stop", "restart", "delete", "checkupdate", "changetag", "logs", "logfile", "compose", "mute", "schedule", "info", "version", "donate", "prune"])
+@bot.message_handler(commands=["start", "list", "run", "stop", "restart", "delete", "checkupdate", "updateall", "changetag", "logs", "logfile", "compose", "mute", "schedule", "info", "version", "donate", "prune"])
 def command_controller(message):
 	userId = message.from_user.id
 	comando = message.text.split(' ', 1)[0]
@@ -876,6 +894,8 @@ def command_controller(message):
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
 			send_message(message=get_text("update_container"), reply_markup=markup)
+	elif comando in ('/updateall', f'/updateall@{bot.get_me().username}'):
+		confirm_update_all()
 	elif comando in ('/changetag', f'/changetag@{bot.get_me().username}'):
 		if container_id:
 			change_tag_container(container_id, container_name)
@@ -935,6 +955,8 @@ def button_controller(call):
 		tag = None
 	elif len(call_data_parts) == 2:
 		comando, action = call_data_parts
+	elif len(call_data_parts) == 1:
+		comando = call_data_parts[0]
 
 	# RUN
 	if comando == "run":
@@ -968,16 +990,24 @@ def button_controller(call):
 	elif comando == "confirmUpdate":
 		confirm_update(containerId, containerName)
 
+	# CONFIRM UPDATE ALL
+	elif comando == "confirmUpdateAll":
+		confirm_update_all()
+
 	# CHECK UPDATE
 	elif comando == "checkUpdate":
 		docker_manager.force_check_update(containerId)
 
 	# UPDATE
 	elif comando == "update":
-		x = send_message(message=get_text("updating", containerName))
-		result = docker_manager.update(container_id=containerId, container_name=containerName, message=x, bot=bot)
-		delete_message(x.message_id)
-		send_message(message=result)
+		update(containerId, containerName)
+
+	# CONFIRM UPDATE ALL
+	elif comando == "updateAll":
+		containers = docker_manager.list_containers()
+		for container in containers:
+			if update_available(container):
+				update(container.id, container.name)
 
 	# CONFIRM DELETE
 	elif comando == "confirmDelete":
@@ -1016,24 +1046,24 @@ def button_controller(call):
 		if action == "confirmPruneContainers":
 			confirm_prune_containers()
 		elif action == "pruneContainers":
-			result, data, size = docker_manager.prune_containers()
+			result, data = docker_manager.prune_containers()
 			markup = InlineKeyboardMarkup(row_width = 1)
 			markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
 			fichero_temporal = get_temporal_file(data, get_text("button_containers"))
 			x = send_message(message=get_text("loading_file"))
-			send_document(document=fichero_temporal, reply_markup=markup, caption=get_text(result, size))
+			send_document(document=fichero_temporal, reply_markup=markup, caption=result)
 			delete_message(x.message_id)
 
 		# PRUNE IMAGES
 		elif action == "confirmPruneImages":
 			confirm_prune_images()
 		elif action == "pruneImages":
-			result, data, size = docker_manager.prune_images()
+			result, data = docker_manager.prune_images()
 			markup = InlineKeyboardMarkup(row_width = 1)
 			markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
 			fichero_temporal = get_temporal_file(data, get_text("button_images"))
 			x = send_message(message=get_text("loading_file"))
-			send_document(document=fichero_temporal, reply_markup=markup, caption=get_text(result, size))
+			send_document(document=fichero_temporal, reply_markup=markup, caption=result)
 			delete_message(x.message_id)
 	
 		# PRUNE NETWORKS
@@ -1052,12 +1082,12 @@ def button_controller(call):
 		elif action == "confirmPruneVolumes":
 			confirm_prune_volumes()
 		elif action == "pruneVolumes":
-			result, data, size = docker_manager.prune_volumes()
+			result, data = docker_manager.prune_volumes()
 			markup = InlineKeyboardMarkup(row_width = 1)
 			markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
 			fichero_temporal = get_temporal_file(data, get_text("button_volumes"))
 			x = send_message(message=get_text("loading_file"))
-			send_document(document=fichero_temporal, reply_markup=markup, caption=get_text(result, size))
+			send_document(document=fichero_temporal, reply_markup=markup, caption=result)
 			delete_message(x.message_id)
 
 def run(containerId, containerName):
@@ -1207,6 +1237,12 @@ def confirm_change_tag(containerId, containerName, tag):
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 	send_message(message=get_text("confirm_change_tag", containerName, tag), reply_markup=markup)
 
+def update(containerId, containerName):
+	x = send_message(message=get_text("updating", containerName))
+	result = docker_manager.update(container_id=containerId, container_name=containerName, message=x, bot=bot)
+	delete_message(x.message_id)
+	send_message(message=result)
+
 def change_tag_container(containerId, containerName):
 	markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
 	client = docker.from_env()
@@ -1236,24 +1272,41 @@ def confirm_update(containerId, containerName):
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 	send_message(message=get_text("confirm_update", containerName), reply_markup=markup)
 
+def confirm_update_all():
+	containers = docker_manager.list_containers()
+	containersToUpdate = ""
+	for container in containers:
+		send_message(message=f"checking: {container.name}")
+		if update_available(container):
+			containersToUpdate += f"· {container.name}\n"
+	if containersToUpdate == "":
+		send_message(message=get_text("already_updated_all"))
+		return
+	markup = InlineKeyboardMarkup(row_width = 1)
+	markup.add(InlineKeyboardButton(get_text("button_confirm_update"), callback_data=f"updateAll"))
+	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+	send_message(message=get_text("confirm_update_all", containersToUpdate), reply_markup=markup)
+
 def is_admin(userId):
 	return str(userId) in str(TELEGRAM_ADMIN).split(',')
+
+def update_available(container):
+	image_with_tag = container.attrs['Config']['Image']
+	update = False
+	if CHECK_UPDATES:
+		try:
+			image_status = read_cache_item(image_with_tag, container.name)
+			if "⬆️" in image_status:
+				update = True
+		except:
+			pass
+	return update
 
 def display_containers(containers):
 	result = "```\n"
 	for container in containers:
 		result += f"{get_status_emoji(container.status, container.name)} {container.name}"
-		image_with_tag = container.attrs['Config']['Image']
-		update = False
-		if CHECK_UPDATES:
-			try:
-				image_status = read_cache_item(image_with_tag, container.name)
-				if "⬆️" in image_status:
-					update = True
-			except:
-				pass
-
-		if update:
+		if update_available(container):
 			result += " ⬆️"
 		result += "\n"
 	result += "```"
@@ -1524,6 +1577,7 @@ if __name__ == '__main__':
 		telebot.types.BotCommand("/restart", get_text("menu_restart")),
 		telebot.types.BotCommand("/delete", get_text("menu_delete")),
 		telebot.types.BotCommand("/checkupdate", get_text("menu_update")),
+		telebot.types.BotCommand("/updateall", get_text("menu_update_all")),
 		telebot.types.BotCommand("/changetag", get_text("menu_change_tag")),
 		telebot.types.BotCommand("/logs", get_text("menu_logs")),
 		telebot.types.BotCommand("/logfile", get_text("menu_logfile")),

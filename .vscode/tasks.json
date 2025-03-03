@@ -17,7 +17,7 @@
 			"dependsOn": [
 				"docker-build"
 			],
-			  "command": "docker-compose  --env-file .env -f docker-compose.debug.yaml up  -d --remove-orphans --force-recreate"
+			  "command": "docker compose  --env-file .env -f docker-compose.debug.yaml up  -d --remove-orphans --force-recreate"
 		}
 	]
 }

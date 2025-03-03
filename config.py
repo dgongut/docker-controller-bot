@@ -13,6 +13,7 @@ CONTAINER_NAME = os.environ.get("CONTAINER_NAME")
 LANGUAGE = os.environ.get("LANGUAGE")
 EXTENDED_MESSAGES = bool(int(os.environ.get("EXTENDED_MESSAGES")))
 BUTTON_COLUMNS = int(os.environ.get("BUTTON_COLUMNS"))
+GROUPED_UPDATES = bool(int(os.environ.get("GROUPED_UPDATES")))
 
 # CONSTANTS
 UPDATER_IMAGE = "dgongut/docker-container-updater:latest"
