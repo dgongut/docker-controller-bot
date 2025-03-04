@@ -613,9 +613,9 @@ class DockerUpdateMonitor:
 				markup = InlineKeyboardMarkup(row_width = 1)
 				markup.add(InlineKeyboardButton(get_text("button_update_all"), callback_data="confirmUpdateAll"))
 				if not is_muted():
-					send_message(message=get_text("available_update", containers), reply_markup=markup)
+					send_message(message=get_text("available_updates", containers), reply_markup=markup)
 				else:
-					debug(get_text("debug_muted_message", get_text("available_update", container.name)))
+					debug(get_text("debug_muted_message", get_text("available_updates", container.name)))
 			debug(get_text("debug_waiting_next_check_updates", CHECK_UPDATE_EVERY_HOURS))
 			time.sleep(CHECK_UPDATE_EVERY_HOURS * 3600)
 
