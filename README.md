@@ -90,12 +90,12 @@ services:
 
 ### Agradecimientos
 
-Traducción al neerlandés: [ManCaveMedia](https://github.com/ManCaveMedia)
-Traducción al alemán: [shedowe19](https://github.com/shedowe19)
-Traducción al ruso: [leyalton](https://github.com/leyalton)
-Traducción al gallego: [monfero](https://github.com/monfero)
-Traducción al italiano: [zichichi] (https://github.com/zichichi)
-
+- Traducción al neerlandés: [ManCaveMedia](https://github.com/ManCaveMedia)
+- Traducción al alemán: [shedowe19](https://github.com/shedowe19)
+- Traducción al ruso: [leyalton](https://github.com/leyalton)
+- Traducción al gallego: [monfero](https://github.com/monfero)
+- Traducción al italiano: [zichichi](https://github.com/zichichi)
+- Traducción al catalán: [flancky](https://t.me/flancky)
 ---
 
 ## Solo para desarrolladores
