@@ -10,7 +10,7 @@ ENV LANGUAGE=ES
 ENV EXTENDED_MESSAGES=0
 ENV TZ=UTC
 
-ARG VERSION=3.6.0
+ARG VERSION=3.7.0
 
 WORKDIR /app
 RUN wget https://github.com/dgongut/docker-controller-bot/archive/refs/tags/v${VERSION}.tar.gz -P /tmp
