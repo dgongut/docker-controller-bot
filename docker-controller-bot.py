@@ -17,7 +17,7 @@ import json
 import requests
 import sys
 
-VERSION = "3.6.0"
+VERSION = "3.7.0"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -683,7 +683,7 @@ class DockerScheduleMonitor:
 			error(get_text("error_schedule_daemon", e))
 			self.demonio_schedule()
 
-@bot.message_handler(commands=["start", "list", "run", "stop", "restart", "delete", "checkupdate", "updateall", "changetag", "logs", "logfile", "compose", "mute", "schedule", "info", "version", "donate", "prune"])
+@bot.message_handler(commands=["start", "list", "run", "stop", "restart", "delete", "checkupdate", "updateall", "changetag", "logs", "logfile", "compose", "mute", "schedule", "info", "version", "donate", "donors", "prune"])
 def command_controller(message):
 	userId = message.from_user.id
 	comando = message.text.split(' ', 1)[0]
@@ -928,6 +928,9 @@ def command_controller(message):
 		x = send_message(message=get_text("donate"))
 		time.sleep(45)
 		delete_message(x.message_id)
+
+	elif comando in ('/donors', f'/donors@{bot.get_me().username}'):
+		print_donors()
 
 
 @bot.callback_query_handler(func=lambda mensaje: True)
@@ -1342,6 +1345,39 @@ def get_update_emoji(containerName):
 
 	return status
 
+def print_donors():
+	donors = get_array_donors_online()
+	if donors:
+		result = ""
+		for donor in donors:
+			result += f"· {donor}\n"
+		send_message(message=get_text("donors_list", result))
+	else:
+		send_message(message=get_text("error_getting_donors"))
+
+def get_array_donors_online():
+	headers = {
+		'Cache-Control': 'no-cache',
+		'Pragma': 'no-cache'
+	}
+	
+	response = requests.get(DONORS_URL, headers=headers)
+	if response.status_code == 200:
+		try:
+			data = response.json()
+			if isinstance(data, list):
+				data.sort()
+				return data
+			else:
+				error(get_text("error_getting_donors_with_error", f"data is not a list [{data}]"))
+				return []
+		except ValueError:
+			error(get_text("error_getting_donors_with_error", f"data is not a json [{data}]"))
+			return []
+	else:
+		error(get_text("error_getting_donors_with_error", f"error code [{response.status_code}]"))
+		return []
+
 def get_container_id_by_name(container_name, debugging=False):
 	if debugging:
 		debug(get_text("debug_find_container", container_name))
@@ -1586,7 +1622,8 @@ if __name__ == '__main__':
 		telebot.types.BotCommand("/mute", get_text("menu_mute")),
 		telebot.types.BotCommand("/info", get_text("menu_info")),
 		telebot.types.BotCommand("/version", get_text("menu_version")),
-		telebot.types.BotCommand("/donate", get_text("menu_donate"))
+		telebot.types.BotCommand("/donate", get_text("menu_donate")),
+		telebot.types.BotCommand("/donors", get_text("menu_donors"))
 		])
 	delete_updater()
 	check_CONTAINER_NAME()

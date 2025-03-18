@@ -25,6 +25,7 @@ SCHEDULE_FILE = "schedule.txt"
 MUTE_FILE = ".muted_until"
 FULL_SCHEDULE_PATH = f'{SCHEDULE_PATH}/{SCHEDULE_FILE}'
 FULL_MUTE_FILE_PATH = f'{SCHEDULE_PATH}/{MUTE_FILE}'
+DONORS_URL = "https://donate.dgongut.com/donors.json"
 
 # LABELS
 LABEL_IGNORE_CHECK_UPDATES = "DCB-Ignore-Check-Updates"
