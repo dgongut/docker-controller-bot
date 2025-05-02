@@ -101,7 +101,7 @@ services:
 - Traducción al gallego: [monfero](https://github.com/monfero)
 - Traducción al italiano: [zichichi](https://github.com/zichichi)
 - Traducción al catalán: [flancky](https://t.me/flancky)
-- Pruebas del Docker Login: [garanda](https://t.me/garanda)
+- Pruebas del Docker Login: [garanda](https://github.com/garanda21)
 ---
 
 ## Solo para desarrolladores
