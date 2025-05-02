@@ -28,14 +28,14 @@ Lleva el control de tus contenedores docker desde un único lugar.
 
 **NUEVO** Canal de novedades en [![](https://badgen.net/badge/icon/telegram?icon=telegram&label)](https://t.me/dockercontrollerbotnews)
 
-🖼️ Si deseas establecerle el icono al bot de telegram, te dejo [aquí](https://raw.githubusercontent.com/dgongut/pictures/main/Docker-Controller-Bot/Docker-Controller-Bot.png) el icono en alta resolución. Solo tienes que descargarlo y mandárselo al @BotFather en la opción de BotPic.
+🖼️ Si deseas establecerle el icono al bot de telegram, te dejo [aquí](https://raw.githubusercontent.com/dgongut/pictures/main/Docker-Controller-Bot/Docker-Controller-Bot.png) el icono en alta resolución. Solo tienes que descargarlo y mandárselo al [BotFather](https://t.me/BotFather) en la opción de BotPic.
 
 ## Configuración en config.py
 
 | CLAVE  | OBLIGATORIO | VALOR |
 |:------------- |:---------------:| :-------------|
 |TELEGRAM_TOKEN |✅| Token del bot |
-|TELEGRAM_ADMIN |✅| ChatId del administrador (se puede obtener hablándole al bot Rose escribiendo /id). Admite múltiples administradores separados por comas. Por ejemplo 12345,54431,55944 |
+|TELEGRAM_ADMIN |✅| ChatId del administrador (se puede obtener hablándole al bot [Rose](https://t.me/MissRose_bot) escribiendo /id). Admite múltiples administradores separados por comas. Por ejemplo 12345,54431,55944 |
 |TELEGRAM_GROUP |❌| ChatId del grupo. Si este bot va a formar parte de un grupo, es necesario especificar el chatId de dicho grupo. Es necesario que el bot sea administrador del grupo |
 |TELEGRAM_THREAD |❌| Thread del tema dentro de un supergrupo; valor numérico (2,3,4..). Por defecto 1. Se utiliza en conjunción con la variable TELEGRAM_GROUP |
 |TELEGRAM_NOTIFICATION_CHANNEL |❌| Canal donde se publicarán exclusivamente los cambios de estado de los contenedores |
@@ -50,7 +50,11 @@ Lleva el control de tus contenedores docker desde un único lugar.
 |EXTENDED_MESSAGES |❌| Si se desea que muestre más mensajes de información. 0 no - 1 sí. Por defecto 0 | 
 
 ### Anotaciones
-Será necesario mapear un volumen para almacenar lo que el bot escribe en /app/schedule
+> [!WARNING]
+> Será necesario mapear un volumen para almacenar lo que el bot escribe en /app/schedule
+
+> [!NOTE]
+> Si se requiere tener la sesión iniciada en algún registro como DockerHub, GitHub Registry o alguno privado (docker login) es posible trasladar ese login al contenedor mapeando el `~/.docker/config.json` a `/root/.docker/config.json`
 
 ### Ejemplo de Docker-Compose para su ejecución normal
 
@@ -76,6 +80,7 @@ services:
         volumes:
             - /var/run/docker.sock:/var/run/docker.sock # NO CAMBIAR
             - /ruta/para/guardar/las/programaciones:/app/schedule # CAMBIAR LA PARTE IZQUIERDA
+            #- ~/.docker/config.json:/root/.docker/config.json # Solo si se requiere iniciar sesión en algún registro
         image: dgongut/docker-controller-bot:latest
         container_name: docker-controller-bot
         restart: always
@@ -96,6 +101,7 @@ services:
 - Traducción al gallego: [monfero](https://github.com/monfero)
 - Traducción al italiano: [zichichi](https://github.com/zichichi)
 - Traducción al catalán: [flancky](https://t.me/flancky)
+- Pruebas del Docker Login: [garanda](https://t.me/garanda)
 ---
 
 ## Solo para desarrolladores
