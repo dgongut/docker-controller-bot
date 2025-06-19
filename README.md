@@ -1,4 +1,4 @@
-# docker-controller-bot
+# Docker-Controller-Bot
 [![](https://badgen.net/badge/icon/github?icon=github&label)](https://github.com/dgongut/docker-controller-bot)
 [![](https://badgen.net/badge/icon/docker?icon=docker&label)](https://hub.docker.com/r/dgongut/docker-controller-bot)
 [![](https://badgen.net/badge/icon/telegram?icon=telegram&label)](https://t.me/dockercontrollerbotnews)
@@ -30,7 +30,7 @@ Lleva el control de tus contenedores docker desde un único lugar.
 
 🖼️ Si deseas establecerle el icono al bot de telegram, te dejo [aquí](https://raw.githubusercontent.com/dgongut/pictures/main/Docker-Controller-Bot/Docker-Controller-Bot.png) el icono en alta resolución. Solo tienes que descargarlo y mandárselo al [BotFather](https://t.me/BotFather) en la opción de BotPic.
 
-## Configuración en config.py
+## Configuración en las variables del Docker Compose
 
 | CLAVE  | OBLIGATORIO | VALOR |
 |:------------- |:---------------:| :-------------|
@@ -49,17 +49,16 @@ Lleva el control de tus contenedores docker desde un único lugar.
 |LANGUAGE |❌| Idioma, puede ser ES / EN / NL / DE / RU / GL / IT / CAT. Por defecto ES (Spanish) | 
 |EXTENDED_MESSAGES |❌| Si se desea que muestre más mensajes de información. 0 no - 1 sí. Por defecto 0 | 
 
-### Anotaciones
+## Anotaciones
 > [!WARNING]
 > Será necesario mapear un volumen para almacenar lo que el bot escribe en /app/schedule
 
 > [!NOTE]
 > Si se requiere tener la sesión iniciada en algún registro como DockerHub, GitHub Registry o alguno privado (docker login) es posible trasladar ese login al contenedor mapeando el `~/.docker/config.json` a `/root/.docker/config.json`
 
-### Ejemplo de Docker-Compose para su ejecución normal
+## Ejemplo de Docker-Compose para su ejecución normal
 
 ```yaml
-version: '3.3'
 services:
     docker-controller-bot:
         environment:
@@ -88,12 +87,12 @@ services:
         tty: true
 ```
 
-### Funciones Extra mediante Labels/Etiquetas en otros contenedores
+## Funciones Extra mediante Labels/Etiquetas en otros contenedores
 
 - Añadiendo la etiqueta `DCB-Ignore-Check-Updates` a un contenedor, no se comprobarán actualizaciones para él.
 - Añadiendo la etiqueta `DCB-Auto-Update` a un contenedor, se actualizará automáticamente sin preguntar.
 
-### Agradecimientos
+## Agradecimientos
 
 - Traducción al neerlandés: [ManCaveMedia](https://github.com/ManCaveMedia)
 - Traducción al alemán: [shedowe19](https://github.com/shedowe19)
@@ -102,8 +101,76 @@ services:
 - Traducción al italiano: [zichichi](https://github.com/zichichi)
 - Traducción al catalán: [flancky](https://t.me/flancky)
 - Pruebas del Docker Login: [garanda](https://github.com/garanda21)
----
 
+## ❓ Preguntas Frecuentes (FAQ)
+
+<details>
+<summary>🧭 ¿Puede el programa decirme de qué versión a qué versión se actualizó una imagen?</summary>
+
+**Respuesta corta:** No, eso no es posible de forma automática.
+
+**Respuesta explicada:**
+
+El programa no se basa en "versiones", sino en comprobar si una imagen Docker ha cambiado.  
+Esto se hace comparando el **hash (identificador único)** de la imagen local con el hash remoto.
+
+- En Docker, el **tag** (como `latest`, `v1.2`, etc.) es solo una etiqueta.
+- Esa etiqueta **no siempre representa una versión real** del software dentro de la imagen.
+- Algunos desarrolladores usan etiquetas que coinciden con la versión (como `v1.2.3`), pero no es obligatorio ni automático.
+- Por ejemplo, el tag `latest` puede apuntar a una imagen completamente distinta en cualquier momento.
+
+🔍 Por eso, aunque sepamos que una imagen cambió, **no podemos decir automáticamente "pasaste de la versión X a la Y"**.
+
+**¿Por qué no se muestra el changelog o la lista de cambios?**
+
+Mostrar un changelog requeriría:
+
+- Saber de qué versión venías y a cuál fuiste (lo cual no es posible automáticamente).
+- Que el desarrollador del contenedor publique esa información en un lugar conocido (como GitHub o Docker Hub).
+- Que haya una forma estándar de obtenerlo, cosa que no siempre ocurre.
+
+📦 Cada contenedor es diferente, y no todos publican cambios de forma clara o accesible.
+
+**Entonces, ¿cómo puedo saber qué cambió?**
+
+Puedes hacerlo manualmente:
+
+1. El programa puede mostrarte el **hash anterior** y el **nuevo hash** de la imagen.
+2. Con esos datos, puedes ir al repositorio del contenedor (GitHub, Docker Hub, etc.).
+3. Busca allí el historial de versiones, el changelog o las notas de lanzamiento si están disponibles.
+
+</details>
+
+<details>
+<summary>🛠️ He visto que se pueden añadir labels para controlar ciertas cosas de los contenedores, ¿cómo lo hago?</summary>
+
+Efectivamente, actualmente hay dos etiquetas (*labels*) que puedes añadir a los contenedores para controlarlos:  
+- `DCB-Ignore-Check-Updates`  
+- `DCB-Auto-Update`
+
+Para añadirlas a un contenedor, basta con editar el archivo `docker-compose.yml` y agregarlas bajo la clave `labels`.  
+A continuación se muestra un ejemplo con **Home Assistant**:
+
+```yaml
+services:
+  homeassistant:
+    image: lscr.io/linuxserver/homeassistant:latest
+    container_name: homeassistant
+    network_mode: host
+    environment:
+      - PUID=1026
+      - PGID=100
+      - TZ=Etc/Madrid
+    volumes:
+      - /volume2/docker/homeassistant/config:/config
+      - /volume2/temp/ha:/tmp
+    labels:
+      - "DCB-Auto-Update"
+    restart: unless-stopped
+```
+</details> 
+
+---
 ## Solo para desarrolladores
 
 ### Ejecución con código local
