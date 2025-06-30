@@ -13,7 +13,6 @@ CONTAINER_NAME = os.environ.get("CONTAINER_NAME")
 LANGUAGE = os.environ.get("LANGUAGE")
 EXTENDED_MESSAGES = bool(int(os.environ.get("EXTENDED_MESSAGES")))
 BUTTON_COLUMNS = int(os.environ.get("BUTTON_COLUMNS"))
-GROUPED_UPDATES = bool(int(os.environ.get("GROUPED_UPDATES")))
 
 # CONSTANTS
 UPDATER_IMAGE = "dgongut/docker-container-updater:latest"
@@ -41,4 +40,32 @@ docker_architectures = {
     "ppc64le": "ppc64le",
     "s390x": "s390x",
     "unknown": "unknown",
+}
+
+CALL_PATTERNS = {
+    "cancelUpdate": [],
+    "changeTag": ["containerId", "containerName", "tag"],
+    "changeTagContainer": ["containerId", "containerName"],
+    "cerrar": [],
+    "checkUpdate": ["containerId", "containerName"],
+    "compose": ["containerId", "containerName"],
+    "confirmChangeTag": ["containerId", "containerName", "tag"],
+    "confirmDelete": ["containerId", "containerName"],
+    "confirmUpdate": ["containerId", "containerName"],
+    "confirmUpdateAll": [],
+    "confirmUpdateSelected": ["originalMessageId"],
+    "delete": ["containerId", "containerName"],
+    "deleteSchedule": ["schedule", "action", "containerName"],
+    "info": ["containerId", "containerName"],
+    "logfile": ["containerId", "containerName"],
+    "logs": ["containerId", "containerName"],
+    "toggleUpdate": ["containerName"],
+    "toggleUpdateAll": [],
+    "prune": ["action"],
+    "restart": ["containerId", "containerName"],
+    "run": ["containerId", "containerName"],
+    "stop": ["containerId", "containerName"],
+    "update": ["containerId", "containerName"],
+    "updateAll": [],
+    "updateSelected": ["originalMessageId"],
 }

@@ -17,7 +17,7 @@ import json
 import requests
 import sys
 
-VERSION = "3.7.0"
+VERSION = "3.8.0"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -236,7 +236,7 @@ class DockerManager:
 			image_with_tag = container_attrs.get('Image', 'N/A')
 			if CHECK_UPDATES:
 				try:
-					image_status = read_cache_item(image_with_tag, container_name)
+					image_status = read_container_update_status(image_with_tag, container_name)
 				except Exception as e:
 					debug(get_text("debug_update_not_cached", container_name, e))
 
@@ -389,7 +389,7 @@ class DockerManager:
 						client.images.remove(local_image)
 					except Exception as e:
 						debug(get_text("debug_image_can_not_be_deleted", container_name, e))
-					write_cache_item(image_with_tag, container_name, get_text("UPDATED_CONTAINER_TEXT"))
+					save_container_update_status(image_with_tag, container_name, get_text("UPDATED_CONTAINER_TEXT"))
 					return get_text("updated_container", container_name)
 				except Exception as e:
 					container.rename(container_name)
@@ -424,7 +424,7 @@ class DockerManager:
 		except Exception as e:
 			error(get_text("error_checking_update_with_error", e))
 			image_status = ""
-		write_cache_item(image_with_tag, container.name, image_status)
+		save_container_update_status(image_with_tag, container.name, image_status)
 
 	def delete(self, container_id, container_name):
 		try:
@@ -544,7 +544,7 @@ class DockerUpdateMonitor:
 		while True:
 			containers = self.client.containers.list(all=True)
 			grouped_updates_containers = []
-			grouped_notification_now = False
+			should_notify = False
 			for container in containers:
 				if (container.status == "exited" or container.status == "dead") and not CHECK_UPDATE_STOPPED_CONTAINERS:
 					debug(get_text("debug_ignore_check_for_update", container.name))
@@ -561,7 +561,7 @@ class DockerUpdateMonitor:
 					local_image = container.image.id
 					remote_image = self.client.images.pull(image_with_tag)
 					debug(get_text("debug_checking_update", container.name, image_with_tag, local_image.replace('sha256:', '')[:CONTAINER_ID_LENGTH], remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]))
-					if local_image != remote_image.id: # Actualización detectada
+					if local_image != remote_image.id:
 						if LABEL_AUTO_UPDATE in labels:
 							if EXTENDED_MESSAGES and not is_muted():
 								send_message_to_notification_channel(message=get_text("auto_update", container.name))
@@ -576,7 +576,7 @@ class DockerUpdateMonitor:
 							else:
 								debug(get_text("debug_muted_message", result))
 							continue
-						old_image_status = read_cache_item(image_with_tag, container.name)
+						old_image_status = read_container_update_status(image_with_tag, container.name)
 						image_status = get_text("NEED_UPDATE_CONTAINER_TEXT")
 						debug(get_text("debug_update_detected", container.name, remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]))
 						try:
@@ -584,38 +584,45 @@ class DockerUpdateMonitor:
 						except:
 							pass # Si no se puede borrar es porque esta siendo usada por otro contenedor
 
-						if GROUPED_UPDATES:
+						if container.name != CONTAINER_NAME:
 							grouped_updates_containers.append(container.name)
-
+						
 						if image_status == old_image_status:
 							debug(get_text("debug_update_already_notified"))
 							continue
 
-						grouped_notification_now = True
-						if not GROUPED_UPDATES:
-							debug(get_text("debug_notifying_update"))
+						if container.name == CONTAINER_NAME:
 							markup = InlineKeyboardMarkup(row_width = 1)
 							markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}"))
 							if not is_muted():
 								send_message(message=get_text("available_update", container.name), reply_markup=markup)
 							else:
 								debug(get_text("debug_muted_message", get_text("available_update", container.name)))
+							continue
+
+						should_notify = True
 					else: # Contenedor actualizado
 						image_status = get_text("UPDATED_CONTAINER_TEXT")
 				except Exception as e:
 					error(get_text("error_checking_update_with_error", e))
 					image_status = ""
-				write_cache_item(image_with_tag, container.name, image_status)
-			if GROUPED_UPDATES and grouped_updates_containers and grouped_notification_now:
-				containers = ""
-				for container_name in grouped_updates_containers:
-					containers += f"· {container_name}\n"
-				markup = InlineKeyboardMarkup(row_width = 1)
-				markup.add(InlineKeyboardButton(get_text("button_update_all"), callback_data="confirmUpdateAll"))
+				save_container_update_status(image_with_tag, container.name, image_status)
+
+			if grouped_updates_containers and should_notify:
+				markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
+				markup.add(*[
+					InlineKeyboardButton(f'➕ {name}', callback_data=f'toggleUpdate|{name}')
+					for name in grouped_updates_containers
+				])
+				markup.add(
+					InlineKeyboardButton(get_text("button_update_all"), callback_data="toggleUpdateAll"),
+					InlineKeyboardButton(get_text("button_cancel"), callback_data="cancelUpdate")
+				)
 				if not is_muted():
-					send_message(message=get_text("available_updates", containers), reply_markup=markup)
+					message = send_message(message=get_text("available_updates"), reply_markup=markup)
+					save_update_data(TELEGRAM_GROUP, message.message_id, grouped_updates_containers)
 				else:
-					debug(get_text("debug_muted_message", get_text("available_updates", container.name)))
+					debug(get_text("debug_muted_message", get_text("available_updates")))
 			debug(get_text("debug_waiting_next_check_updates", CHECK_UPDATE_EVERY_HOURS))
 			time.sleep(CHECK_UPDATE_EVERY_HOURS * 3600)
 
@@ -932,34 +939,49 @@ def command_controller(message):
 	elif comando in ('/donors', f'/donors@{bot.get_me().username}'):
 		print_donors()
 
+def parse_call_data(call_data):
+    parts = call_data.split("|")
+    comando = parts[0]
+    args = parts[1:]
+
+    if comando not in CALL_PATTERNS:
+        raise ValueError(f"COMMAND NOT IN PATTERN: {comando}")
+
+    expected_keys = CALL_PATTERNS[comando]
+
+    if len(args) != len(expected_keys):
+        raise ValueError(f"INCORRECT LENGTH CALLBACK DATA FOR '{comando}': IT WAS EXPECTED {len(expected_keys)}")
+
+    parsed = {"comando": comando}
+    parsed.update(dict(zip(expected_keys, args)))
+    return parsed
 
 @bot.callback_query_handler(func=lambda mensaje: True)
 def button_controller(call):
 	messageId = call.message.id
+	chatId = call.message.chat.id
 	userId = call.from_user.id
+	bot.answer_callback_query(call.id)
 
 	if not is_admin(userId):
 		warning(get_text("warning_not_admin", userId, call.from_user.username))
 		send_message(chat_id=userId, message=get_text("user_not_admin"))
 		return
 
-	delete_message(messageId)
+	data = parse_call_data(call.data)
+	comando = data["comando"]
+	containerId = data.get("containerId")
+	containerName = data.get("containerName")
+	tag = data.get("tag")
+	schedule = data.get("schedule")
+	action = data.get("action")
+	originalMessageId = data.get("originalMessageId")
+
+	if comando != "toggleUpdate" and comando != "toggleUpdateAll":
+		delete_message(messageId)
+
 	if call.data == "cerrar":
 		return
-
-	call_data_parts = call.data.split("|")
-	if len(call_data_parts) == 4:
-		if call_data_parts[0] == "deleteSchedule":
-			comando, schedule, action, containerName = call_data_parts
-		else:
-			comando, containerId, containerName, tag = call_data_parts
-	elif len(call_data_parts) == 3:
-		comando, containerId, containerName = call_data_parts
-		tag = None
-	elif len(call_data_parts) == 2:
-		comando, action = call_data_parts
-	elif len(call_data_parts) == 1:
-		comando = call_data_parts[0]
 
 	# RUN
 	if comando == "run":
@@ -1042,6 +1064,53 @@ def button_controller(call):
 	elif comando == "deleteSchedule":
 		delete_line_from_file(FULL_SCHEDULE_PATH, f'{schedule} {action} {containerName}')
 		send_message(message=get_text("deleted_schedule", f'{schedule} {action} {containerName}'))
+
+	# MARCAR COMO UPDATE
+	elif comando == "toggleUpdate":
+		containers, selected = load_update_data(chatId, messageId)
+		if containerName in selected:
+			selected.remove(containerName)
+		else:
+			selected.add(containerName)
+		save_update_data(chatId, messageId, containers, selected)
+
+		markup = build_keyboard(containers, selected, messageId)
+		bot.edit_message_reply_markup(chatId, messageId, reply_markup=markup)
+
+	# MARCAR COMO UPDATE TODOS
+	elif comando == "toggleUpdateAll":
+		containers, selected = load_update_data(chatId, messageId)
+		for container in containers:
+			if container not in selected:
+				selected.add(container)
+		save_update_data(chatId, messageId, containers, selected)
+
+		markup = build_keyboard(containers, selected, messageId)
+		bot.edit_message_reply_markup(chatId, messageId, reply_markup=markup)
+
+	# CONFIRM UPDATE SELECTED
+	elif comando == "confirmUpdateSelected":
+		confirm_update_selected(chatId, messageId)
+
+	# CANCEL UPDATE
+	elif comando == "cancelUpdate":
+		clear_update_data(chatId, messageId)
+
+	# UPDATE SELECTED
+	elif comando == "updateSelected":
+		containers, selected = load_update_data(chatId, originalMessageId)
+		for containerName in selected:
+			container_id = get_container_id_by_name(container_name=containerName)
+			if not container_id:
+				send_message(message=get_text("container_does_not_exist", containerName))
+				debug(get_text("debug_container_not_found", containerName))
+				continue
+			client = docker.from_env()
+			container = client.containers.get(container_id)
+			debug(f"Updating container: {container})")
+			if update_available(container):
+				update(container.id, container.name)
+		clear_update_data(chatId, originalMessageId)
 
 	# PRUNE
 	elif comando == "prune":
@@ -1148,16 +1217,20 @@ def mute(minutes):
 		return
 	with open(FULL_MUTE_FILE_PATH, 'w') as mute_file:
 		mute_file.write(str(time.time() + minutes * 60))
-	if minutes == 1:
-		send_message(message=get_text("muted_singular"))
-	else:
-		send_message(message=get_text("muted", minutes))
+	debug(get_text("muted", minutes))
+	if EXTENDED_MESSAGES:
+		if minutes == 1:
+			send_message(message=get_text("muted_singular"))
+		else:
+			send_message(message=get_text("muted", minutes))
 	threading.Timer(minutes * 60, unmute).start()
 
 def unmute():
 	with open(FULL_MUTE_FILE_PATH, 'w') as mute_file:
 		mute_file.write('0')
-	send_message(message=get_text("unmuted"))
+	debug(get_text("unmuted"))
+	if EXTENDED_MESSAGES:
+		send_message(message=get_text("unmuted"))
 
 def is_muted():
 	with open(FULL_MUTE_FILE_PATH, 'r') as fichero:
@@ -1253,7 +1326,6 @@ def change_tag_container(containerId, containerName):
 	repo = container.attrs['Config']['Image'].split(":")[0]
 	tags = get_docker_tags(repo)
 	if not tags:
-		send_message(message=get_text("error_getting_tags", containerName))
 		return
 
 	botones = []
@@ -1289,6 +1361,37 @@ def confirm_update_all():
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 	send_message(message=get_text("confirm_update_all", containersToUpdate), reply_markup=markup)
 
+def confirm_update_selected(chatId, messageId):
+	_, selected = load_update_data(chatId, messageId)
+	containersToUpdate = ""
+	for container in selected:
+		containersToUpdate += f"· {container}\n"
+	markup = InlineKeyboardMarkup(row_width = 1)
+	markup.add(InlineKeyboardButton(get_text("button_confirm_update"), callback_data=f"updateSelected|{messageId}"))
+	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cancelUpdate"))
+	send_message(message=get_text("confirm_update_all", containersToUpdate), reply_markup=markup)
+
+def build_keyboard(grouped_updates_containers, selected_containers, originalMessageId):
+	markup = InlineKeyboardMarkup(row_width=BUTTON_COLUMNS)
+	botones = []
+	for container in grouped_updates_containers:
+		icono = "✅" if container in selected_containers else "➕"
+		botones.append(
+			InlineKeyboardButton(f"{icono} {container}", callback_data=f"toggleUpdate|{container}")
+		)
+	markup.add(*botones)
+
+	fixed_buttons = []
+	if selected_containers:
+		fixed_buttons.append(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdateSelected|{originalMessageId}"))
+	else:
+		fixed_buttons.append(InlineKeyboardButton(get_text("button_update_all"), callback_data="toggleUpdateAll"))
+
+	fixed_buttons.append(InlineKeyboardButton(get_text("button_cancel"), callback_data="cancelUpdate"))
+
+	markup.add(*fixed_buttons)
+	return markup
+
 def is_admin(userId):
 	return str(userId) in str(TELEGRAM_ADMIN).split(',')
 
@@ -1297,7 +1400,7 @@ def update_available(container):
 	update = False
 	if CHECK_UPDATES:
 		try:
-			image_status = read_cache_item(image_with_tag, container.name)
+			image_status = read_container_update_status(image_with_tag, container.name)
 			if "⬆️" in image_status:
 				update = True
 		except:
@@ -1339,7 +1442,7 @@ def get_update_emoji(containerName):
 	client = docker.from_env()
 	container = client.containers.get(container_id)
 	image_with_tag = container.attrs['Config']['Image']
-	image_status = read_cache_item(image_with_tag, container.name)
+	image_status = read_container_update_status(image_with_tag, container.name)
 	if get_text("NEED_UPDATE_CONTAINER_TEXT") in image_status:
 		status = "⬆️"
 
@@ -1396,17 +1499,55 @@ def sanitize_text_for_filename(text):
 	sanitized = re.sub(r'_+', '_', sanitized)
 	return sanitized
 
-def write_cache_item(image_with_tag, container_name, value):
+def write_cache_item(key, value):
 	try:
-		pickle.dump(value, open(f'{DIR["cache"]}{sanitize_text_for_filename(image_with_tag)}_{sanitize_text_for_filename(container_name)}', 'wb'))
+		pickle.dump(value, open(f'{DIR["cache"]}{key}', 'wb'))
 	except:
 		error(get_text("error_writing_cache_with_error", key))
 
-def read_cache_item(image_with_tag, container_name):
+def read_cache_item(key):
 	try:
-		return pickle.load(open(f'{DIR["cache"]}{sanitize_text_for_filename(image_with_tag)}_{sanitize_text_for_filename(container_name)}', 'rb'))
+		return pickle.load(open(f'{DIR["cache"]}{key}', 'rb'))
 	except:
 		return ""
+	
+def delete_cache_item(key):
+    path = f'{DIR["cache"]}{key}'
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception as e:
+        pass
+	
+def save_container_update_status(image_with_tag, container_name, value):
+	key = f'{sanitize_text_for_filename(image_with_tag)}_{sanitize_text_for_filename(container_name)}'
+	write_cache_item(key, value)
+
+def read_container_update_status(image_with_tag, container_name):
+	key = f'{sanitize_text_for_filename(image_with_tag)}_{sanitize_text_for_filename(container_name)}'
+	return read_cache_item(key)
+
+def save_update_data(chat_id, message_id, containers, selected=None):
+	if selected is None:
+		selected = set()
+	data = {
+		"containers": containers,
+		"selected": selected
+	}
+	write_cache_item(f"update_data_{chat_id}_{message_id}", data)
+
+def load_update_data(chat_id, message_id):
+	data = read_cache_item(f"update_data_{chat_id}_{message_id}")
+	if data is None:
+		return [], set()
+	containers = data.get("containers", [])
+	selected = data.get("selected", set())
+	if not isinstance(selected, set):
+		selected = set(selected)
+	return containers, selected
+
+def clear_update_data(chat_id, message_id):
+    delete_cache_item(f"update_data_{chat_id}_{message_id}")
 
 def generate_docker_compose(container):
 	container_attrs = container.attrs['Config']
