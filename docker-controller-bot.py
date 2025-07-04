@@ -19,7 +19,7 @@ from telebot import util
 from telebot.types import InlineKeyboardButton
 from telebot.types import InlineKeyboardMarkup
 
-VERSION = "3.9.0"
+VERSION = "3.9.1"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -1102,7 +1102,7 @@ def button_controller(call):
 
 	# CANCEL ASK
 	elif comando == "cancelAskCommand":
-		clear_command_request_state(chatId)
+		clear_command_request_state(userId)
 
 	# CANCEL EXEC
 	elif comando == "cancelExec":
@@ -1233,14 +1233,23 @@ def button_controller(call):
 
 @bot.message_handler(func=lambda message: True)
 def handle_text(message):
-	user_id = message.from_user.id
+	userId = message.from_user.id
 	username = message.from_user.username
-	chat_id = message.chat.id
-	pending = load_command_request_state(chat_id)
+	pending = load_command_request_state(userId)
+	debug(f"USER: {userId}")
+	debug(f"CHAT/GROUP: {message.chat.id}")
+	message_thread_id = message.message_thread_id
+	if not message_thread_id:
+		message_thread_id = 1
+	debug(f"THREAD ID: {message_thread_id}")
+
+	if message_thread_id != TELEGRAM_THREAD and (not message.reply_to_message or message.reply_to_message.from_user.id != bot.get_me().id):
+		return
+
 	if pending:
-		if not is_admin(user_id):
-			warning(get_text("warning_not_admin", user_id, username))
-			send_message(get_text("user_not_admin"), chat_id=user_id)
+		if not is_admin(userId):
+			warning(get_text("warning_not_admin", userId, username))
+			send_message(get_text("user_not_admin"), chat_id=userId)
 			return
 		command_text = message.text.strip()
 		containerId = pending.get("containerId")
@@ -1248,7 +1257,7 @@ def handle_text(message):
 		deleteMessage = pending.get("deleteMessage")
 		delete_message(deleteMessage)
 		delete_message(message.message_id)
-		clear_command_request_state(chat_id)
+		clear_command_request_state(userId)
 		confirm_execute_command(containerId, containerName, command_text)
 	else:
 		pass
