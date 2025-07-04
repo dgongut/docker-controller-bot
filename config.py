@@ -25,6 +25,8 @@ MUTE_FILE = ".muted_until"
 FULL_SCHEDULE_PATH = f'{SCHEDULE_PATH}/{SCHEDULE_FILE}'
 FULL_MUTE_FILE_PATH = f'{SCHEDULE_PATH}/{MUTE_FILE}'
 DONORS_URL = "https://donate.dgongut.com/donors.json"
+ICON_CONTAINER_MARK_FOR_UPDATE = "➕"
+ICON_CONTAINER_MARKED_FOR_UPDATE = "✅"
 
 # LABELS
 LABEL_IGNORE_CHECK_UPDATES = "DCB-Ignore-Check-Updates"
@@ -43,6 +45,9 @@ docker_architectures = {
 }
 
 CALL_PATTERNS = {
+    "askCommand": ["containerId", "containerName"],
+    "cancelAskCommand": [],
+    "cancelExec": ["commandId"],
     "cancelUpdate": [],
     "changeTag": ["containerId", "containerName", "tag"],
     "changeTagContainer": ["containerId", "containerName"],
@@ -51,11 +56,13 @@ CALL_PATTERNS = {
     "compose": ["containerId", "containerName"],
     "confirmChangeTag": ["containerId", "containerName", "tag"],
     "confirmDelete": ["containerId", "containerName"],
+    "confirmExec": ["containerId", "containerName", "commandId"],
     "confirmUpdate": ["containerId", "containerName"],
     "confirmUpdateAll": [],
     "confirmUpdateSelected": ["originalMessageId"],
     "delete": ["containerId", "containerName"],
-    "deleteSchedule": ["schedule", "action", "containerName"],
+    "deleteSchedule": ["scheduleHash"],
+    "exec": ["containerId", "containerName", "commandId"],
     "info": ["containerId", "containerName"],
     "logfile": ["containerId", "containerName"],
     "logs": ["containerId", "containerName"],

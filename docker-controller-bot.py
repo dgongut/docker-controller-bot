@@ -1,23 +1,25 @@
-import re
-import os
-import telebot
-from telebot import util
-from telebot.types import InlineKeyboardMarkup
-from telebot.types import InlineKeyboardButton
-from datetime import datetime
-from croniter import croniter
-from config import *
 import docker
+import hashlib
 import io
-import yaml
-import time
-import threading
-import pickle
 import json
+import os
+import pickle
+import re
 import requests
 import sys
+import telebot
+import threading
+import time
+import uuid
+import yaml
+from config import *
+from croniter import croniter
+from datetime import datetime
+from telebot import util
+from telebot.types import InlineKeyboardButton
+from telebot.types import InlineKeyboardMarkup
 
-VERSION = "3.8.0"
+VERSION = "3.9.0"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -29,11 +31,11 @@ def warning(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - WARNING: {message}')
 
 def sizeof_fmt(num, suffix="B"):
-    for unit in ("", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "Zi"):
-        if abs(num) < 1024.0:
-            return f"{num:3.1f}{unit}{suffix}"
-        num /= 1024.0
-    return f"{num:.1f}Yi{suffix}"
+	for unit in ("", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "Zi"):
+		if abs(num) < 1024.0:
+			return f"{num:3.1f}{unit}{suffix}"
+		num /= 1024.0
+	return f"{num:.1f}Yi{suffix}"
 
 if LANGUAGE.lower() not in ("es", "en", "nl", "de", "ru", "gl", "it", "cat"):
 	error("LANGUAGE only can be ES/EN/NL/DE/RU/GL/IT/CAT")
@@ -118,6 +120,10 @@ class DockerManager:
 			containers = self.client.containers.list(filters=filters)
 		elif comando == "/stop" or comando == "/restart":
 			status = ['running', 'restarting']
+			filters = {'status': status}
+			containers = self.client.containers.list(filters=filters)
+		elif comando == "/exec":
+			status = ['running']
 			filters = {'status': status}
 			containers = self.client.containers.list(filters=filters)
 		else:
@@ -440,17 +446,6 @@ class DockerManager:
 		except Exception as e:
 			error(get_text("error_deleting_container_with_error", container_name, e))
 			return get_text("error_deleting_container", container_name)
-	
-	def has_label(self, container_id, container_name, label):
-		try:
-			container = self.client.containers.get(container_id)
-			labels = container.labels
-			if label in labels:
-				return True
-			return False
-		except Exception as e:
-			debug(get_text("error_checking_label_with_error", label,container_name, e))
-			return False
 		
 	def prune_containers(self):
 		try:
@@ -494,6 +489,16 @@ class DockerManager:
 		except Exception as e:
 			error(get_text("error_prune_volumes_with_error", e))
 			return get_text("error_prune_volumes")
+		
+	def execute_command(self, container_id, container_name, command):
+		try:
+			container = self.client.containers.get(container_id)
+			result = container.exec_run(command)
+			output = result.output.decode('utf-8')
+			return output
+		except Exception as e:
+			error(get_text("error_executing_command_container_with_error", command, container_name, e))
+			return get_text("error_executing_command_container", command, container_name)
 		
 # Instanciamos el DockerManager
 docker_manager = DockerManager()
@@ -611,7 +616,7 @@ class DockerUpdateMonitor:
 			if grouped_updates_containers and should_notify:
 				markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
 				markup.add(*[
-					InlineKeyboardButton(f'➕ {name}', callback_data=f'toggleUpdate|{name}')
+					InlineKeyboardButton(f'{ICON_CONTAINER_MARK_FOR_UPDATE} {name}', callback_data=f'toggleUpdate|{name}')
 					for name in grouped_updates_containers
 				])
 				markup.add(
@@ -619,10 +624,10 @@ class DockerUpdateMonitor:
 					InlineKeyboardButton(get_text("button_cancel"), callback_data="cancelUpdate")
 				)
 				if not is_muted():
-					message = send_message(message=get_text("available_updates"), reply_markup=markup)
+					message = send_message(message=get_text("available_updates", len(grouped_updates_containers)), reply_markup=markup)
 					save_update_data(TELEGRAM_GROUP, message.message_id, grouped_updates_containers)
 				else:
-					debug(get_text("debug_muted_message", get_text("available_updates")))
+					debug(get_text("debug_muted_message", get_text("available_updates", len(grouped_updates_containers))))
 			debug(get_text("debug_waiting_next_check_updates", CHECK_UPDATE_EVERY_HOURS))
 			time.sleep(CHECK_UPDATE_EVERY_HOURS * 3600)
 
@@ -654,20 +659,30 @@ class DockerScheduleMonitor:
 
 				now = datetime.now()
 				for line in lines:
-					schedule, command, name = parse_cron_line(line)
-					if schedule and command and name and self.should_run(schedule, now):
-						if command == "run":
-							containerId = get_container_id_by_name(name)
-							run(containerId, name)
-						elif command == "stop":
-							containerId = get_container_id_by_name(name)
-							stop(containerId, name)
-						elif command == "restart":
-							containerId = get_container_id_by_name(name)
-							restart(containerId, name)
-						elif command == "mute":
-							minutes = int(name)
+					data = parse_cron_line(line)
+					action = data.get("action")
+					schedule = data.get("schedule")
+					container = data.get("container")
+					minutes = data.get("minutes")
+					command = data.get("command")
+					show_output = bool(data.get("show_output", "1"))
+					if schedule and action and self.should_run(schedule, now):
+						if action == "run":
+							containerId = get_container_id_by_name(container)
+							run(containerId, container)
+						elif action == "stop":
+							containerId = get_container_id_by_name(container)
+							stop(containerId, container)
+						elif action == "restart":
+							containerId = get_container_id_by_name(container)
+							restart(containerId, container)
+						elif action == "mute":
+							minutes = int(minutes)
 							mute(minutes)
+						elif action == "exec":
+							containerId = get_container_id_by_name(container)
+							if containerId:
+								execute_command(containerId, container, command, show_output)
 			except Exception as e:
 				error(get_text("error_reading_schedule_file", e))
 			time.sleep(60)
@@ -690,7 +705,7 @@ class DockerScheduleMonitor:
 			error(get_text("error_schedule_daemon", e))
 			self.demonio_schedule()
 
-@bot.message_handler(commands=["start", "list", "run", "stop", "restart", "delete", "checkupdate", "updateall", "changetag", "logs", "logfile", "compose", "mute", "schedule", "info", "version", "donate", "donors", "prune"])
+@bot.message_handler(commands=["start", "list", "run", "stop", "restart", "delete", "exec", "checkupdate", "updateall", "changetag", "logs", "logfile", "compose", "mute", "schedule", "info", "version", "donate", "donors", "prune"])
 def command_controller(message):
 	userId = message.from_user.id
 	comando = message.text.split(' ', 1)[0]
@@ -833,9 +848,7 @@ def command_controller(message):
 					empty = True
 				else:
 					for line in lines:
-						schedule, command, name = parse_cron_line(line)
-						if schedule and command and name:
-							botones.append(InlineKeyboardButton(f'{schedule} {command} {name}', callback_data=f'deleteSchedule|{schedule}|{command}|{name}'))
+						botones.append(InlineKeyboardButton(line, callback_data=f'deleteSchedule|{short_hash(line)}'))
 			except Exception as e:
 				error(get_text("error_reading_schedule_file", e))
 
@@ -846,22 +859,30 @@ def command_controller(message):
 				markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
 				send_message(message=get_text("delete_schedule"), reply_markup=markup)
 		else: # SAVE
-			schedule, command, name = parse_cron_line(full_schedule)
-			if not schedule or not is_valid_cron(schedule) or not command or command not in ('run', 'stop', 'restart', 'mute') or not name:
+			data = parse_cron_line(full_schedule)
+			if not data:
 				send_message(message=get_text("error_adding_schedule", message.text), parse_mode="html")
 				return
-			if 'mute' not in command and not get_container_id_by_name(name):
-				send_message(message=get_text("container_does_not_exist", name))
+			action = data.get("action")
+			schedule = data.get("schedule")
+			container = data.get("container")
+			minutes = data.get("minutes")
+			command = data.get("command")
+			if not schedule or not is_valid_cron(schedule) or not action or action not in ('run', 'stop', 'restart', 'mute', 'exec') or ('exec' in action and not command):
+				send_message(message=get_text("error_adding_schedule", message.text), parse_mode="html")
 				return
-			if 'mute' in command:
+			if 'mute' != action and not get_container_id_by_name(container):
+				send_message(message=get_text("container_does_not_exist", container))
+				return
+			if 'mute' in action:
 				try:
-					int(name)
+					int(minutes)
 				except (IndexError, ValueError):
 					send_message(message=get_text("error_use_mute_schedule"))
 					return
 			with open(FULL_SCHEDULE_PATH, "a") as file:
-				file.write(f'{schedule} {command} {name}\n')
-			send_message(message=get_text("schedule_saved", f'{schedule} {command} {name}'))
+				file.write(f'{full_schedule}\n')
+			send_message(message=get_text("schedule_saved", full_schedule))
 	elif comando in ('/info', f'/info@{bot.get_me().username}'):
 		if container_id:
 			info(container_id, container_name)
@@ -875,6 +896,19 @@ def command_controller(message):
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
 			send_message(message=get_text("show_info"), reply_markup=markup)
+	elif comando in ('/exec', f'/exec@{bot.get_me().username}'):
+		if container_id:
+			ask_command(userId, container_id, container_name)
+		else:
+			markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
+			botones = []
+			containers = docker_manager.list_containers(comando=comando)
+			for container in containers:
+				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name)} {container.name}', callback_data=f'askCommand|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+
+			markup.add(*botones)
+			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
+			send_message(message=get_text("exec_command_container"), reply_markup=markup)
 	elif comando in ('/delete', f'/delete@{bot.get_me().username}'):
 		if container_id:
 			confirm_delete(container_id, container_name)
@@ -902,7 +936,27 @@ def command_controller(message):
 			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
 			send_message(message=get_text("update_container"), reply_markup=markup)
 	elif comando in ('/updateall', f'/updateall@{bot.get_me().username}'):
-		confirm_update_all()
+		containers = docker_manager.list_containers()
+		containersToUpdate = []
+		for container in containers:
+			if update_available(container):
+				containersToUpdate.append(container.name)
+		if not containersToUpdate:
+			send_message(message=get_text("already_updated_all"))
+			return
+
+		markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
+		markup.add(*[
+			InlineKeyboardButton(f'{ICON_CONTAINER_MARK_FOR_UPDATE} {name}', callback_data=f'toggleUpdate|{name}')
+			for name in containersToUpdate
+		])
+		markup.add(
+			InlineKeyboardButton(get_text("button_update_all"), callback_data="toggleUpdateAll"),
+			InlineKeyboardButton(get_text("button_cancel"), callback_data="cancelUpdate")
+		)
+		message = send_message(message=get_text("available_updates", len(containersToUpdate)), reply_markup=markup)
+		save_update_data(TELEGRAM_GROUP, message.message_id, containersToUpdate)
+		
 	elif comando in ('/changetag', f'/changetag@{bot.get_me().username}'):
 		if container_id:
 			change_tag_container(container_id, container_name)
@@ -940,21 +994,21 @@ def command_controller(message):
 		print_donors()
 
 def parse_call_data(call_data):
-    parts = call_data.split("|")
-    comando = parts[0]
-    args = parts[1:]
+	parts = call_data.split("|")
+	comando = parts[0]
+	args = parts[1:]
 
-    if comando not in CALL_PATTERNS:
-        raise ValueError(f"COMMAND NOT IN PATTERN: {comando}")
+	if comando not in CALL_PATTERNS:
+		raise ValueError(f"COMMAND NOT IN PATTERN: {comando}")
 
-    expected_keys = CALL_PATTERNS[comando]
+	expected_keys = CALL_PATTERNS[comando]
 
-    if len(args) != len(expected_keys):
-        raise ValueError(f"INCORRECT LENGTH CALLBACK DATA FOR '{comando}': IT WAS EXPECTED {len(expected_keys)}")
+	if len(args) != len(expected_keys):
+		raise ValueError(f"INCORRECT LENGTH CALLBACK DATA FOR '{comando}': IT WAS EXPECTED {len(expected_keys)}")
 
-    parsed = {"comando": comando}
-    parsed.update(dict(zip(expected_keys, args)))
-    return parsed
+	parsed = {"comando": comando}
+	parsed.update(dict(zip(expected_keys, args)))
+	return parsed
 
 @bot.callback_query_handler(func=lambda mensaje: True)
 def button_controller(call):
@@ -976,6 +1030,8 @@ def button_controller(call):
 	schedule = data.get("schedule")
 	action = data.get("action")
 	originalMessageId = data.get("originalMessageId")
+	commandId = data.get("commandId")
+	scheduleHash = data.get("scheduleHash")
 
 	if comando != "toggleUpdate" and comando != "toggleUpdateAll":
 		delete_message(messageId)
@@ -1015,10 +1071,6 @@ def button_controller(call):
 	elif comando == "confirmUpdate":
 		confirm_update(containerId, containerName)
 
-	# CONFIRM UPDATE ALL
-	elif comando == "confirmUpdateAll":
-		confirm_update_all()
-
 	# CHECK UPDATE
 	elif comando == "checkUpdate":
 		docker_manager.force_check_update(containerId)
@@ -1037,6 +1089,24 @@ def button_controller(call):
 	# CONFIRM DELETE
 	elif comando == "confirmDelete":
 		confirm_delete(containerId, containerName)
+
+	# ASK FOR COMMAND
+	elif comando == "askCommand":
+		ask_command(userId, containerId, containerName)
+	
+	# EXEC
+	elif comando == "exec":
+		command = load_command_cache(commandId)
+		clear_command_cache(commandId)
+		execute_command(containerId, containerName, command)
+
+	# CANCEL ASK
+	elif comando == "cancelAskCommand":
+		clear_command_request_state(chatId)
+
+	# CANCEL EXEC
+	elif comando == "cancelExec":
+		clear_command_cache(commandId)
 
 	# DELETE
 	elif comando == "delete":
@@ -1062,8 +1132,8 @@ def button_controller(call):
 
 	# DELETE SCHEDULE
 	elif comando == "deleteSchedule":
-		delete_line_from_file(FULL_SCHEDULE_PATH, f'{schedule} {action} {containerName}')
-		send_message(message=get_text("deleted_schedule", f'{schedule} {action} {containerName}'))
+		deleted = delete_line_from_file(FULL_SCHEDULE_PATH, scheduleHash)
+		send_message(message=get_text("deleted_schedule", deleted))
 
 	# MARCAR COMO UPDATE
 	elif comando == "toggleUpdate":
@@ -1107,7 +1177,6 @@ def button_controller(call):
 				continue
 			client = docker.from_env()
 			container = client.containers.get(container_id)
-			debug(f"Updating container: {container})")
 			if update_available(container):
 				update(container.id, container.name)
 		clear_update_data(chatId, originalMessageId)
@@ -1161,6 +1230,28 @@ def button_controller(call):
 			x = send_message(message=get_text("loading_file"))
 			send_document(document=fichero_temporal, reply_markup=markup, caption=result)
 			delete_message(x.message_id)
+
+@bot.message_handler(func=lambda message: True)
+def handle_text(message):
+	user_id = message.from_user.id
+	username = message.from_user.username
+	chat_id = message.chat.id
+	pending = load_command_request_state(chat_id)
+	if pending:
+		if not is_admin(user_id):
+			warning(get_text("warning_not_admin", user_id, username))
+			send_message(get_text("user_not_admin"), chat_id=user_id)
+			return
+		command_text = message.text.strip()
+		containerId = pending.get("containerId")
+		containerName = pending.get("containerName")
+		deleteMessage = pending.get("deleteMessage")
+		delete_message(deleteMessage)
+		delete_message(message.message_id)
+		clear_command_request_state(chat_id)
+		confirm_execute_command(containerId, containerName, command_text)
+	else:
+		pass
 
 def run(containerId, containerName):
 	debug(get_text("run_command_for_container", "run", containerName))
@@ -1307,6 +1398,27 @@ def confirm_delete(containerId, containerName):
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 	send_message(message=get_text("confirm_delete", containerName), reply_markup=markup)
 
+def ask_command(userId, containerId, containerName):
+	debug(get_text("run_command_for_container", "ask_command", containerName))
+	markup = InlineKeyboardMarkup(row_width = 1)
+	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cancelAskCommand"))
+	x = send_message(message=get_text("prompt_enter_command", containerName), reply_markup=markup)
+	save_command_request_state(userId, containerId, containerName, x.message_id)
+
+def confirm_execute_command(containerId, containerName, command):
+	debug(get_text("run_command_for_container_command", "confirm_exec", containerName, command))
+	markup = InlineKeyboardMarkup(row_width = 1)
+	commandId = save_command_cache(command)
+	markup.add(InlineKeyboardButton(get_text("button_confirm"), callback_data=f"exec|{containerId}|{containerName}|{commandId}"))
+	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data=f"cancelExec|{commandId}"))
+	send_message(message=get_text("confirm_exec", containerName, command), reply_markup=markup)
+
+def execute_command(containerId, containerName, command, sendMessage=True):
+	debug(get_text("run_command_for_container_command", "exec", containerName, command))
+	result = docker_manager.execute_command(container_id=containerId, container_name=containerName, command=command)
+	if sendMessage:
+		send_message(message=get_text("executed_command", containerName, command, result))
+
 def confirm_change_tag(containerId, containerName, tag):
 	markup = InlineKeyboardMarkup(row_width = 1)
 	markup.add(InlineKeyboardButton(get_text("button_confirm_change_tag", tag), callback_data=f"changeTag|{containerId}|{containerName}|{tag}"))
@@ -1347,20 +1459,6 @@ def confirm_update(containerId, containerName):
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 	send_message(message=get_text("confirm_update", containerName), reply_markup=markup)
 
-def confirm_update_all():
-	containers = docker_manager.list_containers()
-	containersToUpdate = ""
-	for container in containers:
-		if update_available(container):
-			containersToUpdate += f"· {container.name}\n"
-	if containersToUpdate == "":
-		send_message(message=get_text("already_updated_all"))
-		return
-	markup = InlineKeyboardMarkup(row_width = 1)
-	markup.add(InlineKeyboardButton(get_text("button_confirm_update"), callback_data=f"updateAll"))
-	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
-	send_message(message=get_text("confirm_update_all", containersToUpdate), reply_markup=markup)
-
 def confirm_update_selected(chatId, messageId):
 	_, selected = load_update_data(chatId, messageId)
 	containersToUpdate = ""
@@ -1371,11 +1469,11 @@ def confirm_update_selected(chatId, messageId):
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cancelUpdate"))
 	send_message(message=get_text("confirm_update_all", containersToUpdate), reply_markup=markup)
 
-def build_keyboard(grouped_updates_containers, selected_containers, originalMessageId):
+def build_keyboard(container_available_to_update, selected_containers, originalMessageId):
 	markup = InlineKeyboardMarkup(row_width=BUTTON_COLUMNS)
 	botones = []
-	for container in grouped_updates_containers:
-		icono = "✅" if container in selected_containers else "➕"
+	for container in container_available_to_update:
+		icono = ICON_CONTAINER_MARKED_FOR_UPDATE if container in selected_containers else ICON_CONTAINER_MARK_FOR_UPDATE
 		botones.append(
 			InlineKeyboardButton(f"{icono} {container}", callback_data=f"toggleUpdate|{container}")
 		)
@@ -1512,12 +1610,12 @@ def read_cache_item(key):
 		return ""
 	
 def delete_cache_item(key):
-    path = f'{DIR["cache"]}{key}'
-    try:
-        if os.path.exists(path):
-            os.remove(path)
-    except Exception as e:
-        pass
+	path = f'{DIR["cache"]}{key}'
+	try:
+		if os.path.exists(path):
+			os.remove(path)
+	except Exception as e:
+		pass
 	
 def save_container_update_status(image_with_tag, container_name, value):
 	key = f'{sanitize_text_for_filename(image_with_tag)}_{sanitize_text_for_filename(container_name)}'
@@ -1547,7 +1645,38 @@ def load_update_data(chat_id, message_id):
 	return containers, selected
 
 def clear_update_data(chat_id, message_id):
-    delete_cache_item(f"update_data_{chat_id}_{message_id}")
+	delete_cache_item(f"update_data_{chat_id}_{message_id}")
+
+def save_command_cache(command):
+	command_id = uuid.uuid4().hex[:8]
+	key = f"exec_{command_id}"
+	write_cache_item(key, command)
+	return command_id
+
+def load_command_cache(command_id):
+	key = f"exec_{command_id}"
+	return read_cache_item(key)
+
+def clear_command_cache(command_id):
+	key = f"exec_{command_id}"
+	delete_cache_item(key)
+
+def save_command_request_state(user_id, containerId, containerName, deleteMessage):
+	key = f"pending_command_{user_id}"
+	value = {"containerId": containerId, "containerName": containerName, "deleteMessage": deleteMessage}
+	write_cache_item(key, value)
+
+def load_command_request_state(user_id):
+	key = f"pending_command_{user_id}"
+	return read_cache_item(key)
+
+def clear_command_request_state(user_id):
+	key = f"pending_command_{user_id}"
+	delete_cache_item(key)
+
+def short_hash(text, length=30):
+	hash_obj = hashlib.sha256(text.encode())
+	return hash_obj.hexdigest()[:length]
 
 def generate_docker_compose(container):
 	container_attrs = container.attrs['Config']
@@ -1645,13 +1774,38 @@ def check_CONTAINER_NAME():
 		sys.exit(1)
 
 def parse_cron_line(line):
-		parts = line.strip().split()
-		if len(parts) < 7:
-			return None, None, None
-		schedule = " ".join(parts[:5])
-		command = parts[5]
-		name = parts[6]
-		return schedule, command, name
+	parts = line.strip().split()
+	if len(parts) < 6:
+		return None
+
+	schedule = " ".join(parts[:5])
+	action = parts[5].lower()
+	params = parts[6:]
+
+	result = {
+		"schedule": schedule,
+		"action": action,
+	}
+
+	if action in ("run", "stop", "restart"):
+		if len(params) >= 1:
+			result["container"] = params[0]
+	elif action == "mute":
+		if len(params) >= 1:
+			result["minutes"] = params[0]
+	elif action == "exec":
+		if len(params) >= 3:
+			result["container"] = params[0]
+			if params[1] not in ("0", "1"):
+				return None # Formato inválido
+			result["show_output"] = int(params[1])
+			result["command"] = " ".join(params[2:])
+		else:
+			return None  # Formato inválido
+	else:
+		result["params"] = params
+
+	return result
 
 def is_valid_cron(cron_expression):
 	try:
@@ -1660,15 +1814,19 @@ def is_valid_cron(cron_expression):
 	except Exception:
 		return False
 
-def delete_line_from_file(file_path, line_to_delete):
+def delete_line_from_file(file_path, hash):
 	try:
 		with open(file_path, "r") as file:
 			lines = file.readlines()
-
+		
+		deleted = ""
 		with open(file_path, "w") as file:
 			for line in lines:
-				if line.strip() != line_to_delete.strip():
+				if short_hash(line) != hash:
 					file.write(line)
+				else:
+					deleted = line.strip()
+		return deleted
 	except Exception as e:
 		error(get_text("error_deleting_from_file_with_error", e))
 
@@ -1752,6 +1910,7 @@ if __name__ == '__main__':
 		telebot.types.BotCommand("/stop", get_text("menu_stop")),
 		telebot.types.BotCommand("/restart", get_text("menu_restart")),
 		telebot.types.BotCommand("/delete", get_text("menu_delete")),
+		telebot.types.BotCommand("/exec", get_text("menu_exec")),
 		telebot.types.BotCommand("/checkupdate", get_text("menu_update")),
 		telebot.types.BotCommand("/updateall", get_text("menu_update_all")),
 		telebot.types.BotCommand("/changetag", get_text("menu_change_tag")),
