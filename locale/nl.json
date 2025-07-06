@@ -34,6 +34,7 @@
    "confirm_update": "⚠️ Weet je zeker dat je container *$1* wilt updaten met de nieuwe image?\n\nHet is altijd aan te raden om te controleren of de huidige configuratie compatibel is met de nieuwe versie van de container.\n\nDeze actie kan niet ongedaan worden gemaakt.",
    "container_does_not_exist": "❌ Container *$1* bestaat niet",
    "container_id": "Container ID",
+   "command_executed_without_output": "✅ Het commando is succesvol uitgevoerd in de container",
    "created_container": "🔵 Container *$1* is *aangemaakt*",
    "debug_auto_update": "De $1 container automatisch bijwerken",
    "debug_checking_update": "Update controleren: $1 ($2): LOKALE IMAGE [$3] - EXTERNE IMAGE [$4]",

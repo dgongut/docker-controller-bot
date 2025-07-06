@@ -34,6 +34,7 @@
     "confirm_update": "⚠️ Bist du sicher, dass du den Container *$1* mit dem neuen verfügbaren Image aktualisieren möchtest?\n\nEs wird empfohlen, die aktuelle Konfiguration auf Kompatibilität mit der neuen Version zu überprüfen.\n\nDiese Aktion kann nicht über den Bot rückgängig gemacht werden.",
     "container_does_not_exist": "❌ Container *$1* existiert nicht",
     "container_id": "Container-ID",
+    "command_executed_without_output": "✅ Der Befehl wurde erfolgreich im Container ausgeführt",
     "created_container": "🔵 Container *$1* wurde *erstellt*",
     "debug_auto_update": "Aktualisiere Container $1 automatisch",
     "debug_checking_update": "Prüfe Update: $1 ($2): LOKALES IMAGE [$3] - REMOTES IMAGE [$4]",

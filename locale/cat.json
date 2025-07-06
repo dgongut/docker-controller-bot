@@ -34,6 +34,7 @@
     "confirm_update": "⚠️ ¿Estàs segur que vols actualitzar el contenidor *$1* amb la nova imatge disponible?\n\nSempre es recomana comprovar si la configuració actual es compatible amb la nova versió del contenidor.\n\nAquesta acció no es pot desfer des del bot.",
     "container_does_not_exist": "❌ El contenidor *$1* no existeix",
     "container_id": "ID del contenidor",
+    "command_executed_without_output": "✅ El comando s'ha executat correctament en el contenidor",
     "created_container": "🔵 El contenidor *$1* s'ha *creat*",
     "debug_auto_update": "Actualitzant automàticament el contenidor $1",
     "debug_checking_update": "Comprovant actualizació: $1 ($2): imatge LOCAL [$3] - imatge REMOTA [$4]",

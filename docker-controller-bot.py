@@ -19,7 +19,7 @@ from telebot import util
 from telebot.types import InlineKeyboardButton
 from telebot.types import InlineKeyboardMarkup
 
-VERSION = "3.9.1"
+VERSION = "3.9.2"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -493,13 +493,16 @@ class DockerManager:
 	def execute_command(self, container_id, container_name, command):
 		try:
 			container = self.client.containers.get(container_id)
-			result = container.exec_run(command)
+			exec_command = ['sh', '-c', command]
+			result = container.exec_run(exec_command)
 			output = result.output.decode('utf-8')
+			if not output:
+				output = get_text("command_executed_without_output")
 			return output
 		except Exception as e:
 			error(get_text("error_executing_command_container_with_error", command, container_name, e))
 			return get_text("error_executing_command_container", command, container_name)
-		
+
 # Instanciamos el DockerManager
 docker_manager = DockerManager()
 
@@ -1426,7 +1429,15 @@ def execute_command(containerId, containerName, command, sendMessage=True):
 	debug(get_text("run_command_for_container_command", "exec", containerName, command))
 	result = docker_manager.execute_command(container_id=containerId, container_name=containerName, command=command)
 	if sendMessage:
-		send_message(message=get_text("executed_command", containerName, command, result))
+		max_length = 3500
+		if len(result) <= max_length:
+			send_message(message=get_text("executed_command", containerName, command, result))
+		else:
+			first_part = result[:max_length]
+			send_message(message=get_text("executed_command", containerName, command, first_part))
+			for i in range(max_length, len(result), max_length):
+				part = result[i:i + max_length]
+				send_message(message=f"```SHELL\n{part}```")
 
 def confirm_change_tag(containerId, containerName, tag):
 	markup = InlineKeyboardMarkup(row_width = 1)

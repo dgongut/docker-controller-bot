@@ -34,6 +34,7 @@
     "confirm_update_all": "⚠️ Are you sure you want to update the following containers? *$1*\n\nIt is always recommended to check if the current configuration is compatible with the new version of the container.\n\nThis action is not can be undone from the bot.",
     "container_does_not_exist": "❌ Container *$1* doesn't exist",
     "container_id": "Container ID",
+    "command_executed_without_output": "✅ Command executed successfully in container",
     "created_container": "🔵 Container *$1* has been *created*",
     "debug_auto_update": "Automatically updating the $1 container",
     "debug_checking_update": "Checking update: $1 ($2): LOCAL IMAGE [$3] - REMOTE IMAGE [$4]",

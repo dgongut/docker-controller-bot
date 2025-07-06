@@ -34,6 +34,7 @@
     "confirm_update": "⚠️ Sei sicuro di voler aggiornare il contenitore *$1* con la nuova immagine disponibile?\n\nSi consiglia sempre di verificare se la configurazione corrente è compatibile con la nuova versione del contenitore.\n\nQuesta azione non può essere annullata dal bot.",
     "container_does_not_exist": "❌ Il contenitore *$1* non esiste",
     "container_id": "ID del contenitore",
+    "command_executed_without_output": "✅ Il comando è stato eseguito correttamente nel contenitore",
     "created_container": "🔵 Il contenitore *$1* è stato *creato*",
     "debug_auto_update": "Aggiornamento automatico del contenitore $1",
     "debug_checking_update": "Verifica aggiornamento: $1 ($2): IMMAGINE LOCALE [$3] - IMMAGINE REMOTA [$4]",

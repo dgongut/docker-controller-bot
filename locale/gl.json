@@ -34,6 +34,7 @@
     "confirm_update": "⚠️ Estás seguro de que queres actualizar o contedor *$1* coa nova imaxe dispoñible?\n\nSempre se recomenda comprobar se a configuración actual é compatible coa nova versión do contedor.\n\nEsta acción non pode desfacerse desde o bot.",
     "container_does_not_exist": "❌ o contedor *$1* non existe",
     "container_id": "ID do contedor",
+    "command_executed_without_output": "✅ O comando executouse correctamente no contedor",
     "created_container": "🔵 *creouse* o contedor *$1*",
     "debug_auto_update": "Actualizando automaticamente o contedor $1",
     "debug_checking_update": "Comprobando actualización: $1 ($2): IMAXE LOCAL [$3] - IMAXE REMOTA [$4]",

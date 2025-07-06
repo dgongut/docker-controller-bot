@@ -34,6 +34,7 @@
     "confirm_update": "⚠️ ¿Estás seguro de que quieres actualizar el contenedor *$1* con la nueva imagen disponible?\n\nSiempre se recomienda comprobar si la configuración actual es compatible con la nueva versión del contenedor.\n\nEsta acción no se puede deshacer desde el bot.",
     "container_does_not_exist": "❌ El contenedor *$1* no existe",
     "container_id": "ID del contenedor",
+    "command_executed_without_output": "✅ El comando se ha ejecutado correctamente en el contenedor",
     "created_container": "🔵 El contenedor *$1* se ha *creado*",
     "debug_auto_update": "Actualizando automáticamente el contenedor $1",
     "debug_checking_update": "Comprobando actualización: $1 ($2): IMAGEN LOCAL [$3] - IMAGEN REMOTA [$4]",
@@ -130,6 +131,7 @@
     "error_writing_cache_with_error": "Error al escribir en caché. Clave [$1]",
     "exec_command_container": "⚡️ Pulsa en un contenedor para ejecutar un comando en él.",
     "executed_command": "⚡️ El siguiente comando se ha ejecutado en el contenedor *$1*.\n\n```SHELL\n$2```\n\nResultado:\n```SHELL\n$3```",
+
     "image_id": "ID de la imagen",
     "information": "Información de",
     "loading_file": "_Cargando archivo... Espera por favor_",
