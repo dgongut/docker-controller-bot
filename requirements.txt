@@ -1,6 +1,6 @@
-pyparsing==3.2.3
-requests==2.32.4
-pyTelegramBotAPI==4.27.0
+pyparsing==3.2.5
+requests==2.32.5
+pyTelegramBotAPI==4.29.1
 docker==7.1.0
-PyYAML==6.0.2
+PyYAML==6.0.3
 croniter==6.0.0

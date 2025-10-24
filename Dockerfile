@@ -1,4 +1,4 @@
-FROM alpine:3.21.3
+FROM alpine:3.22.2
 
 ENV TELEGRAM_THREAD=1
 ENV CHECK_UPDATES=1
@@ -9,7 +9,7 @@ ENV LANGUAGE=ES
 ENV EXTENDED_MESSAGES=0
 ENV TZ=UTC
 
-ARG VERSION=3.9.2
+ARG VERSION=3.9.3
 
 WORKDIR /app
 RUN wget https://github.com/dgongut/docker-controller-bot/archive/refs/tags/v${VERSION}.tar.gz -P /tmp

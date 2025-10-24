@@ -19,7 +19,7 @@ from telebot import util
 from telebot.types import InlineKeyboardButton
 from telebot.types import InlineKeyboardMarkup
 
-VERSION = "3.9.2"
+VERSION = "3.9.3"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -752,45 +752,41 @@ def command_controller(message):
 		if container_id:
 			run(container_id, container_name)
 		else:
-			markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
-			botones = []
 			containers = docker_manager.list_containers(comando=comando)
-			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name)} {container.name}', callback_data=f'run|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+			container_names = [container.name for container in containers if CONTAINER_NAME != container.name]
+			if not container_names:
+				send_message(message=get_text("no_containers_to_start"))
+				return
 
-			markup.add(*botones)
-			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
-			send_message(message=get_text("start_a_container"), reply_markup=markup)
+			markup = build_generic_keyboard(container_names, set(), 0, "Run", get_text("button_run"), get_text("button_run_all"))
+			message = send_message(message=get_text("start_a_container"), reply_markup=markup)
+			save_action_data(TELEGRAM_GROUP, message.message_id, "run", container_names)
 	elif comando in ('/stop', f'/stop@{bot.get_me().username}'):
 		if container_id:
 			stop(container_id, container_name)
 		else:
-			markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
-			botones = []
 			containers = docker_manager.list_containers(comando=comando)
-			for container in containers:
-				if CONTAINER_NAME == container.name:
-					continue
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name)} {container.name}', callback_data=f'stop|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+			container_names = [container.name for container in containers if CONTAINER_NAME != container.name]
+			if not container_names:
+				send_message(message=get_text("no_containers_to_stop"))
+				return
 
-			markup.add(*botones)
-			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
-			send_message(message=get_text("stop_a_container"), reply_markup=markup)
+			markup = build_generic_keyboard(container_names, set(), 0, "Stop", get_text("button_stop"), get_text("button_stop_all"))
+			message = send_message(message=get_text("stop_a_container"), reply_markup=markup)
+			save_action_data(TELEGRAM_GROUP, message.message_id, "stop", container_names)
 	elif comando in ('/restart', f'/restart@{bot.get_me().username}'):
 		if container_id:
 			restart(container_id, container_name)
 		else:
-			markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
-			botones = []
 			containers = docker_manager.list_containers(comando=comando)
-			for container in containers:
-				if CONTAINER_NAME == container.name:
-					continue
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name)} {container.name}', callback_data=f'restart|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+			container_names = [container.name for container in containers if CONTAINER_NAME != container.name]
+			if not container_names:
+				send_message(message=get_text("no_containers_to_restart"))
+				return
 
-			markup.add(*botones)
-			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
-			send_message(message=get_text("restart_a_container"), reply_markup=markup)
+			markup = build_generic_keyboard(container_names, set(), 0, "Restart", get_text("button_restart"), get_text("button_restart_all"))
+			message = send_message(message=get_text("restart_a_container"), reply_markup=markup)
+			save_action_data(TELEGRAM_GROUP, message.message_id, "restart", container_names)
 	elif comando in ('/logs', f'/logs@{bot.get_me().username}'):
 		if container_id:
 			logs(container_id, container_name)
@@ -1015,224 +1011,390 @@ def parse_call_data(call_data):
 
 @bot.callback_query_handler(func=lambda mensaje: True)
 def button_controller(call):
-	messageId = call.message.id
-	chatId = call.message.chat.id
-	userId = call.from_user.id
-	bot.answer_callback_query(call.id)
+	try:
+		messageId = call.message.id
+		chatId = call.message.chat.id
+		userId = call.from_user.id
 
-	if not is_admin(userId):
-		warning(get_text("warning_not_admin", userId, call.from_user.username))
-		send_message(chat_id=userId, message=get_text("user_not_admin"))
+		# Responder inmediatamente al callback para evitar timeout
+		bot.answer_callback_query(call.id, show_alert=False)
+
+		if not is_admin(userId):
+			warning(get_text("warning_not_admin", userId, call.from_user.username))
+			send_message(chat_id=userId, message=get_text("user_not_admin"))
+			return
+
+		data = parse_call_data(call.data)
+		comando = data["comando"]
+		containerId = data.get("containerId")
+		containerName = data.get("containerName")
+		tag = data.get("tag")
+		action = data.get("action")
+		originalMessageId = data.get("originalMessageId")
+		commandId = data.get("commandId")
+		scheduleHash = data.get("scheduleHash")
+	except Exception as e:
+		error(get_text("error_callback_initialization", str(e)))
+		try:
+			bot.answer_callback_query(call.id, text=get_text("error_callback_processing"), show_alert=True)
+		except:
+			pass
 		return
 
-	data = parse_call_data(call.data)
-	comando = data["comando"]
-	containerId = data.get("containerId")
-	containerName = data.get("containerName")
-	tag = data.get("tag")
-	schedule = data.get("schedule")
-	action = data.get("action")
-	originalMessageId = data.get("originalMessageId")
-	commandId = data.get("commandId")
-	scheduleHash = data.get("scheduleHash")
+	try:
+		if comando not in ["toggleUpdate", "toggleUpdateAll", "toggleRun", "toggleRunAll", "toggleStop", "toggleStopAll", "toggleRestart", "toggleRestartAll"]:
+			delete_message(messageId)
 
-	if comando != "toggleUpdate" and comando != "toggleUpdateAll":
-		delete_message(messageId)
+		if call.data == "cerrar":
+			return
 
-	if call.data == "cerrar":
-		return
+		# RUN
+		if comando == "run":
+			run(containerId, containerName)
 
-	# RUN
-	if comando == "run":
-		run(containerId, containerName)
+		# STOP
+		elif comando == "stop":
+			stop(containerId, containerName)
 
-	# STOP
-	elif comando == "stop":
-		stop(containerId, containerName)
+		# RESTART
+		elif comando == "restart":
+			restart(containerId, containerName)
 
-	# RESTART
-	elif comando == "restart":
-		restart(containerId, containerName)
+		# LOGS
+		elif comando == "logs":
+			logs(containerId, containerName)
 
-	# LOGS
-	elif comando == "logs":
-		logs(containerId, containerName)
+		# LOGS EN FICHERO
+		elif comando == "logfile":
+			log_file(containerId, containerName)
 
-	# LOGS EN FICHERO
-	elif comando == "logfile":
-		log_file(containerId, containerName)
+		# COMPOSE
+		elif comando == "compose":
+			compose(containerId, containerName)
 
-	# COMPOSE
-	elif comando == "compose":
-		compose(containerId, containerName)
+		# INFO
+		elif comando == "info":
+			info(containerId, containerName)
 
-	# INFO
-	elif comando == "info":
-		info(containerId, containerName)
+		# CONFIRM UPDATE
+		elif comando == "confirmUpdate":
+			confirm_update(containerId, containerName)
 
-	# CONFIRM UPDATE
-	elif comando == "confirmUpdate":
-		confirm_update(containerId, containerName)
+		# CHECK UPDATE
+		elif comando == "checkUpdate":
+			docker_manager.force_check_update(containerId)
 
-	# CHECK UPDATE
-	elif comando == "checkUpdate":
-		docker_manager.force_check_update(containerId)
+		# UPDATE
+		elif comando == "update":
+			update(containerId, containerName)
 
-	# UPDATE
-	elif comando == "update":
-		update(containerId, containerName)
+		# CONFIRM UPDATE ALL
+		elif comando == "updateAll":
+			containers = docker_manager.list_containers()
+			for container in containers:
+				if update_available(container):
+					update(container.id, container.name)
 
-	# CONFIRM UPDATE ALL
-	elif comando == "updateAll":
-		containers = docker_manager.list_containers()
-		for container in containers:
-			if update_available(container):
-				update(container.id, container.name)
+		# CONFIRM DELETE
+		elif comando == "confirmDelete":
+			confirm_delete(containerId, containerName)
 
-	# CONFIRM DELETE
-	elif comando == "confirmDelete":
-		confirm_delete(containerId, containerName)
+		# ASK FOR COMMAND
+		elif comando == "askCommand":
+			ask_command(userId, containerId, containerName)
 
-	# ASK FOR COMMAND
-	elif comando == "askCommand":
-		ask_command(userId, containerId, containerName)
-	
-	# EXEC
-	elif comando == "exec":
-		command = load_command_cache(commandId)
-		clear_command_cache(commandId)
-		execute_command(containerId, containerName, command)
+		# EXEC
+		elif comando == "exec":
+			command = load_command_cache(commandId)
+			clear_command_cache(commandId)
+			execute_command(containerId, containerName, command)
 
-	# CANCEL ASK
-	elif comando == "cancelAskCommand":
-		clear_command_request_state(userId)
+		# CANCEL ASK
+		elif comando == "cancelAskCommand":
+			clear_command_request_state(userId)
 
-	# CANCEL EXEC
-	elif comando == "cancelExec":
-		clear_command_cache(commandId)
+		# CANCEL EXEC
+		elif comando == "cancelExec":
+			clear_command_cache(commandId)
 
-	# DELETE
-	elif comando == "delete":
-		x = send_message(message=get_text("deleting", containerName))
-		result = docker_manager.delete(container_id=containerId, container_name=containerName)
-		delete_message(x.message_id)
-		send_message(message=result)
-
-	# CHANGE_TAG_CONTAINER
-	elif comando == "changeTagContainer":
-		change_tag_container(containerId, containerName)
-
-	# CHANGE_TAG_CONTAINER
-	elif comando == "confirmChangeTag":
-		confirm_change_tag(containerId, containerName, tag)
-
-	# CHANGE_TAG
-	elif comando == "changeTag":
-		x = send_message(message=get_text("updating", containerName))
-		result = docker_manager.update(container_id=containerId, container_name=containerName, message=x, bot=bot, tag=tag)
-		delete_message(x.message_id)
-		send_message(message=result)
-
-	# DELETE SCHEDULE
-	elif comando == "deleteSchedule":
-		deleted = delete_line_from_file(FULL_SCHEDULE_PATH, scheduleHash)
-		send_message(message=get_text("deleted_schedule", deleted))
-
-	# MARCAR COMO UPDATE
-	elif comando == "toggleUpdate":
-		containers, selected = load_update_data(chatId, messageId)
-		if containerName in selected:
-			selected.remove(containerName)
-		else:
-			selected.add(containerName)
-		save_update_data(chatId, messageId, containers, selected)
-
-		markup = build_keyboard(containers, selected, messageId)
-		bot.edit_message_reply_markup(chatId, messageId, reply_markup=markup)
-
-	# MARCAR COMO UPDATE TODOS
-	elif comando == "toggleUpdateAll":
-		containers, selected = load_update_data(chatId, messageId)
-		for container in containers:
-			if container not in selected:
-				selected.add(container)
-		save_update_data(chatId, messageId, containers, selected)
-
-		markup = build_keyboard(containers, selected, messageId)
-		bot.edit_message_reply_markup(chatId, messageId, reply_markup=markup)
-
-	# CONFIRM UPDATE SELECTED
-	elif comando == "confirmUpdateSelected":
-		confirm_update_selected(chatId, messageId)
-
-	# CANCEL UPDATE
-	elif comando == "cancelUpdate":
-		clear_update_data(chatId, messageId)
-
-	# UPDATE SELECTED
-	elif comando == "updateSelected":
-		containers, selected = load_update_data(chatId, originalMessageId)
-		for containerName in selected:
-			container_id = get_container_id_by_name(container_name=containerName)
-			if not container_id:
-				send_message(message=get_text("container_does_not_exist", containerName))
-				debug(get_text("debug_container_not_found", containerName))
-				continue
-			client = docker.from_env()
-			container = client.containers.get(container_id)
-			if update_available(container):
-				update(container.id, container.name)
-		clear_update_data(chatId, originalMessageId)
-
-	# PRUNE
-	elif comando == "prune":
-		# PRUNE CONTAINERS
-		if action == "confirmPruneContainers":
-			confirm_prune_containers()
-		elif action == "pruneContainers":
-			result, data = docker_manager.prune_containers()
-			markup = InlineKeyboardMarkup(row_width = 1)
-			markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
-			fichero_temporal = get_temporal_file(data, get_text("button_containers"))
-			x = send_message(message=get_text("loading_file"))
-			send_document(document=fichero_temporal, reply_markup=markup, caption=result)
+		# DELETE
+		elif comando == "delete":
+			x = send_message(message=get_text("deleting", containerName))
+			result = docker_manager.delete(container_id=containerId, container_name=containerName)
 			delete_message(x.message_id)
+			send_message(message=result)
 
-		# PRUNE IMAGES
-		elif action == "confirmPruneImages":
-			confirm_prune_images()
-		elif action == "pruneImages":
-			result, data = docker_manager.prune_images()
-			markup = InlineKeyboardMarkup(row_width = 1)
-			markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
-			fichero_temporal = get_temporal_file(data, get_text("button_images"))
-			x = send_message(message=get_text("loading_file"))
-			send_document(document=fichero_temporal, reply_markup=markup, caption=result)
+		# CHANGE_TAG_CONTAINER
+		elif comando == "changeTagContainer":
+			change_tag_container(containerId, containerName)
+
+		# CHANGE_TAG_CONTAINER
+		elif comando == "confirmChangeTag":
+			confirm_change_tag(containerId, containerName, tag)
+
+		# CHANGE_TAG
+		elif comando == "changeTag":
+			x = send_message(message=get_text("updating", containerName))
+			result = docker_manager.update(container_id=containerId, container_name=containerName, message=x, bot=bot, tag=tag)
 			delete_message(x.message_id)
-	
-		# PRUNE NETWORKS
-		elif action == "confirmPruneNetworks":
-			confirm_prune_networks()
-		elif action == "pruneNetworks":
-			result, data = docker_manager.prune_networks()
+			send_message(message=result)
+
+		# DELETE SCHEDULE
+		elif comando == "deleteSchedule":
+			deleted = delete_line_from_file(FULL_SCHEDULE_PATH, scheduleHash)
+			send_message(message=get_text("deleted_schedule", deleted))
+
+		# MARCAR COMO UPDATE
+		elif comando == "toggleUpdate":
+			containers, selected = load_update_data(chatId, messageId)
+			if containerName in selected:
+				selected.remove(containerName)
+			else:
+				selected.add(containerName)
+			save_update_data(chatId, messageId, containers, selected)
+
+			markup = build_keyboard(containers, selected, messageId)
+			bot.edit_message_reply_markup(chatId, messageId, reply_markup=markup)
+
+		# MARCAR COMO UPDATE TODOS
+		elif comando == "toggleUpdateAll":
+			containers, selected = load_update_data(chatId, messageId)
+			for container in containers:
+				if container not in selected:
+					selected.add(container)
+			save_update_data(chatId, messageId, containers, selected)
+
+			markup = build_keyboard(containers, selected, messageId)
+			bot.edit_message_reply_markup(chatId, messageId, reply_markup=markup)
+
+		# CONFIRM UPDATE SELECTED
+		elif comando == "confirmUpdateSelected":
+			confirm_update_selected(chatId, messageId)
+
+		# CANCEL UPDATE
+		elif comando == "cancelUpdate":
+			clear_update_data(chatId, messageId)
+
+		# UPDATE SELECTED
+		elif comando == "updateSelected":
+			containers, selected = load_update_data(chatId, originalMessageId)
+			for containerName in selected:
+				container_id = get_container_id_by_name(container_name=containerName)
+				if not container_id:
+					send_message(message=get_text("container_does_not_exist", containerName))
+					debug(get_text("debug_container_not_found", containerName))
+					continue
+				client = docker.from_env()
+				container = client.containers.get(container_id)
+				if update_available(container):
+					update(container.id, container.name)
+			clear_update_data(chatId, originalMessageId)
+
+		# TOGGLE RUN
+		elif comando == "toggleRun":
+			containers, selected = load_action_data(chatId, messageId, "run")
+			if containerName in selected:
+				selected.remove(containerName)
+			else:
+				selected.add(containerName)
+			save_action_data(chatId, messageId, "run", containers, selected)
+
+			markup = build_generic_keyboard(containers, selected, messageId, "Run", get_text("button_run"), get_text("button_run_all"))
+			bot.edit_message_reply_markup(chatId, messageId, reply_markup=markup)
+
+		# TOGGLE RUN ALL
+		elif comando == "toggleRunAll":
+			containers, selected = load_action_data(chatId, messageId, "run")
+			for container in containers:
+				if container not in selected:
+					selected.add(container)
+			save_action_data(chatId, messageId, "run", containers, selected)
+
+			markup = build_generic_keyboard(containers, selected, messageId, "Run", get_text("button_run"), get_text("button_run_all"))
+			bot.edit_message_reply_markup(chatId, messageId, reply_markup=markup)
+
+		# CONFIRM RUN SELECTED
+		elif comando == "confirmRunSelected":
+			containers, selected = load_action_data(chatId, originalMessageId, "run")
+			containersToRun = ""
+			for container in selected:
+				containersToRun += f"· *{container}*\n"
 			markup = InlineKeyboardMarkup(row_width = 1)
-			markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
-			fichero_temporal = get_temporal_file(data, get_text("button_networks"))
-			x = send_message(message=get_text("loading_file"))
-			send_document(document=fichero_temporal, reply_markup=markup, caption=result)
-			delete_message(x.message_id)
-	
-		# PRUNE VOLUMES
-		elif action == "confirmPruneVolumes":
-			confirm_prune_volumes()
-		elif action == "pruneVolumes":
-			result, data = docker_manager.prune_volumes()
+			markup.add(InlineKeyboardButton(get_text("button_run"), callback_data=f"runSelected|{originalMessageId}"))
+			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cancelRun"))
+			send_message(message=get_text("confirm_run_selected", containersToRun), reply_markup=markup)
+
+		# CANCEL RUN
+		elif comando == "cancelRun":
+			clear_action_data(chatId, messageId, "run")
+
+		# RUN SELECTED
+		elif comando == "runSelected":
+			containers, selected = load_action_data(chatId, originalMessageId, "run")
+			for containerName in selected:
+				container_id = get_container_id_by_name(container_name=containerName)
+				if not container_id:
+					send_message(message=get_text("container_does_not_exist", containerName))
+					debug(get_text("debug_container_not_found", containerName))
+					continue
+				run(container_id, containerName)
+			clear_action_data(chatId, originalMessageId, "run")
+
+		# TOGGLE STOP
+		elif comando == "toggleStop":
+			containers, selected = load_action_data(chatId, messageId, "stop")
+			if containerName in selected:
+				selected.remove(containerName)
+			else:
+				selected.add(containerName)
+			save_action_data(chatId, messageId, "stop", containers, selected)
+
+			markup = build_generic_keyboard(containers, selected, messageId, "Stop", get_text("button_stop"), get_text("button_stop_all"))
+			bot.edit_message_reply_markup(chatId, messageId, reply_markup=markup)
+
+		# TOGGLE STOP ALL
+		elif comando == "toggleStopAll":
+			containers, selected = load_action_data(chatId, messageId, "stop")
+			for container in containers:
+				if container not in selected:
+					selected.add(container)
+			save_action_data(chatId, messageId, "stop", containers, selected)
+
+			markup = build_generic_keyboard(containers, selected, messageId, "Stop", get_text("button_stop"), get_text("button_stop_all"))
+			bot.edit_message_reply_markup(chatId, messageId, reply_markup=markup)
+
+		# CONFIRM STOP SELECTED
+		elif comando == "confirmStopSelected":
+			containers, selected = load_action_data(chatId, originalMessageId, "stop")
+			containersToStop = ""
+			for container in selected:
+				containersToStop += f"· *{container}*\n"
 			markup = InlineKeyboardMarkup(row_width = 1)
-			markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
-			fichero_temporal = get_temporal_file(data, get_text("button_volumes"))
-			x = send_message(message=get_text("loading_file"))
-			send_document(document=fichero_temporal, reply_markup=markup, caption=result)
-			delete_message(x.message_id)
+			markup.add(InlineKeyboardButton(get_text("button_stop"), callback_data=f"stopSelected|{originalMessageId}"))
+			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cancelStop"))
+			send_message(message=get_text("confirm_stop_selected", containersToStop), reply_markup=markup)
+
+		# CANCEL STOP
+		elif comando == "cancelStop":
+			clear_action_data(chatId, messageId, "stop")
+
+		# STOP SELECTED
+		elif comando == "stopSelected":
+			containers, selected = load_action_data(chatId, originalMessageId, "stop")
+			for containerName in selected:
+				container_id = get_container_id_by_name(container_name=containerName)
+				if not container_id:
+					send_message(message=get_text("container_does_not_exist", containerName))
+					debug(get_text("debug_container_not_found", containerName))
+					continue
+				stop(container_id, containerName)
+			clear_action_data(chatId, originalMessageId, "stop")
+
+		# TOGGLE RESTART
+		elif comando == "toggleRestart":
+			containers, selected = load_action_data(chatId, messageId, "restart")
+			if containerName in selected:
+				selected.remove(containerName)
+			else:
+				selected.add(containerName)
+			save_action_data(chatId, messageId, "restart", containers, selected)
+
+			markup = build_generic_keyboard(containers, selected, messageId, "Restart", get_text("button_restart"), get_text("button_restart_all"))
+			bot.edit_message_reply_markup(chatId, messageId, reply_markup=markup)
+
+		# TOGGLE RESTART ALL
+		elif comando == "toggleRestartAll":
+			containers, selected = load_action_data(chatId, messageId, "restart")
+			for container in containers:
+				if container not in selected:
+					selected.add(container)
+			save_action_data(chatId, messageId, "restart", containers, selected)
+
+			markup = build_generic_keyboard(containers, selected, messageId, "Restart", get_text("button_restart"), get_text("button_restart_all"))
+			bot.edit_message_reply_markup(chatId, messageId, reply_markup=markup)
+
+		# CONFIRM RESTART SELECTED
+		elif comando == "confirmRestartSelected":
+			containers, selected = load_action_data(chatId, originalMessageId, "restart")
+			containersToRestart = ""
+			for container in selected:
+				containersToRestart += f"· *{container}*\n"
+			markup = InlineKeyboardMarkup(row_width = 1)
+			markup.add(InlineKeyboardButton(get_text("button_restart"), callback_data=f"restartSelected|{originalMessageId}"))
+			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cancelRestart"))
+			send_message(message=get_text("confirm_restart_selected", containersToRestart), reply_markup=markup)
+
+		# CANCEL RESTART
+		elif comando == "cancelRestart":
+			clear_action_data(chatId, messageId, "restart")
+
+		# RESTART SELECTED
+		elif comando == "restartSelected":
+			containers, selected = load_action_data(chatId, originalMessageId, "restart")
+			for containerName in selected:
+				container_id = get_container_id_by_name(container_name=containerName)
+				if not container_id:
+					send_message(message=get_text("container_does_not_exist", containerName))
+					debug(get_text("debug_container_not_found", containerName))
+					continue
+				restart(container_id, containerName)
+			clear_action_data(chatId, originalMessageId, "restart")
+
+		# PRUNE
+		elif comando == "prune":
+			# PRUNE CONTAINERS
+			if action == "confirmPruneContainers":
+				confirm_prune_containers()
+			elif action == "pruneContainers":
+				result, data = docker_manager.prune_containers()
+				markup = InlineKeyboardMarkup(row_width = 1)
+				markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
+				fichero_temporal = get_temporal_file(data, get_text("button_containers"))
+				x = send_message(message=get_text("loading_file"))
+				send_document(document=fichero_temporal, reply_markup=markup, caption=result)
+				delete_message(x.message_id)
+
+			# PRUNE IMAGES
+			elif action == "confirmPruneImages":
+				confirm_prune_images()
+			elif action == "pruneImages":
+				result, data = docker_manager.prune_images()
+				markup = InlineKeyboardMarkup(row_width = 1)
+				markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
+				fichero_temporal = get_temporal_file(data, get_text("button_images"))
+				x = send_message(message=get_text("loading_file"))
+				send_document(document=fichero_temporal, reply_markup=markup, caption=result)
+				delete_message(x.message_id)
+
+			# PRUNE NETWORKS
+			elif action == "confirmPruneNetworks":
+				confirm_prune_networks()
+			elif action == "pruneNetworks":
+				result, data = docker_manager.prune_networks()
+				markup = InlineKeyboardMarkup(row_width = 1)
+				markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
+				fichero_temporal = get_temporal_file(data, get_text("button_networks"))
+				x = send_message(message=get_text("loading_file"))
+				send_document(document=fichero_temporal, reply_markup=markup, caption=result)
+				delete_message(x.message_id)
+
+			# PRUNE VOLUMES
+			elif action == "confirmPruneVolumes":
+				confirm_prune_volumes()
+			elif action == "pruneVolumes":
+				result, data = docker_manager.prune_volumes()
+				markup = InlineKeyboardMarkup(row_width = 1)
+				markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
+				fichero_temporal = get_temporal_file(data, get_text("button_volumes"))
+				x = send_message(message=get_text("loading_file"))
+				send_document(document=fichero_temporal, reply_markup=markup, caption=result)
+				delete_message(x.message_id)
+	except Exception as e:
+		error(get_text("error_callback_execution", comando, str(e)))
+		try:
+			send_message(message=get_text("error_callback_processing"))
+		except:
+			pass
 
 @bot.message_handler(func=lambda message: True)
 def handle_text(message):
@@ -1510,6 +1672,30 @@ def build_keyboard(container_available_to_update, selected_containers, originalM
 	markup.add(*fixed_buttons)
 	return markup
 
+def build_generic_keyboard(container_available, selected_containers, originalMessageId, action_type, button_text, button_text_all=None):
+	"""Generic keyboard builder for run/stop/restart actions"""
+	markup = InlineKeyboardMarkup(row_width=BUTTON_COLUMNS)
+	botones = []
+	for container in container_available:
+		icono = ICON_CONTAINER_MARKED_FOR_UPDATE if container in selected_containers else ICON_CONTAINER_MARK_FOR_UPDATE
+		botones.append(
+			InlineKeyboardButton(f"{icono} {container}", callback_data=f"toggle{action_type}|{container}")
+		)
+	markup.add(*botones)
+
+	fixed_buttons = []
+	if selected_containers:
+		fixed_buttons.append(InlineKeyboardButton(button_text, callback_data=f"confirm{action_type}Selected|{originalMessageId}"))
+	else:
+		# Use button_text_all if provided, otherwise use button_text
+		text_to_use = button_text_all if button_text_all else button_text
+		fixed_buttons.append(InlineKeyboardButton(text_to_use, callback_data=f"toggle{action_type}All"))
+
+	fixed_buttons.append(InlineKeyboardButton(get_text("button_cancel"), callback_data=f"cancel{action_type}"))
+
+	markup.add(*fixed_buttons)
+	return markup
+
 def is_admin(userId):
 	return str(userId) in str(TELEGRAM_ADMIN).split(',')
 
@@ -1526,7 +1712,20 @@ def update_available(container):
 	return update
 
 def display_containers(containers):
-	result = "```\n"
+	# Calculate statistics
+	total_containers = len(containers)
+	running_containers = sum(1 for c in containers if c.status in ['running', 'restarting'])
+	stopped_containers = sum(1 for c in containers if c.status in ['exited', 'dead'])
+	pending_updates = sum(1 for c in containers if update_available(c))
+
+	# Build summary
+	result = f"📊 *{get_text('containers')}:* {total_containers} | "
+	result += f"🟢 {running_containers} | "
+	result += f"🔴 {stopped_containers} | "
+	result += f"⬆️ {pending_updates}\n\n"
+
+	# Build container list
+	result += "```\n"
 	for container in containers:
 		result += f"{get_status_emoji(container.status, container.name)} {container.name}"
 		if update_available(container):
@@ -1666,6 +1865,31 @@ def load_update_data(chat_id, message_id):
 
 def clear_update_data(chat_id, message_id):
 	delete_cache_item(f"update_data_{chat_id}_{message_id}")
+
+def save_action_data(chat_id, message_id, action_type, containers, selected=None):
+	"""Generic function to save selection data for run/stop/restart actions"""
+	if selected is None:
+		selected = set()
+	data = {
+		"containers": containers,
+		"selected": selected
+	}
+	write_cache_item(f"{action_type}_data_{chat_id}_{message_id}", data)
+
+def load_action_data(chat_id, message_id, action_type):
+	"""Generic function to load selection data for run/stop/restart actions"""
+	data = read_cache_item(f"{action_type}_data_{chat_id}_{message_id}")
+	if data is None:
+		return [], set()
+	containers = data.get("containers", [])
+	selected = data.get("selected", set())
+	if not isinstance(selected, set):
+		selected = set(selected)
+	return containers, selected
+
+def clear_action_data(chat_id, message_id, action_type):
+	"""Generic function to clear selection data for run/stop/restart actions"""
+	delete_cache_item(f"{action_type}_data_{chat_id}_{message_id}")
 
 def save_command_cache(command):
 	command_id = uuid.uuid4().hex[:8]
