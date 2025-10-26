@@ -1261,7 +1261,7 @@ def button_controller(call):
 				selected.add(containerName)
 			save_update_data(chatId, messageId, containers, selected)
 
-			markup = build_keyboard(containers, selected, messageId)
+			markup = build_generic_keyboard(containers, selected, messageId, "Update", get_text("button_update"), get_text("button_update_all"))
 			bot.edit_message_reply_markup(chatId, messageId, reply_markup=markup)
 
 		# MARCAR COMO UPDATE TODOS
@@ -1272,7 +1272,7 @@ def button_controller(call):
 					selected.add(container)
 			save_update_data(chatId, messageId, containers, selected)
 
-			markup = build_keyboard(containers, selected, messageId)
+			markup = build_generic_keyboard(containers, selected, messageId, "Update", get_text("button_update"), get_text("button_update_all"))
 			bot.edit_message_reply_markup(chatId, messageId, reply_markup=markup)
 
 		# CONFIRM UPDATE SELECTED
@@ -1755,17 +1755,6 @@ def confirm_update_selected(chatId, messageId):
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 	send_message(message=get_text("confirm_update_all", containersToUpdate), reply_markup=markup)
 
-def build_keyboard(container_available_to_update, selected_containers, originalMessageId):
-	"""Build keyboard for update actions using the generic builder"""
-	return build_generic_keyboard(
-		container_available_to_update,
-		selected_containers,
-		originalMessageId,
-		action_type="Update",
-		button_text=get_text("button_update"),
-		button_text_all=get_text("button_update_all")
-	)
-
 def build_generic_keyboard(container_available, selected_containers, originalMessageId, action_type, button_text, button_text_all=None):
 	"""Generic keyboard builder for run/stop/restart actions"""
 	markup = InlineKeyboardMarkup(row_width=BUTTON_COLUMNS)
@@ -1814,9 +1803,9 @@ def display_containers(containers):
 
 	# Build summary
 	result = f"📊 *{get_text('containers')}:* {total_containers}\n"
-	result += f"🟢 {running_containers}\n"
-	result += f"🔴 {stopped_containers}\n"
-	result += f"⬆️ {pending_updates}\n\n"
+	result += f"🟢 {get_text('status_running')}: {running_containers}\n"
+	result += f"🔴 {get_text('status_stopped')}: {stopped_containers}\n"
+	result += f"⬆️ {get_text('status_updates')}: {pending_updates}\n\n"
 
 	# Build container list
 	result += "```\n"
