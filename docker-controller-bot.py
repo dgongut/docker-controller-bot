@@ -252,8 +252,11 @@ class DockerManager:
 					possible_update = True
 
 			text = '```\n'
-			text += f'{get_text("status")}: {get_status_emoji(container.status, container_name)} ({container.status})\n\n'
+			text += f'{get_text("status")}: {get_status_emoji(container.status, container_name, container)} ({container.status})\n\n'
 			if container.status == "running":
+				health_text = get_health_status_text(container)
+				if health_text:
+					text += f"- {get_text('health')}: {health_text}\n\n"
 				if 0.0 != used_cpu:
 					text += f"- CPU: {used_cpu}%\n\n"
 				if ("0.00 MB") not in ram:
@@ -319,7 +322,6 @@ class DockerManager:
 				if tag:
 					image_with_tag = f'{image_with_tag.split(":")[0]}:{tag}'
 
-				# BUG FIX: Considerar todos los estados que necesitan detención
 				STATES_TO_STOP = ['running', 'restarting', 'paused', 'created']
 				container_is_running = container.status in STATES_TO_STOP
 
@@ -335,7 +337,6 @@ class DockerManager:
 				debug(get_text("debug_updating_container", container_name))
 				try:
 					debug(get_text("debug_pulling_image", image_with_tag))
-					# BUG FIX: Validar que message existe antes de editar
 					if message:
 						try:
 							bot.edit_message_text(get_text("updating_downloading", container_name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
@@ -343,7 +344,6 @@ class DockerManager:
 							debug(get_text("debug_edit_message_failed", container_name, e))
 
 					local_image = container.image.id
-					# BUG FIX: Validar que la imagen se descargó correctamente
 					try:
 						debug(get_text("debug_pulling_image", image_with_tag))
 						remote_image = client.images.pull(image_with_tag)
@@ -423,7 +423,6 @@ class DockerManager:
 						container.remove()
 					except docker.errors.APIError as e:
 						error(get_text("error_deleting_container_with_error", container.name, e))
-						# BUG FIX: No es crítico si no se puede eliminar el viejo, continuar
 						debug(get_text("debug_old_container_not_deleted", container.name))
 
 					debug(get_text("debug_deleting_image", local_image.replace('sha256:', '')[:CONTAINER_ID_LENGTH]))
@@ -432,15 +431,12 @@ class DockerManager:
 					except Exception as e:
 						debug(get_text("debug_image_can_not_be_deleted", container_name, e))
 
-					# BUG FIX: Guardar estado con validación
 					if image_with_tag and container_name:
 						save_container_update_status(image_with_tag, container_name, get_text("UPDATED_CONTAINER_TEXT"))
 					return get_text("updated_container", container_name)
 				except Exception as e:
-					# BUG FIX: Rollback robusto
 					debug(get_text("debug_rollback_update", container_name))
 					try:
-						# Intentar renombrar el contenedor viejo de vuelta
 						old_container_name = f'{container_name}_old'
 						try:
 							old_container = client.containers.get(old_container_name)
@@ -474,7 +470,6 @@ class DockerManager:
 			image_with_tag = container_attrs.get('Image', '')
 			local_image = container.image.id
 
-			# BUG FIX: Validar pull de imagen
 			try:
 				remote_image = self.client.images.pull(image_with_tag)
 				if not remote_image or not remote_image.id:
@@ -493,7 +488,6 @@ class DockerManager:
 				save_container_update_status(image_with_tag, container.name, image_status)
 				return
 
-			# BUG FIX: Normalizar IDs antes de comparar
 			local_image_normalized = local_image.replace('sha256:', '')
 			remote_image_normalized = remote_image.id.replace('sha256:', '')
 
@@ -516,7 +510,6 @@ class DockerManager:
 			error(get_text("error_checking_update_with_error", e))
 			image_status = ""
 
-		# BUG FIX: Guardar estado con validación
 		if image_with_tag and container and container.name:
 			save_container_update_status(image_with_tag, container.name, image_status)
 
@@ -887,7 +880,7 @@ def command_controller(message):
 			botones = []
 			containers = docker_manager.list_containers(comando=comando)
 			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name)} {container.name}', callback_data=f'logs|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name, container)} {container.name}', callback_data=f'logs|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
 
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
@@ -900,7 +893,7 @@ def command_controller(message):
 			botones = []
 			containers = docker_manager.list_containers(comando=comando)
 			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name)} {container.name}', callback_data=f'logfile|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name, container)} {container.name}', callback_data=f'logfile|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
 
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
@@ -913,7 +906,7 @@ def command_controller(message):
 			botones = []
 			containers = docker_manager.list_containers(comando=comando)
 			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name)} {container.name}', callback_data=f'compose|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name, container)} {container.name}', callback_data=f'compose|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
 
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
@@ -982,7 +975,7 @@ def command_controller(message):
 			botones = []
 			containers = docker_manager.list_containers(comando=comando)
 			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name)} {container.name}', callback_data=f'info|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name, container)} {container.name}', callback_data=f'info|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
 
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
@@ -995,7 +988,7 @@ def command_controller(message):
 			botones = []
 			containers = docker_manager.list_containers(comando=comando)
 			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name)} {container.name}', callback_data=f'askCommand|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name, container)} {container.name}', callback_data=f'askCommand|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
 
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
@@ -1008,7 +1001,7 @@ def command_controller(message):
 			botones = []
 			containers = docker_manager.list_containers(comando=comando)
 			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name)} {container.name}', callback_data=f'confirmDelete|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name, container)} {container.name}', callback_data=f'confirmDelete|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
 
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
@@ -1057,7 +1050,7 @@ def command_controller(message):
 			botones = []
 			containers = docker_manager.list_containers(comando=comando)
 			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name)} {container.name}', callback_data=f'changeTagContainer|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name, container)} {container.name}', callback_data=f'changeTagContainer|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
 
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
@@ -1810,14 +1803,36 @@ def display_containers(containers):
 	# Build container list
 	result += "```\n"
 	for container in containers:
-		result += f"{get_status_emoji(container.status, container.name)} {container.name}"
+		result += f"{get_status_emoji(container.status, container.name, container)} {container.name}"
 		if update_available(container):
 			result += " ⬆️"
 		result += "\n"
 	result += "```"
 	return result
 
-def get_status_emoji(statusStr, containerName):
+def get_container_health_status(container):
+	"""Get the health status of a container. Returns 'healthy', 'unhealthy', 'starting', or None"""
+	try:
+		state = container.attrs.get('State', {})
+		health = state.get('Health', {})
+		if health:
+			return health.get('Status')  # 'healthy', 'unhealthy', 'starting'
+	except:
+		pass
+	return None
+
+def get_health_status_text(container):
+	"""Get formatted health status text with emoji for display"""
+	health = get_container_health_status(container)
+	if health == "healthy":
+		return f"💚 {get_text('health_healthy')}"
+	elif health == "unhealthy":
+		return f"� {get_text('health_unhealthy')}"
+	elif health == "starting":
+		return f"🟡 {get_text('health_starting')}"
+	return None
+
+def get_status_emoji(statusStr, containerName, container=None):
 	status = "🟢"
 	if statusStr == "exited" or statusStr == "dead":
 		status = "🔴"
@@ -1827,7 +1842,16 @@ def get_status_emoji(statusStr, containerName):
 		status = "🟠"
 	elif statusStr == "created":
 		status = "🔵"
-	
+	elif statusStr == "running" and container:
+		# Check health status if container is running
+		health = get_container_health_status(container)
+		if health == "healthy":
+			status = "💚"  # Healthy running container
+		elif health == "unhealthy":
+			status = "🟢 (💔)"  # Unhealthy running container
+		elif health == "starting":
+			status = "🟡"  # Health check in progress
+
 	if CONTAINER_NAME == containerName:
 		status = "👑"
 	return status
@@ -2193,32 +2217,32 @@ def get_docker_tags(repo_name):
 def get_docker_tags_from_DockerHub(repo_name):
 	architecture = get_my_architecture()
 	if architecture is None:
-		return None
+		return []
 
 	url = f"https://hub.docker.com/v2/repositories/{repo_name}/tags?page_size=99"
 	response = requests.get(url)
-	if response.status_code == 200:
-		data = response.json()
-		tags = data.get('results', [])
-		filtered_tags = []
-		for tag in tags:
-			images = tag.get('images', [])
-			for image in images:
-				if image['architecture'] == architecture:
-					filtered_tags.append(tag['name'])
-					break
-		return filtered_tags
-	raise Exception(f'Error calling to {url}: {response.status_code}')
+	if response.status_code != 200:
+		raise Exception(f'Error calling to {url}: {response.status_code}')
+
+	data = response.json()
+	tags = data.get('results', [])
+	filtered_tags = []
+	for tag in tags:
+		images = tag.get('images', [])
+		for image in images:
+			if image['architecture'] == architecture:
+				filtered_tags.append(tag['name'])
+				break
+	return filtered_tags
 
 def get_docker_tags_from_GitHub(repo_name):
 	url = f"https://api.github.com/repos/{repo_name}/tags?per_page=99"
 	response = requests.get(url)
-	if response.status_code == 200:
-		data = response.json()
-		tags = [tag['name'] for tag in data]
-		return tags
-	else:
+	if response.status_code != 200:
 		raise Exception(f'Error calling to {url}: {response.status_code}')
+
+	data = response.json()
+	return [tag['name'] for tag in data]
 
 if __name__ == '__main__':
 	debug(get_text("debug_starting_bot", VERSION))
