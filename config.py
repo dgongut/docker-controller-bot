@@ -48,7 +48,6 @@ CALL_PATTERNS = {
     "askCommand": ["containerId", "containerName"],
     "cancelAskCommand": [],
     "cancelExec": ["commandId"],
-    "cancelUpdate": [],
     "changeTag": ["containerId", "containerName", "tag"],
     "changeTagContainer": ["containerId", "containerName"],
     "cerrar": [],

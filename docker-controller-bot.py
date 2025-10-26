@@ -243,10 +243,12 @@ class DockerManager:
 			if CHECK_UPDATES:
 				try:
 					image_status = read_container_update_status(image_with_tag, container_name)
+					if image_status is None:
+						image_status = ""
 				except Exception as e:
 					debug(get_text("debug_update_not_cached", container_name, e))
 
-				if get_text("NEED_UPDATE_CONTAINER_TEXT") in image_status:
+				if image_status and get_text("NEED_UPDATE_CONTAINER_TEXT") in image_status:
 					possible_update = True
 
 			text = '```\n'
@@ -317,7 +319,9 @@ class DockerManager:
 				if tag:
 					image_with_tag = f'{image_with_tag.split(":")[0]}:{tag}'
 
-				container_is_running = container.status == 'running'
+				# BUG FIX: Considerar todos los estados que necesitan detención
+				STATES_TO_STOP = ['running', 'restarting', 'paused', 'created']
+				container_is_running = container.status in STATES_TO_STOP
 
 				network_settings = container.attrs.get('NetworkSettings', {})
 
@@ -331,12 +335,31 @@ class DockerManager:
 				debug(get_text("debug_updating_container", container_name))
 				try:
 					debug(get_text("debug_pulling_image", image_with_tag))
-					bot.edit_message_text(get_text("updating_downloading", container_name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+					# BUG FIX: Validar que message existe antes de editar
+					if message:
+						try:
+							bot.edit_message_text(get_text("updating_downloading", container_name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+						except Exception as e:
+							debug(get_text("debug_edit_message_failed", container_name, e))
+
 					local_image = container.image.id
-					remote_image = client.images.pull(image_with_tag)
+					# BUG FIX: Validar que la imagen se descargó correctamente
+					try:
+						debug(get_text("debug_pulling_image", image_with_tag))
+						remote_image = client.images.pull(image_with_tag)
+						if not remote_image or not remote_image.id:
+							return get_text("error_pulling_image", image_with_tag)
+					except docker.errors.ImageNotFound:
+						return get_text("error_image_not_found", image_with_tag)
+					except docker.errors.APIError as e:
+						return get_text("error_pulling_image_with_error", image_with_tag, e)
 					debug(get_text("debug_pulled_image", image_with_tag))
 					if container_is_running:
-						bot.edit_message_text(get_text("updating_stopping", container_name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+						if message:
+							try:
+								bot.edit_message_text(get_text("updating_stopping", container_name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+							except Exception as e:
+								debug(get_text("debug_edit_message_failed", container_name, e))
 						debug(get_text("debug_stopping_container", container_name))
 						container.stop()
 
@@ -348,7 +371,11 @@ class DockerManager:
 						return get_text("error_renaming_container", container_name)
 
 					debug(get_text("debug_creating_new_container", remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]))
-					bot.edit_message_text(get_text("updating_creating", container_name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+					if message:
+						try:
+							bot.edit_message_text(get_text("updating_creating", container_name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+						except Exception as e:
+							debug(get_text("debug_edit_message_failed", container_name, e))
 
 					networking_config = None
 					if ipv4_address:
@@ -379,29 +406,63 @@ class DockerManager:
 
 					if container_is_running:
 						debug(get_text("debug_container_need_to_be_started"))
-						bot.edit_message_text(get_text("updating_starting", container_name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+						if message:
+							try:
+								bot.edit_message_text(get_text("updating_starting", container_name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+							except Exception as e:
+								debug(get_text("debug_edit_message_failed", container_name, e))
 						new_container.start()
 
 					try:
 						debug(get_text("debug_container_deleting_old_container", container.name))
-						bot.edit_message_text(get_text("updating_deleting_old", container.name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+						if message:
+							try:
+								bot.edit_message_text(get_text("updating_deleting_old", container.name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+							except Exception as e:
+								debug(get_text("debug_edit_message_failed", container.name, e))
 						container.remove()
 					except docker.errors.APIError as e:
 						error(get_text("error_deleting_container_with_error", container.name, e))
-						return get_text("error_deleting_container", container.name)
+						# BUG FIX: No es crítico si no se puede eliminar el viejo, continuar
+						debug(get_text("debug_old_container_not_deleted", container.name))
 
 					debug(get_text("debug_deleting_image", local_image.replace('sha256:', '')[:CONTAINER_ID_LENGTH]))
 					try:
 						client.images.remove(local_image)
 					except Exception as e:
 						debug(get_text("debug_image_can_not_be_deleted", container_name, e))
-					save_container_update_status(image_with_tag, container_name, get_text("UPDATED_CONTAINER_TEXT"))
+
+					# BUG FIX: Guardar estado con validación
+					if image_with_tag and container_name:
+						save_container_update_status(image_with_tag, container_name, get_text("UPDATED_CONTAINER_TEXT"))
 					return get_text("updated_container", container_name)
 				except Exception as e:
-					container.rename(container_name)
-					container.start()
-					error(get_text("error_creating_new_container_with_error", container_attrs))
-					raise e
+					# BUG FIX: Rollback robusto
+					debug(get_text("debug_rollback_update", container_name))
+					try:
+						# Intentar renombrar el contenedor viejo de vuelta
+						old_container_name = f'{container_name}_old'
+						try:
+							old_container = client.containers.get(old_container_name)
+							old_container.rename(container_name)
+							# Reiniciar si estaba corriendo
+							if container_is_running:
+								old_container.start()
+							debug(get_text("debug_rollback_successful", container_name))
+						except:
+							pass
+
+						# Intentar eliminar el nuevo contenedor fallido
+						try:
+							new_container.stop()
+							new_container.remove()
+						except:
+							pass
+					except:
+						pass
+
+					error(get_text("error_creating_new_container_with_error", container_name, e))
+					return get_text("error_updating_container", container_name)
 		except Exception as e:
 			error(get_text("error_updating_container_with_error", container_name, e))
 			return get_text("error_updating_container", container_name)
@@ -412,10 +473,34 @@ class DockerManager:
 			container_attrs = container.attrs.get('Config', {})
 			image_with_tag = container_attrs.get('Image', '')
 			local_image = container.image.id
-			remote_image = self.client.images.pull(image_with_tag)
-			debug(get_text("debug_checking_update", container.name, image_with_tag, local_image.replace('sha256:', '')[:CONTAINER_ID_LENGTH], remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]))
-			if local_image != remote_image.id:
-				debug(get_text("debug_update_detected", container.name, remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]))
+
+			# BUG FIX: Validar pull de imagen
+			try:
+				remote_image = self.client.images.pull(image_with_tag)
+				if not remote_image or not remote_image.id:
+					error(get_text("error_pulling_image", image_with_tag))
+					image_status = ""
+					save_container_update_status(image_with_tag, container.name, image_status)
+					return
+			except docker.errors.ImageNotFound:
+				error(get_text("error_image_not_found", image_with_tag))
+				image_status = ""
+				save_container_update_status(image_with_tag, container.name, image_status)
+				return
+			except docker.errors.APIError as e:
+				error(get_text("error_pulling_image_with_error", image_with_tag, e))
+				image_status = ""
+				save_container_update_status(image_with_tag, container.name, image_status)
+				return
+
+			# BUG FIX: Normalizar IDs antes de comparar
+			local_image_normalized = local_image.replace('sha256:', '')
+			remote_image_normalized = remote_image.id.replace('sha256:', '')
+
+			debug(get_text("debug_checking_update", container.name, image_with_tag, local_image_normalized[:CONTAINER_ID_LENGTH], remote_image_normalized[:CONTAINER_ID_LENGTH]))
+
+			if local_image_normalized != remote_image_normalized:
+				debug(get_text("debug_update_detected", container.name, remote_image_normalized[:CONTAINER_ID_LENGTH]))
 				try:
 					self.client.images.remove(remote_image.id)
 				except:
@@ -430,14 +515,17 @@ class DockerManager:
 		except Exception as e:
 			error(get_text("error_checking_update_with_error", e))
 			image_status = ""
-		save_container_update_status(image_with_tag, container.name, image_status)
+
+		# BUG FIX: Guardar estado con validación
+		if image_with_tag and container and container.name:
+			save_container_update_status(image_with_tag, container.name, image_status)
 
 	def delete(self, container_id, container_name):
 		try:
 			if CONTAINER_NAME == container_name:
 				return get_text("error_can_not_do_that")
 			container = self.client.containers.get(container_id)
-			container_is_running = container.status != 'stop'
+			container_is_running = container.status in ['running', 'restarting', 'paused', 'created']
 			if container_is_running:
 				debug(get_text("debug_stopping_container", container_name))
 				container.stop()
@@ -624,11 +712,12 @@ class DockerUpdateMonitor:
 				])
 				markup.add(
 					InlineKeyboardButton(get_text("button_update_all"), callback_data="toggleUpdateAll"),
-					InlineKeyboardButton(get_text("button_cancel"), callback_data="cancelUpdate")
+					InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar")
 				)
 				if not is_muted():
 					message = send_message(message=get_text("available_updates", len(grouped_updates_containers)), reply_markup=markup)
-					save_update_data(TELEGRAM_GROUP, message.message_id, grouped_updates_containers)
+					if message:
+						save_update_data(TELEGRAM_GROUP, message.message_id, grouped_updates_containers)
 				else:
 					debug(get_text("debug_muted_message", get_text("available_updates", len(grouped_updates_containers))))
 			debug(get_text("debug_waiting_next_check_updates", CHECK_UPDATE_EVERY_HOURS))
@@ -760,7 +849,8 @@ def command_controller(message):
 
 			markup = build_generic_keyboard(container_names, set(), 0, "Run", get_text("button_run"), get_text("button_run_all"))
 			message = send_message(message=get_text("start_a_container"), reply_markup=markup)
-			save_action_data(TELEGRAM_GROUP, message.message_id, "run", container_names)
+			if message:
+				save_action_data(TELEGRAM_GROUP, message.message_id, "run", container_names)
 	elif comando in ('/stop', f'/stop@{bot.get_me().username}'):
 		if container_id:
 			stop(container_id, container_name)
@@ -773,7 +863,8 @@ def command_controller(message):
 
 			markup = build_generic_keyboard(container_names, set(), 0, "Stop", get_text("button_stop"), get_text("button_stop_all"))
 			message = send_message(message=get_text("stop_a_container"), reply_markup=markup)
-			save_action_data(TELEGRAM_GROUP, message.message_id, "stop", container_names)
+			if message:
+				save_action_data(TELEGRAM_GROUP, message.message_id, "stop", container_names)
 	elif comando in ('/restart', f'/restart@{bot.get_me().username}'):
 		if container_id:
 			restart(container_id, container_name)
@@ -786,7 +877,8 @@ def command_controller(message):
 
 			markup = build_generic_keyboard(container_names, set(), 0, "Restart", get_text("button_restart"), get_text("button_restart_all"))
 			message = send_message(message=get_text("restart_a_container"), reply_markup=markup)
-			save_action_data(TELEGRAM_GROUP, message.message_id, "restart", container_names)
+			if message:
+				save_action_data(TELEGRAM_GROUP, message.message_id, "restart", container_names)
 	elif comando in ('/logs', f'/logs@{bot.get_me().username}'):
 		if container_id:
 			logs(container_id, container_name)
@@ -951,10 +1043,11 @@ def command_controller(message):
 		])
 		markup.add(
 			InlineKeyboardButton(get_text("button_update_all"), callback_data="toggleUpdateAll"),
-			InlineKeyboardButton(get_text("button_cancel"), callback_data="cancelUpdate")
+			InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar")
 		)
 		message = send_message(message=get_text("available_updates", len(containersToUpdate)), reply_markup=markup)
-		save_update_data(TELEGRAM_GROUP, message.message_id, containersToUpdate)
+		if message:
+			save_update_data(TELEGRAM_GROUP, message.message_id, containersToUpdate)
 		
 	elif comando in ('/changetag', f'/changetag@{bot.get_me().username}'):
 		if container_id:
@@ -981,13 +1074,15 @@ def command_controller(message):
 			send_message(message=get_text("prune_system"), reply_markup=markup)
 	elif comando in ('/version', f'/version@{bot.get_me().username}'):
 		x = send_message(message=get_text("version", VERSION))
-		time.sleep(15)
-		delete_message(x.message_id)
+		if x:
+			time.sleep(15)
+			delete_message(x.message_id)
 
 	elif comando in ('/donate', f'/donate@{bot.get_me().username}'):
 		x = send_message(message=get_text("donate"))
-		time.sleep(45)
-		delete_message(x.message_id)
+		if x:
+			time.sleep(45)
+			delete_message(x.message_id)
 
 	elif comando in ('/donors', f'/donors@{bot.get_me().username}'):
 		print_donors()
@@ -1046,6 +1141,15 @@ def button_controller(call):
 			delete_message(messageId)
 
 		if call.data == "cerrar":
+			# Clean up any cached data for this message
+			update_data = read_cache_item(f"update_data_{chatId}_{messageId}")
+			if update_data is not None:
+				clear_update_data(chatId, messageId)
+			for action in ["run", "stop", "restart"]:
+				action_data = read_cache_item(f"{action}_data_{chatId}_{messageId}")
+				if action_data is not None:
+					clear_action_data(chatId, messageId, action)
+					break
 			return
 
 		# RUN
@@ -1107,7 +1211,11 @@ def button_controller(call):
 		elif comando == "exec":
 			command = load_command_cache(commandId)
 			clear_command_cache(commandId)
-			execute_command(containerId, containerName, command)
+			if command is not None:
+				execute_command(containerId, containerName, command)
+			else:
+				error(f"Command cache not found for ID: {commandId}")
+				send_message(message=get_text("error_callback_processing"))
 
 		# CANCEL ASK
 		elif comando == "cancelAskCommand":
@@ -1171,10 +1279,6 @@ def button_controller(call):
 		elif comando == "confirmUpdateSelected":
 			confirm_update_selected(chatId, messageId)
 
-		# CANCEL UPDATE
-		elif comando == "cancelUpdate":
-			clear_update_data(chatId, messageId)
-
 		# UPDATE SELECTED
 		elif comando == "updateSelected":
 			containers, selected = load_update_data(chatId, originalMessageId)
@@ -1221,12 +1325,8 @@ def button_controller(call):
 				containersToRun += f"· *{container}*\n"
 			markup = InlineKeyboardMarkup(row_width = 1)
 			markup.add(InlineKeyboardButton(get_text("button_run"), callback_data=f"runSelected|{originalMessageId}"))
-			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cancelRun"))
+			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 			send_message(message=get_text("confirm_run_selected", containersToRun), reply_markup=markup)
-
-		# CANCEL RUN
-		elif comando == "cancelRun":
-			clear_action_data(chatId, messageId, "run")
 
 		# RUN SELECTED
 		elif comando == "runSelected":
@@ -1271,12 +1371,8 @@ def button_controller(call):
 				containersToStop += f"· *{container}*\n"
 			markup = InlineKeyboardMarkup(row_width = 1)
 			markup.add(InlineKeyboardButton(get_text("button_stop"), callback_data=f"stopSelected|{originalMessageId}"))
-			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cancelStop"))
+			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 			send_message(message=get_text("confirm_stop_selected", containersToStop), reply_markup=markup)
-
-		# CANCEL STOP
-		elif comando == "cancelStop":
-			clear_action_data(chatId, messageId, "stop")
 
 		# STOP SELECTED
 		elif comando == "stopSelected":
@@ -1321,12 +1417,8 @@ def button_controller(call):
 				containersToRestart += f"· *{container}*\n"
 			markup = InlineKeyboardMarkup(row_width = 1)
 			markup.add(InlineKeyboardButton(get_text("button_restart"), callback_data=f"restartSelected|{originalMessageId}"))
-			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cancelRestart"))
+			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 			send_message(message=get_text("confirm_restart_selected", containersToRestart), reply_markup=markup)
-
-		# CANCEL RESTART
-		elif comando == "cancelRestart":
-			clear_action_data(chatId, messageId, "restart")
 
 		# RESTART SELECTED
 		elif comando == "restartSelected":
@@ -1431,7 +1523,8 @@ def run(containerId, containerName):
 	debug(get_text("run_command_for_container", "run", containerName))
 	x = send_message(message=get_text("starting", containerName))
 	result = docker_manager.start_container(container_id=containerId, container_name=containerName)
-	delete_message(x.message_id)
+	if x:
+		delete_message(x.message_id)
 	if result:
 		send_message(message=result)
 
@@ -1439,7 +1532,8 @@ def stop(containerId, containerName):
 	debug(get_text("run_command_for_container", "stop", containerName))
 	x = send_message(message=get_text("stopping", containerName))
 	result = docker_manager.stop_container(container_id=containerId, container_name=containerName)
-	delete_message(x.message_id)
+	if x:
+		delete_message(x.message_id)
 	if result:
 		send_message(message=result)
 
@@ -1447,7 +1541,8 @@ def restart(containerId, containerName):
 	debug(get_text("run_command_for_container", "restart", containerName))
 	x = send_message(message=get_text("restarting", containerName))
 	result = docker_manager.restart_container(container_id=containerId, container_name=containerName)
-	delete_message(x.message_id)
+	if x:
+		delete_message(x.message_id)
 	if result:
 		send_message(message=result)
 
@@ -1463,10 +1558,14 @@ def log_file(containerId, containerName):
 	markup = InlineKeyboardMarkup(row_width = 1)
 	markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
 	result = docker_manager.show_logs_raw(container_id=containerId, container_name=containerName)
-	fichero_temporal = get_temporal_file(result, f'logs_{containerName}')
-	x = send_message(message=get_text("loading_file"))
-	send_document(document=fichero_temporal, reply_markup=markup, caption=get_text("logs", containerName))
-	delete_message(x.message_id)
+	if isinstance(result, str):
+		fichero_temporal = get_temporal_file(result, f'logs_{containerName}')
+		x = send_message(message=get_text("loading_file"))
+		send_document(document=fichero_temporal, reply_markup=markup, caption=get_text("logs", containerName))
+		if x:
+			delete_message(x.message_id)
+	else:
+		send_message(message=result, reply_markup=markup)
 
 def get_temporal_file(data, fileName):
 	fichero_temporal = io.BytesIO(data.encode('utf-8'))
@@ -1520,11 +1619,15 @@ def compose(containerId, containerName):
 	markup = InlineKeyboardMarkup(row_width = 1)
 	markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
 	result = docker_manager.get_docker_compose(container_id=containerId, container_name=containerName)
-	fichero_temporal = io.BytesIO(result.encode('utf-8'))
-	fichero_temporal.name = "docker-compose.txt"
-	x = send_message(message=get_text("loading_file"))
-	send_document(document=fichero_temporal, reply_markup=markup, caption=get_text("compose", containerName))
-	delete_message(x.message_id)
+	if isinstance(result, str) and not result.startswith("Error"):
+		fichero_temporal = io.BytesIO(result.encode('utf-8'))
+		fichero_temporal.name = "docker-compose.txt"
+		x = send_message(message=get_text("loading_file"))
+		send_document(document=fichero_temporal, reply_markup=markup, caption=get_text("compose", containerName))
+		if x:
+			delete_message(x.message_id)
+	else:
+		send_message(message=result, reply_markup=markup)
 
 def info(containerId, containerName):
 	debug(get_text("run_command_for_container", "info", containerName))
@@ -1577,7 +1680,8 @@ def ask_command(userId, containerId, containerName):
 	markup = InlineKeyboardMarkup(row_width = 1)
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cancelAskCommand"))
 	x = send_message(message=get_text("prompt_enter_command", containerName), reply_markup=markup)
-	save_command_request_state(userId, containerId, containerName, x.message_id)
+	if x:
+		save_command_request_state(userId, containerId, containerName, x.message_id)
 
 def confirm_execute_command(containerId, containerName, command):
 	debug(get_text("run_command_for_container_command", "confirm_exec", containerName, command))
@@ -1645,32 +1749,22 @@ def confirm_update_selected(chatId, messageId):
 	_, selected = load_update_data(chatId, messageId)
 	containersToUpdate = ""
 	for container in selected:
-		containersToUpdate += f"· {container}\n"
+		containersToUpdate += f"· *{container}*\n"
 	markup = InlineKeyboardMarkup(row_width = 1)
 	markup.add(InlineKeyboardButton(get_text("button_confirm_update"), callback_data=f"updateSelected|{messageId}"))
-	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cancelUpdate"))
+	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 	send_message(message=get_text("confirm_update_all", containersToUpdate), reply_markup=markup)
 
 def build_keyboard(container_available_to_update, selected_containers, originalMessageId):
-	markup = InlineKeyboardMarkup(row_width=BUTTON_COLUMNS)
-	botones = []
-	for container in container_available_to_update:
-		icono = ICON_CONTAINER_MARKED_FOR_UPDATE if container in selected_containers else ICON_CONTAINER_MARK_FOR_UPDATE
-		botones.append(
-			InlineKeyboardButton(f"{icono} {container}", callback_data=f"toggleUpdate|{container}")
-		)
-	markup.add(*botones)
-
-	fixed_buttons = []
-	if selected_containers:
-		fixed_buttons.append(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdateSelected|{originalMessageId}"))
-	else:
-		fixed_buttons.append(InlineKeyboardButton(get_text("button_update_all"), callback_data="toggleUpdateAll"))
-
-	fixed_buttons.append(InlineKeyboardButton(get_text("button_cancel"), callback_data="cancelUpdate"))
-
-	markup.add(*fixed_buttons)
-	return markup
+	"""Build keyboard for update actions using the generic builder"""
+	return build_generic_keyboard(
+		container_available_to_update,
+		selected_containers,
+		originalMessageId,
+		action_type="Update",
+		button_text=get_text("button_update"),
+		button_text_all=get_text("button_update_all")
+	)
 
 def build_generic_keyboard(container_available, selected_containers, originalMessageId, action_type, button_text, button_text_all=None):
 	"""Generic keyboard builder for run/stop/restart actions"""
@@ -1691,7 +1785,7 @@ def build_generic_keyboard(container_available, selected_containers, originalMes
 		text_to_use = button_text_all if button_text_all else button_text
 		fixed_buttons.append(InlineKeyboardButton(text_to_use, callback_data=f"toggle{action_type}All"))
 
-	fixed_buttons.append(InlineKeyboardButton(get_text("button_cancel"), callback_data=f"cancel{action_type}"))
+	fixed_buttons.append(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 
 	markup.add(*fixed_buttons)
 	return markup
@@ -1705,7 +1799,7 @@ def update_available(container):
 	if CHECK_UPDATES:
 		try:
 			image_status = read_container_update_status(image_with_tag, container.name)
-			if "⬆️" in image_status:
+			if image_status and "⬆️" in image_status:
 				update = True
 		except:
 			pass
@@ -1719,9 +1813,9 @@ def display_containers(containers):
 	pending_updates = sum(1 for c in containers if update_available(c))
 
 	# Build summary
-	result = f"📊 *{get_text('containers')}:* {total_containers} | "
-	result += f"🟢 {running_containers} | "
-	result += f"🔴 {stopped_containers} | "
+	result = f"📊 *{get_text('containers')}:* {total_containers}\n"
+	result += f"🟢 {running_containers}\n"
+	result += f"🔴 {stopped_containers}\n"
 	result += f"⬆️ {pending_updates}\n\n"
 
 	# Build container list
@@ -1754,14 +1848,17 @@ def get_update_emoji(containerName):
 
 	container_id = get_container_id_by_name(container_name=containerName)
 	if not container_id:
-		return
-	
-	client = docker.from_env()
-	container = client.containers.get(container_id)
-	image_with_tag = container.attrs['Config']['Image']
-	image_status = read_container_update_status(image_with_tag, container.name)
-	if get_text("NEED_UPDATE_CONTAINER_TEXT") in image_status:
-		status = "⬆️"
+		return status
+
+	try:
+		client = docker.from_env()
+		container = client.containers.get(container_id)
+		image_with_tag = container.attrs['Config']['Image']
+		image_status = read_container_update_status(image_with_tag, container.name)
+		if image_status and get_text("NEED_UPDATE_CONTAINER_TEXT") in image_status:
+			status = "⬆️"
+	except Exception as e:
+		error(get_text("error_checking_update_with_error", e))
 
 	return status
 
@@ -1780,7 +1877,7 @@ def get_array_donors_online():
 		'Cache-Control': 'no-cache',
 		'Pragma': 'no-cache'
 	}
-	
+
 	response = requests.get(DONORS_URL, headers=headers)
 	if response.status_code == 200:
 		try:
@@ -1789,10 +1886,10 @@ def get_array_donors_online():
 				data.sort()
 				return data
 			else:
-				error(get_text("error_getting_donors_with_error", f"data is not a list [{data}]"))
+				error(get_text("error_getting_donors_with_error", f"data is not a list [{str(data)}]"))
 				return []
 		except ValueError:
-			error(get_text("error_getting_donors_with_error", f"data is not a json [{data}]"))
+			error(get_text("error_getting_donors_with_error", f"data is not a json [{response.text}]"))
 			return []
 	else:
 		error(get_text("error_getting_donors_with_error", f"error code [{response.status_code}]"))
@@ -1826,7 +1923,7 @@ def read_cache_item(key):
 	try:
 		return pickle.load(open(f'{DIR["cache"]}{key}', 'rb'))
 	except:
-		return ""
+		return None
 	
 def delete_cache_item(key):
 	path = f'{DIR["cache"]}{key}'
@@ -1855,7 +1952,7 @@ def save_update_data(chat_id, message_id, containers, selected=None):
 
 def load_update_data(chat_id, message_id):
 	data = read_cache_item(f"update_data_{chat_id}_{message_id}")
-	if data is None:
+	if data is None or not isinstance(data, dict):
 		return [], set()
 	containers = data.get("containers", [])
 	selected = data.get("selected", set())
@@ -1879,7 +1976,7 @@ def save_action_data(chat_id, message_id, action_type, containers, selected=None
 def load_action_data(chat_id, message_id, action_type):
 	"""Generic function to load selection data for run/stop/restart actions"""
 	data = read_cache_item(f"{action_type}_data_{chat_id}_{message_id}")
-	if data is None:
+	if data is None or not isinstance(data, dict):
 		return [], set()
 	containers = data.get("containers", [])
 	selected = data.get("selected", set())
@@ -1948,7 +2045,8 @@ def generate_docker_compose(container):
 	add_if_present(docker_compose['services'][container.name], 'environment', container_environment)
 	add_if_present(docker_compose['services'][container.name], 'volumes', container_volumes)
 	add_if_present(docker_compose['services'][container.name], 'network_mode', container_network_mode)
-	add_if_present(docker_compose['services'][container.name], 'restart', str(container_restart_policy.get('Name', '')))
+	if container_restart_policy:
+		add_if_present(docker_compose['services'][container.name], 'restart', str(container_restart_policy.get('Name', '')))
 	add_if_present(docker_compose['services'][container.name], 'devices', container_devices)
 	add_if_present(docker_compose['services'][container.name], 'labels', container_labels)
 
@@ -1974,12 +2072,14 @@ def delete_message(message_id):
 
 def send_message(chat_id=TELEGRAM_GROUP, message=None, reply_markup=None, parse_mode="markdown", disable_web_page_preview=True):
 	try:
+		if message is None:
+			message = ""
 		if TELEGRAM_THREAD == 1:
 			return bot.send_message(chat_id, message, parse_mode=parse_mode, reply_markup=reply_markup, disable_web_page_preview=disable_web_page_preview)
 		else:
 			return bot.send_message(chat_id, message, parse_mode=parse_mode, reply_markup=reply_markup, disable_web_page_preview=disable_web_page_preview, message_thread_id=TELEGRAM_THREAD)
 	except Exception as e:
-		error(get_text("error_sending_message", chat_id, message, e))
+		error(get_text("error_sending_message", chat_id, str(message), str(e)))
 		pass
 
 def send_message_to_notification_channel(chat_id=TELEGRAM_NOTIFICATION_CHANNEL, message=None, reply_markup=None, parse_mode="markdown", disable_web_page_preview=True):
@@ -2003,13 +2103,13 @@ def delete_updater():
 		client = docker.from_env()
 		container = client.containers.get(container_id)
 		try:
+			updater_image = container.image.id
 			container.stop()
 			container.remove()
+			client.images.remove(updater_image)
+			send_message(message=get_text("updated_container", CONTAINER_NAME))
 		except Exception as e:
 			error(get_text("error_deleting_container_with_error", UPDATER_CONTAINER_NAME, e))
-		updater_image = container.image.id
-		client.images.remove(updater_image)
-		send_message(message=get_text("updated_container", CONTAINER_NAME))
 
 def check_CONTAINER_NAME():
 	container_id = get_container_id_by_name(CONTAINER_NAME)
