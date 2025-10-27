@@ -108,6 +108,109 @@ if not os.path.exists(FULL_MUTE_FILE_PATH):
 # Instanciamos el bot
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
+# ============================================================================
+# SISTEMA DE COLA DE MENSAJES CON RATE LIMITING
+# ============================================================================
+import queue
+from threading import Thread, Lock
+
+class MessageQueue:
+	"""
+	Sistema de cola de mensajes con rate limiting para evitar saturar Telegram.
+	Implementa:
+	- Cola de mensajes con delays configurables
+	- Reintentos con backoff exponencial
+	- Manejo de errores de rate limiting
+	"""
+	def __init__(self, delay_between_messages=0.5, max_retries=3):
+		self.queue = queue.Queue()
+		self.delay_between_messages = delay_between_messages
+		self.max_retries = max_retries
+		self.lock = Lock()
+		self.running = True
+		self.worker_thread = Thread(target=self._process_queue, daemon=True)
+		self.worker_thread.start()
+		debug(get_text("debug_message_queue_started"))
+
+	def _process_queue(self):
+		"""Procesa la cola de mensajes de forma continua"""
+		while self.running:
+			try:
+				# Obtener el siguiente mensaje de la cola (timeout para permitir shutdown)
+				message_data = self.queue.get(timeout=1)
+				if message_data is None:  # Señal de parada
+					break
+
+				self._execute_message(message_data)
+				time.sleep(self.delay_between_messages)
+			except queue.Empty:
+				continue
+			except Exception as e:
+				error(get_text("debug_message_queue_error", str(e)))
+
+	def _execute_message(self, message_data):
+		"""Ejecuta un mensaje con reintentos y backoff exponencial"""
+		func = message_data['func']
+		args = message_data['args']
+		kwargs = message_data['kwargs']
+		result_queue = message_data.get('result_queue')
+
+		try:
+			for attempt in range(self.max_retries):
+				try:
+					result = func(*args, **kwargs)
+					if result_queue:
+						result_queue.put(result)
+					return result
+				except Exception as e:
+					error_msg = str(e)
+					# Detectar rate limiting de Telegram
+					if "Too Many Requests" in error_msg or "429" in error_msg:
+						if attempt < self.max_retries - 1:
+							wait_time = (2 ** attempt) * 2  # Backoff exponencial: 2, 4, 8 segundos
+							warning(get_text("debug_message_queue_rate_limit", wait_time))
+							time.sleep(wait_time)
+							continue
+					elif attempt < self.max_retries - 1:
+						wait_time = 1 * (attempt + 1)
+						debug(get_text("debug_message_queue_retry", attempt + 1, self.max_retries, wait_time))
+						time.sleep(wait_time)
+						continue
+
+					error(get_text("debug_message_queue_final_error", self.max_retries, str(e)))
+					if result_queue:
+						result_queue.put(None)
+					break
+		except Exception as e:
+			error(get_text("debug_message_queue_error", str(e)))
+			if result_queue:
+				result_queue.put(None)
+
+	def add_message(self, func, *args, wait_for_result=False, **kwargs):
+		"""Añade un mensaje a la cola. Si wait_for_result=True, espera el resultado"""
+		result_queue = queue.Queue() if wait_for_result else None
+		self.queue.put({
+			'func': func,
+			'args': args,
+			'kwargs': kwargs,
+			'result_queue': result_queue
+		})
+		if wait_for_result:
+			try:
+				return result_queue.get(timeout=60)  # Esperar máximo 60 segundos
+			except queue.Empty:
+				error(get_text("debug_message_queue_error", "Timeout esperando resultado del mensaje"))
+				return None
+		return None
+
+	def shutdown(self):
+		"""Detiene la cola de mensajes"""
+		self.running = False
+		self.queue.put(None)
+
+# Instanciar la cola de mensajes global
+message_queue = MessageQueue(delay_between_messages=0.1, max_retries=5)
+
 class DockerManager:
 	def __init__(self):
 		self.client = docker.from_env()
@@ -339,7 +442,7 @@ class DockerManager:
 					debug(get_text("debug_pulling_image", image_with_tag))
 					if message:
 						try:
-							bot.edit_message_text(get_text("updating_downloading", container_name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+							edit_message_text(get_text("updating_downloading", container_name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
 						except Exception as e:
 							debug(get_text("debug_edit_message_failed", container_name, e))
 
@@ -357,7 +460,7 @@ class DockerManager:
 					if container_is_running:
 						if message:
 							try:
-								bot.edit_message_text(get_text("updating_stopping", container_name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+								edit_message_text(get_text("updating_stopping", container_name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
 							except Exception as e:
 								debug(get_text("debug_edit_message_failed", container_name, e))
 						debug(get_text("debug_stopping_container", container_name))
@@ -373,7 +476,7 @@ class DockerManager:
 					debug(get_text("debug_creating_new_container", remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]))
 					if message:
 						try:
-							bot.edit_message_text(get_text("updating_creating", container_name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+							edit_message_text(get_text("updating_creating", container_name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
 						except Exception as e:
 							debug(get_text("debug_edit_message_failed", container_name, e))
 
@@ -408,7 +511,7 @@ class DockerManager:
 						debug(get_text("debug_container_need_to_be_started"))
 						if message:
 							try:
-								bot.edit_message_text(get_text("updating_starting", container_name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+								edit_message_text(get_text("updating_starting", container_name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
 							except Exception as e:
 								debug(get_text("debug_edit_message_failed", container_name, e))
 						new_container.start()
@@ -417,7 +520,7 @@ class DockerManager:
 						debug(get_text("debug_container_deleting_old_container", container.name))
 						if message:
 							try:
-								bot.edit_message_text(get_text("updating_deleting_old", container.name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+								edit_message_text(get_text("updating_deleting_old", container.name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
 							except Exception as e:
 								debug(get_text("debug_edit_message_failed", container.name, e))
 						container.remove()
@@ -1255,7 +1358,7 @@ def button_controller(call):
 			save_update_data(chatId, messageId, containers, selected)
 
 			markup = build_generic_keyboard(containers, selected, messageId, "Update", get_text("button_update"), get_text("button_update_all"))
-			bot.edit_message_reply_markup(chatId, messageId, reply_markup=markup)
+			edit_message_reply_markup(chatId, messageId, reply_markup=markup)
 
 		# MARCAR COMO UPDATE TODOS
 		elif comando == "toggleUpdateAll":
@@ -1266,7 +1369,7 @@ def button_controller(call):
 			save_update_data(chatId, messageId, containers, selected)
 
 			markup = build_generic_keyboard(containers, selected, messageId, "Update", get_text("button_update"), get_text("button_update_all"))
-			bot.edit_message_reply_markup(chatId, messageId, reply_markup=markup)
+			edit_message_reply_markup(chatId, messageId, reply_markup=markup)
 
 		# CONFIRM UPDATE SELECTED
 		elif comando == "confirmUpdateSelected":
@@ -1297,7 +1400,7 @@ def button_controller(call):
 			save_action_data(chatId, messageId, "run", containers, selected)
 
 			markup = build_generic_keyboard(containers, selected, messageId, "Run", get_text("button_run"), get_text("button_run_all"))
-			bot.edit_message_reply_markup(chatId, messageId, reply_markup=markup)
+			edit_message_reply_markup(chatId, messageId, reply_markup=markup)
 
 		# TOGGLE RUN ALL
 		elif comando == "toggleRunAll":
@@ -1308,7 +1411,7 @@ def button_controller(call):
 			save_action_data(chatId, messageId, "run", containers, selected)
 
 			markup = build_generic_keyboard(containers, selected, messageId, "Run", get_text("button_run"), get_text("button_run_all"))
-			bot.edit_message_reply_markup(chatId, messageId, reply_markup=markup)
+			edit_message_reply_markup(chatId, messageId, reply_markup=markup)
 
 		# CONFIRM RUN SELECTED
 		elif comando == "confirmRunSelected":
@@ -1343,7 +1446,7 @@ def button_controller(call):
 			save_action_data(chatId, messageId, "stop", containers, selected)
 
 			markup = build_generic_keyboard(containers, selected, messageId, "Stop", get_text("button_stop"), get_text("button_stop_all"))
-			bot.edit_message_reply_markup(chatId, messageId, reply_markup=markup)
+			edit_message_reply_markup(chatId, messageId, reply_markup=markup)
 
 		# TOGGLE STOP ALL
 		elif comando == "toggleStopAll":
@@ -1354,7 +1457,7 @@ def button_controller(call):
 			save_action_data(chatId, messageId, "stop", containers, selected)
 
 			markup = build_generic_keyboard(containers, selected, messageId, "Stop", get_text("button_stop"), get_text("button_stop_all"))
-			bot.edit_message_reply_markup(chatId, messageId, reply_markup=markup)
+			edit_message_reply_markup(chatId, messageId, reply_markup=markup)
 
 		# CONFIRM STOP SELECTED
 		elif comando == "confirmStopSelected":
@@ -1389,7 +1492,7 @@ def button_controller(call):
 			save_action_data(chatId, messageId, "restart", containers, selected)
 
 			markup = build_generic_keyboard(containers, selected, messageId, "Restart", get_text("button_restart"), get_text("button_restart_all"))
-			bot.edit_message_reply_markup(chatId, messageId, reply_markup=markup)
+			edit_message_reply_markup(chatId, messageId, reply_markup=markup)
 
 		# TOGGLE RESTART ALL
 		elif comando == "toggleRestartAll":
@@ -1400,7 +1503,7 @@ def button_controller(call):
 			save_action_data(chatId, messageId, "restart", containers, selected)
 
 			markup = build_generic_keyboard(containers, selected, messageId, "Restart", get_text("button_restart"), get_text("button_restart_all"))
-			bot.edit_message_reply_markup(chatId, messageId, reply_markup=markup)
+			edit_message_reply_markup(chatId, messageId, reply_markup=markup)
 
 		# CONFIRM RESTART SELECTED
 		elif comando == "confirmRestartSelected":
@@ -1827,7 +1930,7 @@ def get_health_status_text(container):
 	if health == "healthy":
 		return f"💚 {get_text('health_healthy')}"
 	elif health == "unhealthy":
-		return f"� {get_text('health_unhealthy')}"
+		return f"🟢 (💔) {get_text('health_unhealthy')}"
 	elif health == "starting":
 		return f"🟡 {get_text('health_starting')}"
 	return None
@@ -2077,13 +2180,11 @@ def add_if_present(dictionary, key, value):
 	if value:
 		dictionary[key] = value
 
-def delete_message(message_id):
-	try:
-		bot.delete_message(TELEGRAM_GROUP, message_id)
-	except:
-		pass
-
-def send_message(chat_id=TELEGRAM_GROUP, message=None, reply_markup=None, parse_mode="markdown", disable_web_page_preview=True):
+# ============================================================================
+# FUNCIONES INTERNAS DE TELEGRAM (sin cola)
+# ============================================================================
+def _send_message_direct(chat_id, message, reply_markup, parse_mode, disable_web_page_preview):
+	"""Envía un mensaje directamente sin usar la cola"""
 	try:
 		if message is None:
 			message = ""
@@ -2093,14 +2194,10 @@ def send_message(chat_id=TELEGRAM_GROUP, message=None, reply_markup=None, parse_
 			return bot.send_message(chat_id, message, parse_mode=parse_mode, reply_markup=reply_markup, disable_web_page_preview=disable_web_page_preview, message_thread_id=TELEGRAM_THREAD)
 	except Exception as e:
 		error(get_text("error_sending_message", chat_id, str(message), str(e)))
-		pass
+		raise
 
-def send_message_to_notification_channel(chat_id=TELEGRAM_NOTIFICATION_CHANNEL, message=None, reply_markup=None, parse_mode="markdown", disable_web_page_preview=True):
-	if TELEGRAM_NOTIFICATION_CHANNEL is None or TELEGRAM_NOTIFICATION_CHANNEL == '':
-		return send_message(chat_id=TELEGRAM_GROUP, message=message, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
-	return send_message(chat_id=chat_id, message=message, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
-
-def send_document(chat_id=TELEGRAM_GROUP, document=None, reply_markup=None, caption=None, parse_mode="markdown"):
+def _send_document_direct(chat_id, document, reply_markup, caption, parse_mode):
+	"""Envía un documento directamente sin usar la cola"""
 	try:
 		if TELEGRAM_THREAD == 1:
 			return bot.send_document(chat_id, document=document, reply_markup=reply_markup, caption=caption, parse_mode=parse_mode)
@@ -2108,7 +2205,59 @@ def send_document(chat_id=TELEGRAM_GROUP, document=None, reply_markup=None, capt
 			return bot.send_document(chat_id, document=document, reply_markup=reply_markup, caption=caption, message_thread_id=TELEGRAM_THREAD, parse_mode=parse_mode)
 	except Exception as e:
 		error(get_text("error_sending_document", chat_id, e))
-		pass
+		raise
+
+def _delete_message_direct(chat_id, message_id):
+	"""Elimina un mensaje directamente sin usar la cola"""
+	try:
+		bot.delete_message(chat_id, message_id)
+	except Exception as e:
+		debug(f"No se pudo eliminar mensaje {message_id}: {e}")
+
+def _edit_message_text_direct(chat_id, message_id, text, parse_mode, reply_markup):
+	"""Edita el texto de un mensaje directamente sin usar la cola"""
+	try:
+		return bot.edit_message_text(text, chat_id, message_id, parse_mode=parse_mode, reply_markup=reply_markup)
+	except Exception as e:
+		debug(f"No se pudo editar mensaje {message_id}: {e}")
+		raise
+
+def _edit_message_reply_markup_direct(chat_id, message_id, reply_markup):
+	"""Edita el markup de un mensaje directamente sin usar la cola"""
+	try:
+		return bot.edit_message_reply_markup(chat_id, message_id, reply_markup=reply_markup)
+	except Exception as e:
+		debug(f"No se pudo editar markup del mensaje {message_id}: {e}")
+		raise
+
+# ============================================================================
+# FUNCIONES PÚBLICAS CON COLA DE MENSAJES
+# ============================================================================
+def delete_message(message_id):
+	"""Elimina un mensaje usando la cola (asíncrono)"""
+	message_queue.add_message(_delete_message_direct, TELEGRAM_GROUP, message_id, wait_for_result=False)
+
+def send_message(chat_id=TELEGRAM_GROUP, message=None, reply_markup=None, parse_mode="markdown", disable_web_page_preview=True):
+	"""Envía un mensaje usando la cola (espera resultado para obtener message_id)"""
+	return message_queue.add_message(_send_message_direct, chat_id, message, reply_markup, parse_mode, disable_web_page_preview, wait_for_result=True)
+
+def send_message_to_notification_channel(chat_id=TELEGRAM_NOTIFICATION_CHANNEL, message=None, reply_markup=None, parse_mode="markdown", disable_web_page_preview=True):
+	"""Envía un mensaje al canal de notificaciones usando la cola"""
+	if TELEGRAM_NOTIFICATION_CHANNEL is None or TELEGRAM_NOTIFICATION_CHANNEL == '':
+		return send_message(chat_id=TELEGRAM_GROUP, message=message, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
+	return send_message(chat_id=chat_id, message=message, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
+
+def send_document(chat_id=TELEGRAM_GROUP, document=None, reply_markup=None, caption=None, parse_mode="markdown"):
+	"""Envía un documento usando la cola (espera resultado para obtener message_id)"""
+	return message_queue.add_message(_send_document_direct, chat_id, document, reply_markup, caption, parse_mode, wait_for_result=True)
+
+def edit_message_text(text, chat_id, message_id, parse_mode="markdown", reply_markup=None):
+	"""Edita el texto de un mensaje usando la cola (asíncrono)"""
+	message_queue.add_message(_edit_message_text_direct, chat_id, message_id, text, parse_mode, reply_markup, wait_for_result=False)
+
+def edit_message_reply_markup(chat_id, message_id, reply_markup):
+	"""Edita el markup de un mensaje usando la cola (asíncrono)"""
+	message_queue.add_message(_edit_message_reply_markup_direct, chat_id, message_id, reply_markup, wait_for_result=False)
 
 def delete_updater():
 	container_id = get_container_id_by_name(UPDATER_CONTAINER_NAME)
