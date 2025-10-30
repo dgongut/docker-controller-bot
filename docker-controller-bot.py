@@ -1645,10 +1645,10 @@ def button_controller(call):
 					InlineKeyboardButton("🛑 Stop", callback_data=f"confirmStackStop|{stackName}")
 				)
 				markup.add(InlineKeyboardButton("🔼 Update", callback_data=f"confirmStackUpdate|{stackName}"))
+				markup.add(InlineKeyboardButton("📄 Logs", callback_data=f"stackLogs|{stackName}"))
 			else:
 				markup.add(InlineKeyboardButton("▶️ Start", callback_data=f"confirmStackStart|{stackName}"))
 
-			markup.add(InlineKeyboardButton("📄 Logs", callback_data=f"stackLogs|{stackName}"))
 			markup.add(InlineKeyboardButton("« Back", callback_data="listStacks"))
 			markup.add(InlineKeyboardButton("❌ Close", callback_data="cerrar"))
 
@@ -1668,11 +1668,17 @@ def button_controller(call):
 			send_message(message=f"▶️ Starting stack **{stackName}**...")
 			result = compose_manager.stack_start(stackName)
 
+			markup = InlineKeyboardMarkup(row_width=2)
+			markup.add(
+				InlineKeyboardButton("« Back to Stacks", callback_data="listStacks"),
+				InlineKeyboardButton("❌ Close", callback_data="cerrar")
+			)
+
 			if result['success']:
-				send_message(message=f"✅ Stack **{stackName}** started successfully")
+				send_message(message=f"✅ Stack **{stackName}** started successfully", reply_markup=markup)
 			else:
 				error_msg = f"❌ Failed to start stack **{stackName}**\n\n```\n{result['stderr']}\n```"
-				send_message(message=error_msg)
+				send_message(message=error_msg, reply_markup=markup)
 
 		# CONFIRM STACK STOP
 		elif comando == "confirmStackStop":
@@ -1688,11 +1694,17 @@ def button_controller(call):
 			send_message(message=f"🛑 Stopping stack **{stackName}**...")
 			result = compose_manager.stack_stop(stackName)
 
+			markup = InlineKeyboardMarkup(row_width=2)
+			markup.add(
+				InlineKeyboardButton("« Back to Stacks", callback_data="listStacks"),
+				InlineKeyboardButton("❌ Close", callback_data="cerrar")
+			)
+
 			if result['success']:
-				send_message(message=f"✅ Stack **{stackName}** stopped successfully")
+				send_message(message=f"✅ Stack **{stackName}** stopped successfully", reply_markup=markup)
 			else:
 				error_msg = f"❌ Failed to stop stack **{stackName}**\n\n```\n{result['stderr']}\n```"
-				send_message(message=error_msg)
+				send_message(message=error_msg, reply_markup=markup)
 
 		# CONFIRM STACK RESTART
 		elif comando == "confirmStackRestart":
@@ -1708,11 +1720,17 @@ def button_controller(call):
 			send_message(message=f"🔄 Restarting stack **{stackName}**...")
 			result = compose_manager.stack_restart(stackName)
 
+			markup = InlineKeyboardMarkup(row_width=2)
+			markup.add(
+				InlineKeyboardButton("« Back to Stacks", callback_data="listStacks"),
+				InlineKeyboardButton("❌ Close", callback_data="cerrar")
+			)
+
 			if result['success']:
-				send_message(message=f"✅ Stack **{stackName}** restarted successfully")
+				send_message(message=f"✅ Stack **{stackName}** restarted successfully", reply_markup=markup)
 			else:
 				error_msg = f"❌ Failed to restart stack **{stackName}**\n\n```\n{result['stderr']}\n```"
-				send_message(message=error_msg)
+				send_message(message=error_msg, reply_markup=markup)
 
 		# CONFIRM STACK UPDATE
 		elif comando == "confirmStackUpdate":
@@ -1728,11 +1746,17 @@ def button_controller(call):
 			send_message(message=f"🔼 Updating stack **{stackName}**...\n\nPulling images and recreating containers...")
 			result = compose_manager.stack_update(stackName)
 
+			markup = InlineKeyboardMarkup(row_width=2)
+			markup.add(
+				InlineKeyboardButton("« Back to Stacks", callback_data="listStacks"),
+				InlineKeyboardButton("❌ Close", callback_data="cerrar")
+			)
+
 			if result['success']:
-				send_message(message=f"✅ Stack **{stackName}** updated successfully")
+				send_message(message=f"✅ Stack **{stackName}** updated successfully", reply_markup=markup)
 			else:
 				error_msg = f"❌ Failed to update stack **{stackName}**\n\n```\n{result['stderr']}\n```"
-				send_message(message=error_msg)
+				send_message(message=error_msg, reply_markup=markup)
 
 		# STACK LOGS
 		elif comando == "stackLogs":
