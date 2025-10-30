@@ -47,9 +47,12 @@ Lleva el control de tus contenedores docker desde un único lugar.
 |CHECK_UPDATE_EVERY_HOURS |❌| Tiempo de espera en horas entre chequeo de actualizaciones. Por defecto 4 |
 |CHECK_UPDATE_STOPPED_CONTAINERS |❌| Si se desea que compruebe las actualizaciones de los contenedores detenidos. 0 no - 1 sí. Por defecto 1 | 
 |GROUPED_UPDATES |❌| Si se desea que agrupe los mensajes de las actualizaciones en uno solo. 0 no - 1 sí. Por defecto 1 | 
-|BUTTON_COLUMNS |❌| Numero de columnas de botones en las listas de contenedores. Por defecto 2 | 
-|LANGUAGE |❌| Idioma, puede ser ES / EN / NL / DE / RU / GL / IT / CAT. Por defecto ES (Spanish) | 
-|EXTENDED_MESSAGES |❌| Si se desea que muestre más mensajes de información. 0 no - 1 sí. Por defecto 0 | 
+|BUTTON_COLUMNS |❌| Numero de columnas de botones en las listas de contenedores. Por defecto 2 |
+|LANGUAGE |❌| Idioma, puede ser ES / EN / NL / DE / RU / GL / IT / CAT. Por defecto ES (Spanish) |
+|EXTENDED_MESSAGES |❌| Si se desea que muestre más mensajes de información. 0 no - 1 sí. Por defecto 0 |
+|COMPOSE_STACKS_ENABLED |❌| Habilita la gestión de stacks. 0 no - 1 sí. Por defecto 0 |
+|COMPOSE_STACKS_DIR |❌| Directorio donde están los stacks. Por defecto `/srv/stacks` |
+|COMPOSE_STACKS_FORCE_RECREATE |❌| Usa `--force-recreate` en updates. 0 no - 1 sí. Por defecto 1 | 
 
 ## Anotaciones
 > [!WARNING]
@@ -78,10 +81,13 @@ services:
             #- BUTTON_COLUMNS=2
             #- LANGUAGE=ES
             #- EXTENDED_MESSAGES=0
+            #- COMPOSE_STACKS_ENABLED=1
+            #- COMPOSE_STACKS_DIR=/srv/stacks
         volumes:
             - /var/run/docker.sock:/var/run/docker.sock # NO CAMBIAR
             - /ruta/para/guardar/las/programaciones:/app/schedule # CAMBIAR LA PARTE IZQUIERDA
             #- ~/.docker/config.json:/root/.docker/config.json # Solo si se requiere iniciar sesión en algún registro
+            #- /srv/stacks:/srv/stacks:ro # Solo si se habilita COMPOSE_STACKS_ENABLED
         image: dgongut/docker-controller-bot:latest
         container_name: docker-controller-bot
         restart: always
