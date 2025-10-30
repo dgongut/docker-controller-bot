@@ -19,6 +19,10 @@ from telebot import util
 from telebot.types import InlineKeyboardButton
 from telebot.types import InlineKeyboardMarkup
 
+# Docker Compose Manager
+if COMPOSE_STACKS_ENABLED:
+	from docker_compose_manager import DockerComposeManager
+
 VERSION = "3.9.3"
 
 def debug(message):
@@ -690,6 +694,11 @@ class DockerManager:
 # Instanciamos el DockerManager
 docker_manager = DockerManager()
 
+# Instanciamos el DockerComposeManager si está habilitado
+if COMPOSE_STACKS_ENABLED:
+	compose_manager = DockerComposeManager(COMPOSE_STACKS_DIR)
+	debug(f"Docker Compose Stacks enabled. Directory: {COMPOSE_STACKS_DIR}")
+
 class DockerEventMonitor:
 	def __init__(self):
 		self.client = docker.from_env()
@@ -893,7 +902,7 @@ class DockerScheduleMonitor:
 			error(get_text("error_schedule_daemon", e))
 			self.demonio_schedule()
 
-@bot.message_handler(commands=["start", "list", "run", "stop", "restart", "delete", "exec", "checkupdate", "updateall", "changetag", "logs", "logfile", "compose", "mute", "schedule", "info", "version", "donate", "donors", "prune"])
+@bot.message_handler(commands=["start", "list", "run", "stop", "restart", "delete", "exec", "checkupdate", "updateall", "changetag", "logs", "logfile", "compose", "mute", "schedule", "info", "version", "donate", "donors", "prune", "stacks"])
 def command_controller(message):
 	userId = message.from_user.id
 	comando = message.text.split(' ', 1)[0]
@@ -1183,6 +1192,43 @@ def command_controller(message):
 	elif comando in ('/donors', f'/donors@{bot.get_me().username}'):
 		print_donors()
 
+	# STACKS (Docker Compose)
+	elif comando in ('/stacks', f'/stacks@{bot.get_me().username}'):
+		if not COMPOSE_STACKS_ENABLED:
+			send_message(message="⚠️ Docker Compose stacks feature is not enabled. Set COMPOSE_STACKS_ENABLED=1")
+			return
+
+		try:
+			stacks = compose_manager.list_all_stacks()
+
+			if not stacks:
+				send_message(message="📦 No Docker Compose stacks found.\n\nMake sure you have:\n• Stacks in: " + COMPOSE_STACKS_DIR + "\n• Or containers with compose labels running")
+				return
+
+			markup = InlineKeyboardMarkup(row_width=2)
+			buttons = []
+
+			for stack in stacks:
+				stack_name = stack['name']
+				running_icon = "🟢" if stack.get('running', False) else "⚪"
+				service_count = len(stack.get('services', []))
+				button_text = f"{running_icon} {stack_name} ({service_count})"
+				buttons.append(InlineKeyboardButton(button_text, callback_data=f"stackInfo|{stack_name}"))
+
+			markup.add(*buttons)
+			markup.add(InlineKeyboardButton("🔄 Refresh", callback_data="listStacks"))
+			markup.add(InlineKeyboardButton("❌ Close", callback_data="cerrar"))
+
+			message_text = f"📦 **Docker Compose Stacks** ({len(stacks)})\n\n"
+			message_text += "🟢 = Running | ⚪ = Stopped\n\n"
+			message_text += f"Directory: `{COMPOSE_STACKS_DIR}`"
+
+			send_message(message=message_text, reply_markup=markup)
+
+		except Exception as e:
+			error(f"Error listing stacks: {e}")
+			send_message(message=f"❌ Error listing stacks: {str(e)}")
+
 def parse_call_data(call_data):
 	parts = call_data.split("|")
 	comando = parts[0]
@@ -1224,6 +1270,7 @@ def button_controller(call):
 		originalMessageId = data.get("originalMessageId")
 		commandId = data.get("commandId")
 		scheduleHash = data.get("scheduleHash")
+		stackName = data.get("stackName")
 	except Exception as e:
 		error(get_text("error_callback_initialization", str(e)))
 		try:
@@ -1527,6 +1574,205 @@ def button_controller(call):
 					continue
 				restart(container_id, containerName)
 			clear_action_data(chatId, originalMessageId, "restart")
+
+		# ========== DOCKER COMPOSE STACKS ==========
+		# LIST STACKS (refresh)
+		elif comando == "listStacks":
+			if not COMPOSE_STACKS_ENABLED:
+				send_message(message="⚠️ Docker Compose stacks feature is not enabled")
+				return
+
+			stacks = compose_manager.list_all_stacks()
+			markup = InlineKeyboardMarkup(row_width=2)
+			buttons = []
+
+			for stack in stacks:
+				stack_name = stack['name']
+				running_icon = "🟢" if stack.get('running', False) else "⚪"
+				service_count = len(stack.get('services', []))
+				button_text = f"{running_icon} {stack_name} ({service_count})"
+				buttons.append(InlineKeyboardButton(button_text, callback_data=f"stackInfo|{stack_name}"))
+
+			markup.add(*buttons)
+			markup.add(InlineKeyboardButton("🔄 Refresh", callback_data="listStacks"))
+			markup.add(InlineKeyboardButton("❌ Close", callback_data="cerrar"))
+
+			message_text = f"📦 **Docker Compose Stacks** ({len(stacks)})\n\n"
+			message_text += "🟢 = Running | ⚪ = Stopped\n\n"
+			message_text += f"Directory: `{COMPOSE_STACKS_DIR}`"
+
+			send_message(message=message_text, reply_markup=markup)
+
+		# STACK INFO
+		elif comando == "stackInfo":
+			if not COMPOSE_STACKS_ENABLED:
+				return
+
+			stack_info = compose_manager.get_stack_info(stackName)
+			if not stack_info:
+				send_message(message=f"❌ Stack '{stackName}' not found")
+				return
+
+			# Build info message
+			running = stack_info.get('running', False)
+			status_icon = "🟢 Running" if running else "⚪ Stopped"
+			services = stack_info.get('services', [])
+			containers = stack_info.get('containers', [])
+
+			message_text = f"📦 **Stack: {stackName}**\n\n"
+			message_text += f"Status: {status_icon}\n"
+			message_text += f"Services: {len(services)}\n"
+
+			if stack_info.get('source') == 'directory':
+				message_text += f"Path: `{stack_info['path']}`\n"
+
+			message_text += "\n**Services:**\n"
+			for svc in services:
+				message_text += f"• {svc['name']}\n"
+
+			if containers:
+				message_text += "\n**Containers:**\n"
+				for c in containers:
+					status_icon = "🟢" if c['status'] == 'running' else "🔴"
+					message_text += f"{status_icon} {c['name']} ({c['status']})\n"
+
+			# Build action buttons
+			markup = InlineKeyboardMarkup(row_width=2)
+
+			if running:
+				markup.add(
+					InlineKeyboardButton("🔄 Restart", callback_data=f"confirmStackRestart|{stackName}"),
+					InlineKeyboardButton("🛑 Stop", callback_data=f"confirmStackStop|{stackName}")
+				)
+				markup.add(InlineKeyboardButton("🔼 Update", callback_data=f"confirmStackUpdate|{stackName}"))
+				markup.add(InlineKeyboardButton("📄 Logs", callback_data=f"stackLogs|{stackName}"))
+			else:
+				markup.add(InlineKeyboardButton("▶️ Start", callback_data=f"confirmStackStart|{stackName}"))
+
+			markup.add(InlineKeyboardButton("« Back", callback_data="listStacks"))
+			markup.add(InlineKeyboardButton("❌ Close", callback_data="cerrar"))
+
+			send_message(message=message_text, reply_markup=markup)
+
+		# CONFIRM STACK START
+		elif comando == "confirmStackStart":
+			markup = InlineKeyboardMarkup(row_width=2)
+			markup.add(
+				InlineKeyboardButton("✅ Confirm", callback_data=f"stackStart|{stackName}"),
+				InlineKeyboardButton("❌ Cancel", callback_data=f"stackInfo|{stackName}")
+			)
+			send_message(message=f"▶️ Start stack **{stackName}**?", reply_markup=markup)
+
+		# STACK START
+		elif comando == "stackStart":
+			send_message(message=f"▶️ Starting stack **{stackName}**...")
+			result = compose_manager.stack_start(stackName)
+
+			markup = InlineKeyboardMarkup(row_width=2)
+			markup.add(
+				InlineKeyboardButton("« Back to Stacks", callback_data="listStacks"),
+				InlineKeyboardButton("❌ Close", callback_data="cerrar")
+			)
+
+			if result['success']:
+				send_message(message=f"✅ Stack **{stackName}** started successfully", reply_markup=markup)
+			else:
+				error_msg = f"❌ Failed to start stack **{stackName}**\n\n```\n{result['stderr']}\n```"
+				send_message(message=error_msg, reply_markup=markup)
+
+		# CONFIRM STACK STOP
+		elif comando == "confirmStackStop":
+			markup = InlineKeyboardMarkup(row_width=2)
+			markup.add(
+				InlineKeyboardButton("✅ Confirm", callback_data=f"stackStop|{stackName}"),
+				InlineKeyboardButton("❌ Cancel", callback_data=f"stackInfo|{stackName}")
+			)
+			send_message(message=f"🛑 Stop stack **{stackName}**?", reply_markup=markup)
+
+		# STACK STOP
+		elif comando == "stackStop":
+			send_message(message=f"🛑 Stopping stack **{stackName}**...")
+			result = compose_manager.stack_stop(stackName)
+
+			markup = InlineKeyboardMarkup(row_width=2)
+			markup.add(
+				InlineKeyboardButton("« Back to Stacks", callback_data="listStacks"),
+				InlineKeyboardButton("❌ Close", callback_data="cerrar")
+			)
+
+			if result['success']:
+				send_message(message=f"✅ Stack **{stackName}** stopped successfully", reply_markup=markup)
+			else:
+				error_msg = f"❌ Failed to stop stack **{stackName}**\n\n```\n{result['stderr']}\n```"
+				send_message(message=error_msg, reply_markup=markup)
+
+		# CONFIRM STACK RESTART
+		elif comando == "confirmStackRestart":
+			markup = InlineKeyboardMarkup(row_width=2)
+			markup.add(
+				InlineKeyboardButton("✅ Confirm", callback_data=f"stackRestart|{stackName}"),
+				InlineKeyboardButton("❌ Cancel", callback_data=f"stackInfo|{stackName}")
+			)
+			send_message(message=f"🔄 Restart stack **{stackName}**?", reply_markup=markup)
+
+		# STACK RESTART
+		elif comando == "stackRestart":
+			send_message(message=f"🔄 Restarting stack **{stackName}**...")
+			result = compose_manager.stack_restart(stackName)
+
+			markup = InlineKeyboardMarkup(row_width=2)
+			markup.add(
+				InlineKeyboardButton("« Back to Stacks", callback_data="listStacks"),
+				InlineKeyboardButton("❌ Close", callback_data="cerrar")
+			)
+
+			if result['success']:
+				send_message(message=f"✅ Stack **{stackName}** restarted successfully", reply_markup=markup)
+			else:
+				error_msg = f"❌ Failed to restart stack **{stackName}**\n\n```\n{result['stderr']}\n```"
+				send_message(message=error_msg, reply_markup=markup)
+
+		# CONFIRM STACK UPDATE
+		elif comando == "confirmStackUpdate":
+			markup = InlineKeyboardMarkup(row_width=2)
+			markup.add(
+				InlineKeyboardButton("✅ Confirm", callback_data=f"stackUpdate|{stackName}"),
+				InlineKeyboardButton("❌ Cancel", callback_data=f"stackInfo|{stackName}")
+			)
+			send_message(message=f"🔼 Update stack **{stackName}**?\n\nThis will pull new images and recreate containers.", reply_markup=markup)
+
+		# STACK UPDATE
+		elif comando == "stackUpdate":
+			send_message(message=f"🔼 Updating stack **{stackName}**...\n\nPulling images and recreating containers...")
+			result = compose_manager.stack_update(stackName)
+
+			markup = InlineKeyboardMarkup(row_width=2)
+			markup.add(
+				InlineKeyboardButton("« Back to Stacks", callback_data="listStacks"),
+				InlineKeyboardButton("❌ Close", callback_data="cerrar")
+			)
+
+			if result['success']:
+				send_message(message=f"✅ Stack **{stackName}** updated successfully", reply_markup=markup)
+			else:
+				error_msg = f"❌ Failed to update stack **{stackName}**\n\n```\n{result['stderr']}\n```"
+				send_message(message=error_msg, reply_markup=markup)
+
+		# STACK LOGS
+		elif comando == "stackLogs":
+			send_message(message=f"📄 Fetching logs for stack **{stackName}**...")
+			result = compose_manager.stack_logs(stackName, tail=100)
+
+			if result['success']:
+				logs = result['stdout']
+				if len(logs) > 4000:
+					# Send as file if too long
+					fichero_temporal = get_temporal_file(logs, f"{stackName}_logs")
+					send_document(document=fichero_temporal, caption=f"📄 Logs for stack **{stackName}**")
+				else:
+					send_message(message=f"📄 **Logs for {stackName}:**\n\n```\n{logs}\n```")
+			else:
+				send_message(message=f"❌ Failed to get logs: {result['stderr']}")
 
 		# PRUNE
 		elif comando == "prune":
@@ -2409,7 +2655,8 @@ if __name__ == '__main__':
 	schedule.demonio_schedule()
 	debug(get_text("debug_started_schedule_daemon"))
 
-	bot.set_my_commands([
+	# Build commands list
+	commands = [
 		telebot.types.BotCommand("/start", get_text("menu_start")),
 		telebot.types.BotCommand("/list", get_text("menu_list")),
 		telebot.types.BotCommand("/run", get_text("menu_run")),
@@ -2422,15 +2669,24 @@ if __name__ == '__main__':
 		telebot.types.BotCommand("/changetag", get_text("menu_change_tag")),
 		telebot.types.BotCommand("/logs", get_text("menu_logs")),
 		telebot.types.BotCommand("/logfile", get_text("menu_logfile")),
-		telebot.types.BotCommand("/schedule", get_text("menu_schedule")),
+		telebot.types.BotCommand("/schedule", get_text("menu_schedule"))
+	]
+
+	# Add stacks command if enabled
+	if COMPOSE_STACKS_ENABLED:
+		commands.append(telebot.types.BotCommand("/stacks", get_text("menu_stacks")))
+
+	commands.extend([
 		telebot.types.BotCommand("/compose", get_text("menu_compose")),
-		telebot.types.BotCommand("/prune", get_text("menu_prune")),		
+		telebot.types.BotCommand("/prune", get_text("menu_prune")),
 		telebot.types.BotCommand("/mute", get_text("menu_mute")),
 		telebot.types.BotCommand("/info", get_text("menu_info")),
 		telebot.types.BotCommand("/version", get_text("menu_version")),
 		telebot.types.BotCommand("/donate", get_text("menu_donate")),
 		telebot.types.BotCommand("/donors", get_text("menu_donors"))
-		])
+	])
+
+	bot.set_my_commands(commands)
 	delete_updater()
 	check_CONTAINER_NAME()
 	check_mute()

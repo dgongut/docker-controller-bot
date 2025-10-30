@@ -11,7 +11,7 @@ ENV TZ=UTC
 
 WORKDIR /app
 
-RUN apk add --no-cache python3 py3-pip tzdata npm
+RUN apk add --no-cache python3 py3-pip tzdata docker-cli docker-cli-compose npm
 COPY requirements.txt /app/requirements.txt
 RUN export PIP_BREAK_SYSTEM_PACKAGES=1; pip3 install --no-cache-dir -Ur /app/requirements.txt && pip install debugpy -t /tmp
 RUN npm install -g nodemon
