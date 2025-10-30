@@ -139,6 +139,9 @@ services:
 
 ### Organización de Stacks
 
+El bot soporta dos estructuras de organización:
+
+**Opción 1: Subdirectorios (recomendado)**
 ```
 /srv/stacks/
 ├── stack1/
@@ -149,7 +152,15 @@ services:
     └── docker-compose.yml
 ```
 
-Cada subdirectorio en `/srv/stacks/` representa un stack. El bot detectará automáticamente todos los stacks disponibles.
+**Opción 2: Archivos en mismo directorio**
+```
+/srv/stacks/
+├── docker-compose-stack1.yml
+├── docker-compose-stack2.yml
+└── docker-compose-stack3.yml
+```
+
+Puedes mezclar ambas opciones en el mismo directorio. El bot detectará automáticamente todos los stacks disponibles.
 
 ### Uso desde Telegram
 

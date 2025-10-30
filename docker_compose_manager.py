@@ -44,12 +44,20 @@ class DockerComposeManager:
         """
         Escanea el directorio de stacks buscando docker-compose.yml
 
-        Estructura esperada:
+        Soporta dos estructuras:
+
+        Opción 1 - Subdirectorios (recomendado):
         /srv/stacks/
         ├── pihole/
         │   └── docker-compose.yml
         ├── nginx/
         │   └── docker-compose.yml
+
+        Opción 2 - Archivos en mismo directorio:
+        /srv/stacks/
+        ├── docker-compose-pihole.yml
+        ├── docker-compose-nginx.yml
+        └── docker-compose-grafana.yml
 
         Returns:
             Lista de diccionarios con info de cada stack encontrado
@@ -63,26 +71,44 @@ class DockerComposeManager:
             for item in os.listdir(self.stacks_dir):
                 stack_path = os.path.join(self.stacks_dir, item)
 
-                # Solo procesar directorios
-                if not os.path.isdir(stack_path):
-                    continue
+                # Opción 1: Subdirectorios con docker-compose.yml
+                if os.path.isdir(stack_path):
+                    compose_file = None
+                    for filename in ['docker-compose.yml', 'docker-compose.yaml']:
+                        candidate = os.path.join(stack_path, filename)
+                        if os.path.isfile(candidate):
+                            compose_file = candidate
+                            break
 
-                # Buscar docker-compose.yml o docker-compose.yaml
-                compose_file = None
-                for filename in ['docker-compose.yml', 'docker-compose.yaml']:
-                    candidate = os.path.join(stack_path, filename)
-                    if os.path.isfile(candidate):
-                        compose_file = candidate
-                        break
+                    if compose_file and self.validate_compose_file(compose_file):
+                        stack_info = self._parse_compose_file(compose_file)
+                        if stack_info:
+                            stack_info['name'] = item
+                            stack_info['path'] = stack_path
+                            stack_info['compose_file'] = compose_file
+                            stack_info['source'] = 'directory'
+                            stacks.append(stack_info)
 
-                if compose_file and self.validate_compose_file(compose_file):
-                    stack_info = self._parse_compose_file(compose_file)
-                    if stack_info:
-                        stack_info['name'] = item
-                        stack_info['path'] = stack_path
-                        stack_info['compose_file'] = compose_file
-                        stack_info['source'] = 'directory'
-                        stacks.append(stack_info)
+                # Opción 2: Archivos docker-compose-*.yml en el directorio raíz
+                elif os.path.isfile(stack_path):
+                    # Buscar archivos que empiecen con docker-compose y terminen en .yml/.yaml
+                    if (item.startswith('docker-compose') and
+                        (item.endswith('.yml') or item.endswith('.yaml'))):
+
+                        if self.validate_compose_file(stack_path):
+                            stack_info = self._parse_compose_file(stack_path)
+                            if stack_info:
+                                # Extraer nombre del stack del nombre de archivo
+                                # docker-compose-pihole.yml -> pihole
+                                # docker-compose.yml -> compose (fallback)
+                                name = item.replace('docker-compose-', '').replace('docker-compose', 'compose')
+                                name = name.replace('.yml', '').replace('.yaml', '')
+
+                                stack_info['name'] = name if name else 'compose'
+                                stack_info['path'] = self.stacks_dir
+                                stack_info['compose_file'] = stack_path
+                                stack_info['source'] = 'file'
+                                stacks.append(stack_info)
 
         except Exception as e:
             print(f"Error escaneando directorio de stacks: {e}")
