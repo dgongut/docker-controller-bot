@@ -179,6 +179,17 @@ services:
       - "DCB-Stack-No-Force-Recreate"
 ```
 
+### Tests
+
+Para ejecutar los tests de la funcionalidad de stacks:
+
+```bash
+cd tests/
+./run_all_tests.sh
+```
+
+Para más detalles sobre los tests, consulta [tests/README.md](tests/README.md).
+
 ---
 
 ## Funciones Extra mediante Labels/Etiquetas en otros contenedores
