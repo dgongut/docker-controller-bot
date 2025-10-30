@@ -179,6 +179,7 @@
   "menu_restart": "Reinicia un contenidor",
   "menu_run": "Inicia un contenidor",
   "menu_schedule": "Módul de programacions",
+  "menu_stacks": "Gestiona stacks de Docker Compose",
   "menu_start": "Menú principal",
   "menu_stop": "Atura un contenidor",
   "menu_update": "Actualitza un contenidor",

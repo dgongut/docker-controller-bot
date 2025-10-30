@@ -175,6 +175,7 @@
   "menu_restart": "Start een container opnieuw",
   "menu_run": "Start een container",
   "menu_schedule": "Planningsmodule",
+  "menu_stacks": "Beheer Docker Compose stacks",
   "menu_start": "Hoofdmenu",
   "menu_stop": "Stopt een container",
   "menu_update": "Een container updaten",

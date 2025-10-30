@@ -182,6 +182,7 @@
   "menu_restart": "Restart a container",
   "menu_run": "Start a container",
   "menu_schedule": "Scheduling module",
+  "menu_stacks": "Manage Docker Compose stacks",
   "menu_start": "Main menu",
   "menu_stop": "Stops a container",
   "menu_update": "Update a container",

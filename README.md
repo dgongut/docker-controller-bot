@@ -21,8 +21,9 @@ Lleva el control de tus contenedores docker desde un único lugar.
 - ✅ Notificaciones cuando un contenedor tiene una actualización pendiente
 - ✅ Actualizaciones de los contenedores
 - ✅ Cambiar el tag (rollback o actualización)
-- ✅ Limpia el sistema, eliminado contenedores, imagenes y otros objetos no utilizados.
+- ✅ Limpia el sistema, eliminado contenedores, imagenes y otros objetos no utilizados
 - ✅ Ejecuta comandos dentro de contenedores
+- ✅ **🆕 Gestión de Docker Compose Stacks** - Gestiona stacks completos (start, stop, restart, update, logs)
 - ✅ Soporte de idiomas (Spanish, English, Dutch, German, Russian, Galician, Italian, Catalan)
 
 ¿Lo buscas en [![](https://badgen.net/badge/icon/docker?icon=docker&label)](https://hub.docker.com/r/dgongut/docker-controller-bot)?
@@ -87,6 +88,81 @@ services:
         network_mode: host
         tty: true
 ```
+
+## 🆕 Docker Compose Stacks
+
+Gestiona stacks completos de Docker Compose directamente desde Telegram con el comando `/stacks`.
+
+### Características
+
+- ✅ **Detección automática** de stacks en directorio y stacks corriendo
+- ✅ **Operaciones completas**: Start, Stop, Restart, Update, Logs
+- ✅ **Update seguro** con `--force-recreate` por defecto
+- ✅ **Multi-servicio** - Maneja stacks con múltiples contenedores
+- ✅ **Configurable** - Controla el comportamiento con variables y labels
+
+### Configuración
+
+| VARIABLE  | VALOR | DESCRIPCIÓN |
+|:----------|:-----:|:------------|
+|COMPOSE_STACKS_ENABLED |0/1| Habilita la gestión de stacks. Por defecto 0 |
+|COMPOSE_STACKS_DIR |ruta| Directorio donde están los stacks. Por defecto `/srv/stacks` |
+|COMPOSE_STACKS_FORCE_RECREATE |0/1| Usa `--force-recreate` en updates. Por defecto 1 |
+
+### Ejemplo de Docker-Compose con Stacks habilitados
+
+```yaml
+services:
+    docker-controller-bot:
+        environment:
+            - TELEGRAM_TOKEN=
+            - TELEGRAM_ADMIN=
+            - CONTAINER_NAME=docker-controller-bot
+            - TZ=Europe/Madrid
+            - COMPOSE_STACKS_ENABLED=1
+            - COMPOSE_STACKS_DIR=/srv/stacks
+        volumes:
+            - /var/run/docker.sock:/var/run/docker.sock
+            - /ruta/para/guardar/las/programaciones:/app/schedule
+            - /srv/stacks:/srv/stacks:ro  # Directorio con tus stacks
+        image: dgongut/docker-controller-bot:latest
+        container_name: docker-controller-bot
+        restart: always
+        network_mode: host
+```
+
+### Organización de Stacks
+
+```
+/srv/stacks/
+├── stack1/
+│   └── docker-compose.yml
+├── stack2/
+│   └── docker-compose.yml
+└── stack3/
+    └── docker-compose.yml
+```
+
+Cada subdirectorio en `/srv/stacks/` representa un stack. El bot detectará automáticamente todos los stacks disponibles.
+
+### Uso desde Telegram
+
+1. Envía `/stacks` al bot
+2. Selecciona un stack de la lista
+3. Elige la operación: Start, Stop, Restart, Update o Logs
+
+### Opciones Avanzadas
+
+**Label para deshabilitar --force-recreate en un stack específico:**
+
+```yaml
+services:
+  myservice:
+    labels:
+      - "DCB-Stack-No-Force-Recreate"
+```
+
+---
 
 ## Funciones Extra mediante Labels/Etiquetas en otros contenedores
 

@@ -175,6 +175,7 @@
   "menu_restart": "Container neu starten",
   "menu_run": "Container starten",
   "menu_schedule": "Zeitplanmodul",
+  "menu_stacks": "Docker-Compose-Stacks verwalten",
   "menu_start": "Hauptmenü",
   "menu_stop": "Container stoppen",
   "menu_update": "Container aktualisieren",
