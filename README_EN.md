@@ -13,9 +13,9 @@
 
 <h3 align="center">
   <a href="./README.md">ReadMe en Español</a>
-  <span> · </span>
-  <p>ReadMe in English</p>
-  <span> · </span>
+  <span> | </span>
+  ReadMe in English
+  <span> | </span>
   <a href="https://t.me/dockercontrollerbotnews">Telegram Community</a>
 </h3>
 
@@ -245,3 +245,4 @@ Open the repository folder in [Visual Studio Code](https://code.visualstudio.com
 #### Debugging Conclusion
 
 - To stop the debugging session, go to `Run > Stop Debugging` or press `Shift+F5`
+
