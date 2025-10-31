@@ -12,10 +12,10 @@
 ![alt text](https://github.com/dgongut/pictures/blob/main/Docker-Controller-Bot/mockup.png)
 
 <h3 align="center">
-  <p>ReadMe en Español</p>
-  <span> · </span>
+  ReadMe en Español
+  <span> | </span>
   <a href="./README_EN.md">ReadMe in English</a>
-  <span> · </span>
+  <span> | </span>
   <a href="https://t.me/dockercontrollerbotnews">Comunidad en Telegram</a>
 </h3>
 
