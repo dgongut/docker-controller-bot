@@ -16,7 +16,7 @@
   <span> | </span>
   ReadMe in English
   <span> | </span>
-  <a href="https://t.me/dockercontrollerbotnews">Telegram Community</a>
+  <a href="https://t.me/dockercontrollerbotnews">Telegram News Channel</a>
 </h3>
 
 Have controll of your docker containers from one single place.
@@ -245,4 +245,5 @@ Open the repository folder in [Visual Studio Code](https://code.visualstudio.com
 #### Debugging Conclusion
 
 - To stop the debugging session, go to `Run > Stop Debugging` or press `Shift+F5`
+
 
