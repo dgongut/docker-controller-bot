@@ -745,6 +745,7 @@ class DockerUpdateMonitor:
 		while True:
 			containers = self.client.containers.list(all=True)
 			grouped_updates_containers = []
+			stack_containers = {}  # Diccionario para agrupar contenedores por stack
 			should_notify = False
 			for container in containers:
 				if (container.status == "exited" or container.status == "dead") and not CHECK_UPDATE_STOPPED_CONTAINERS:
@@ -786,7 +787,21 @@ class DockerUpdateMonitor:
 							pass # Si no se puede borrar es porque esta siendo usada por otro contenedor
 
 						if container.name != CONTAINER_NAME:
-							grouped_updates_containers.append(container.name)
+							# Verificar si el contenedor pertenece a un stack
+							stack_name = labels.get('com.docker.compose.project')
+							if stack_name and COMPOSE_STACKS_ENABLED and COMPOSE_STACKS_GROUP_NOTIFICATIONS:
+								# Agrupar por stack
+								if stack_name not in stack_containers:
+									stack_containers[stack_name] = []
+								stack_containers[stack_name].append({
+									'name': container.name,
+									'id': container.id,
+									'service': labels.get('com.docker.compose.service', 'unknown'),
+									'image': image_with_tag
+								})
+							else:
+								# Contenedor individual o notificaciones de stack deshabilitadas
+								grouped_updates_containers.append(container.name)
 						
 						if image_status == old_image_status:
 							debug(get_text("debug_update_already_notified"))
@@ -809,6 +824,31 @@ class DockerUpdateMonitor:
 					image_status = ""
 				save_container_update_status(image_with_tag, container.name, image_status)
 
+			# Enviar notificaciones agrupadas por stack
+			if stack_containers and COMPOSE_STACKS_ENABLED and COMPOSE_STACKS_GROUP_NOTIFICATIONS:
+				for stack_name, services in stack_containers.items():
+					if not is_muted():
+						# Crear mensaje de actualización de stack
+						service_count = len(services)
+						message_text = f"📦 *Stack '{stack_name}'* tiene actualizaciones disponibles\n\n"
+						message_text += f"Servicios con actualizaciones ({service_count}):\n"
+						for service in services:
+							service_name = service['service']
+							message_text += f"   • {service_name}\n"
+
+						# Botón para actualizar el stack completo
+						markup = InlineKeyboardMarkup(row_width=1)
+						markup.add(
+							InlineKeyboardButton(f"🔄 Actualizar Stack '{stack_name}'", callback_data=f"confirmStackUpdate|{stack_name}"),
+							InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar")
+						)
+
+						send_message(message=message_text, reply_markup=markup)
+						debug(f"Stack '{stack_name}' notificado con {service_count} servicios con actualizaciones")
+					else:
+						debug(f"Stack '{stack_name}' tiene actualizaciones (muted)")
+
+			# Enviar notificaciones de contenedores individuales
 			if grouped_updates_containers and should_notify:
 				markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
 				markup.add(*[
@@ -1202,7 +1242,7 @@ def command_controller(message):
 			stacks = compose_manager.list_all_stacks()
 
 			if not stacks:
-				send_message(message="📦 No Docker Compose stacks found.\n\nMake sure you have:\n• Stacks in: " + COMPOSE_STACKS_DIR + "\n• Or containers with compose labels running")
+				send_message(message=get_text("stack_no_stacks", COMPOSE_STACKS_DIR))
 				return
 
 			markup = InlineKeyboardMarkup(row_width=2)
@@ -1210,18 +1250,31 @@ def command_controller(message):
 
 			for stack in stacks:
 				stack_name = stack['name']
-				running_icon = "🟢" if stack.get('running', False) else "⚪"
 				service_count = len(stack.get('services', []))
+
+				# Calcular estado del stack basado en contenedores corriendo
+				containers = stack.get('containers', [])
+				total_services = service_count
+				running_containers = sum(1 for c in containers if c.get('status') == 'running')
+
+				# Determinar color del icono
+				if running_containers == 0:
+					running_icon = "🔴"  # Ninguno corriendo - ROJO
+				elif running_containers < total_services:
+					running_icon = "🟠"  # Algunos corriendo - NARANJA
+				else:
+					running_icon = "🟢"  # Todos corriendo - VERDE
+
 				button_text = f"{running_icon} {stack_name} ({service_count})"
 				buttons.append(InlineKeyboardButton(button_text, callback_data=f"stackInfo|{stack_name}"))
 
 			markup.add(*buttons)
-			markup.add(InlineKeyboardButton("🔄 Refresh", callback_data="listStacks"))
-			markup.add(InlineKeyboardButton("❌ Close", callback_data="cerrar"))
+			markup.add(InlineKeyboardButton(get_text("button_refresh"), callback_data="listStacks"))
+			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
 
 			message_text = f"📦 **Docker Compose Stacks** ({len(stacks)})\n\n"
-			message_text += "🟢 = Running | ⚪ = Stopped\n\n"
-			message_text += f"Directory: `{COMPOSE_STACKS_DIR}`"
+			message_text += f"🟢 = {get_text('status_running')} | 🟠 = Parcial | 🔴 = {get_text('status_stopped')}\n\n"
+			message_text += f"{get_text('stack_directory')}: `{COMPOSE_STACKS_DIR}`"
 
 			send_message(message=message_text, reply_markup=markup)
 
@@ -1338,9 +1391,23 @@ def button_controller(call):
 		# CONFIRM UPDATE ALL
 		elif comando == "updateAll":
 			containers = docker_manager.list_containers()
+			updated_stacks = set()  # Para evitar actualizar el mismo stack múltiples veces
+
 			for container in containers:
 				if update_available(container):
+					labels = container.labels
+					stack_name = labels.get('com.docker.compose.project')
+
+					# Si es un contenedor de stack y ya actualizamos ese stack, saltar
+					if stack_name and COMPOSE_STACKS_ENABLED and stack_name in updated_stacks:
+						continue
+
+					# Actualizar el contenedor o stack
 					update(container.id, container.name)
+
+					# Si era un stack, marcarlo como actualizado
+					if stack_name and COMPOSE_STACKS_ENABLED:
+						updated_stacks.add(stack_name)
 
 		# CONFIRM DELETE
 		elif comando == "confirmDelete":
@@ -1425,6 +1492,8 @@ def button_controller(call):
 		# UPDATE SELECTED
 		elif comando == "updateSelected":
 			containers, selected = load_update_data(chatId, originalMessageId)
+			updated_stacks = set()  # Para evitar actualizar el mismo stack múltiples veces
+
 			for containerName in selected:
 				container_id = get_container_id_by_name(container_name=containerName)
 				if not container_id:
@@ -1434,7 +1503,19 @@ def button_controller(call):
 				client = docker.from_env()
 				container = client.containers.get(container_id)
 				if update_available(container):
+					labels = container.labels
+					stack_name = labels.get('com.docker.compose.project')
+
+					# Si es un contenedor de stack y ya actualizamos ese stack, saltar
+					if stack_name and COMPOSE_STACKS_ENABLED and stack_name in updated_stacks:
+						continue
+
+					# Actualizar el contenedor o stack
 					update(container.id, container.name)
+
+					# Si era un stack, marcarlo como actualizado
+					if stack_name and COMPOSE_STACKS_ENABLED:
+						updated_stacks.add(stack_name)
 			clear_update_data(chatId, originalMessageId)
 
 		# TOGGLE RUN
@@ -1588,18 +1669,31 @@ def button_controller(call):
 
 			for stack in stacks:
 				stack_name = stack['name']
-				running_icon = "🟢" if stack.get('running', False) else "⚪"
 				service_count = len(stack.get('services', []))
+
+				# Calcular estado del stack basado en contenedores corriendo
+				containers = stack.get('containers', [])
+				total_services = service_count
+				running_containers = sum(1 for c in containers if c.get('status') == 'running')
+
+				# Determinar color del icono
+				if running_containers == 0:
+					running_icon = "🔴"  # Ninguno corriendo - ROJO
+				elif running_containers < total_services:
+					running_icon = "🟠"  # Algunos corriendo - NARANJA
+				else:
+					running_icon = "🟢"  # Todos corriendo - VERDE
+
 				button_text = f"{running_icon} {stack_name} ({service_count})"
 				buttons.append(InlineKeyboardButton(button_text, callback_data=f"stackInfo|{stack_name}"))
 
 			markup.add(*buttons)
-			markup.add(InlineKeyboardButton("🔄 Refresh", callback_data="listStacks"))
-			markup.add(InlineKeyboardButton("❌ Close", callback_data="cerrar"))
+			markup.add(InlineKeyboardButton(get_text("button_refresh"), callback_data="listStacks"))
+			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
 
 			message_text = f"📦 **Docker Compose Stacks** ({len(stacks)})\n\n"
-			message_text += "🟢 = Running | ⚪ = Stopped\n\n"
-			message_text += f"Directory: `{COMPOSE_STACKS_DIR}`"
+			message_text += f"🟢 = {get_text('status_running')} | 🟠 = Parcial | 🔴 = {get_text('status_stopped')}\n\n"
+			message_text += f"{get_text('stack_directory')}: `{COMPOSE_STACKS_DIR}`"
 
 			send_message(message=message_text, reply_markup=markup)
 
@@ -1610,23 +1704,28 @@ def button_controller(call):
 
 			stack_info = compose_manager.get_stack_info(stackName)
 			if not stack_info:
-				send_message(message=f"❌ Stack '{stackName}' not found")
+				send_message(message=get_text("stack_not_found", stackName))
 				return
 
 			# Build info message
 			running = stack_info.get('running', False)
-			status_icon = "🟢 Running" if running else "⚪ Stopped"
+			status_text = get_text('status_running') if running else get_text('status_stopped')
+			status_icon = "🟢" if running else "⚪"
 			services = stack_info.get('services', [])
 			containers = stack_info.get('containers', [])
 
-			message_text = f"📦 **Stack: {stackName}**\n\n"
-			message_text += f"Status: {status_icon}\n"
-			message_text += f"Services: {len(services)}\n"
+			# Verificar si este stack contiene el bot mismo
+			is_bot_stack = any(c.get('name') == CONTAINER_NAME for c in containers)
+			stack_icon = "👑" if is_bot_stack else "📦"
+
+			message_text = f"{stack_icon} **Stack: {stackName}**\n\n"
+			message_text += f"{get_text('status')}: {status_icon} {status_text}\n"
+			message_text += f"{get_text('stack_services')}: {len(services)}\n"
 
 			if stack_info.get('source') == 'directory':
-				message_text += f"Path: `{stack_info['path']}`\n"
+				message_text += f"{get_text('stack_path')}: `{stack_info['path']}`\n"
 
-			message_text += "\n**Services:**\n"
+			message_text += f"\n**{get_text('stack_services_list')}**\n"
 			for svc in services:
 				message_text += f"• {svc['name']}\n"
 
@@ -1639,18 +1738,20 @@ def button_controller(call):
 			# Build action buttons
 			markup = InlineKeyboardMarkup(row_width=2)
 
-			if running:
-				markup.add(
-					InlineKeyboardButton("🔄 Restart", callback_data=f"confirmStackRestart|{stackName}"),
-					InlineKeyboardButton("🛑 Stop", callback_data=f"confirmStackStop|{stackName}")
-				)
-				markup.add(InlineKeyboardButton("🔼 Update", callback_data=f"confirmStackUpdate|{stackName}"))
-				markup.add(InlineKeyboardButton("📄 Logs", callback_data=f"stackLogs|{stackName}"))
-			else:
-				markup.add(InlineKeyboardButton("▶️ Start", callback_data=f"confirmStackStart|{stackName}"))
+			# No mostrar botones de acción si el stack contiene el bot
+			if not is_bot_stack:
+				if running:
+					markup.add(
+						InlineKeyboardButton(get_text("stack_button_restart"), callback_data=f"confirmStackRestart|{stackName}"),
+						InlineKeyboardButton(get_text("stack_button_stop"), callback_data=f"confirmStackStop|{stackName}")
+					)
+					markup.add(InlineKeyboardButton(get_text("stack_button_update"), callback_data=f"confirmStackUpdate|{stackName}"))
+					markup.add(InlineKeyboardButton("📄 Logs", callback_data=f"stackLogs|{stackName}"))
+				else:
+					markup.add(InlineKeyboardButton(get_text("stack_button_start"), callback_data=f"confirmStackStart|{stackName}"))
 
 			markup.add(InlineKeyboardButton("« Back", callback_data="listStacks"))
-			markup.add(InlineKeyboardButton("❌ Close", callback_data="cerrar"))
+			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
 
 			send_message(message=message_text, reply_markup=markup)
 
@@ -1658,104 +1759,104 @@ def button_controller(call):
 		elif comando == "confirmStackStart":
 			markup = InlineKeyboardMarkup(row_width=2)
 			markup.add(
-				InlineKeyboardButton("✅ Confirm", callback_data=f"stackStart|{stackName}"),
-				InlineKeyboardButton("❌ Cancel", callback_data=f"stackInfo|{stackName}")
+				InlineKeyboardButton(get_text("button_confirm"), callback_data=f"stackStart|{stackName}"),
+				InlineKeyboardButton(get_text("button_cancel"), callback_data=f"stackInfo|{stackName}")
 			)
-			send_message(message=f"▶️ Start stack **{stackName}**?", reply_markup=markup)
+			send_message(message=get_text("stack_confirm_start", stackName), reply_markup=markup)
 
 		# STACK START
 		elif comando == "stackStart":
-			send_message(message=f"▶️ Starting stack **{stackName}**...")
+			send_message(message=get_text("stack_starting", stackName))
 			result = compose_manager.stack_start(stackName)
 
 			markup = InlineKeyboardMarkup(row_width=2)
 			markup.add(
-				InlineKeyboardButton("« Back to Stacks", callback_data="listStacks"),
-				InlineKeyboardButton("❌ Close", callback_data="cerrar")
+				InlineKeyboardButton(get_text("button_back_to_stacks"), callback_data="listStacks"),
+				InlineKeyboardButton(get_text("button_close"), callback_data="cerrar")
 			)
 
 			if result['success']:
-				send_message(message=f"✅ Stack **{stackName}** started successfully", reply_markup=markup)
+				send_message(message=get_text("stack_started", stackName), reply_markup=markup)
 			else:
-				error_msg = f"❌ Failed to start stack **{stackName}**\n\n```\n{result['stderr']}\n```"
+				error_msg = get_text("stack_error_start", stackName, result['stderr'])
 				send_message(message=error_msg, reply_markup=markup)
 
 		# CONFIRM STACK STOP
 		elif comando == "confirmStackStop":
 			markup = InlineKeyboardMarkup(row_width=2)
 			markup.add(
-				InlineKeyboardButton("✅ Confirm", callback_data=f"stackStop|{stackName}"),
-				InlineKeyboardButton("❌ Cancel", callback_data=f"stackInfo|{stackName}")
+				InlineKeyboardButton(get_text("button_confirm"), callback_data=f"stackStop|{stackName}"),
+				InlineKeyboardButton(get_text("button_cancel"), callback_data=f"stackInfo|{stackName}")
 			)
-			send_message(message=f"🛑 Stop stack **{stackName}**?", reply_markup=markup)
+			send_message(message=get_text("stack_confirm_stop", stackName), reply_markup=markup)
 
 		# STACK STOP
 		elif comando == "stackStop":
-			send_message(message=f"🛑 Stopping stack **{stackName}**...")
+			send_message(message=get_text("stack_stopping", stackName))
 			result = compose_manager.stack_stop(stackName)
 
 			markup = InlineKeyboardMarkup(row_width=2)
 			markup.add(
-				InlineKeyboardButton("« Back to Stacks", callback_data="listStacks"),
-				InlineKeyboardButton("❌ Close", callback_data="cerrar")
+				InlineKeyboardButton(get_text("button_back_to_stacks"), callback_data="listStacks"),
+				InlineKeyboardButton(get_text("button_close"), callback_data="cerrar")
 			)
 
 			if result['success']:
-				send_message(message=f"✅ Stack **{stackName}** stopped successfully", reply_markup=markup)
+				send_message(message=get_text("stack_stopped", stackName), reply_markup=markup)
 			else:
-				error_msg = f"❌ Failed to stop stack **{stackName}**\n\n```\n{result['stderr']}\n```"
+				error_msg = get_text("stack_error_stop", stackName, result['stderr'])
 				send_message(message=error_msg, reply_markup=markup)
 
 		# CONFIRM STACK RESTART
 		elif comando == "confirmStackRestart":
 			markup = InlineKeyboardMarkup(row_width=2)
 			markup.add(
-				InlineKeyboardButton("✅ Confirm", callback_data=f"stackRestart|{stackName}"),
-				InlineKeyboardButton("❌ Cancel", callback_data=f"stackInfo|{stackName}")
+				InlineKeyboardButton(get_text("button_confirm"), callback_data=f"stackRestart|{stackName}"),
+				InlineKeyboardButton(get_text("button_cancel"), callback_data=f"stackInfo|{stackName}")
 			)
-			send_message(message=f"🔄 Restart stack **{stackName}**?", reply_markup=markup)
+			send_message(message=get_text("stack_confirm_restart", stackName), reply_markup=markup)
 
 		# STACK RESTART
 		elif comando == "stackRestart":
-			send_message(message=f"🔄 Restarting stack **{stackName}**...")
+			send_message(message=get_text("stack_restarting", stackName))
 			result = compose_manager.stack_restart(stackName)
 
 			markup = InlineKeyboardMarkup(row_width=2)
 			markup.add(
-				InlineKeyboardButton("« Back to Stacks", callback_data="listStacks"),
-				InlineKeyboardButton("❌ Close", callback_data="cerrar")
+				InlineKeyboardButton(get_text("button_back_to_stacks"), callback_data="listStacks"),
+				InlineKeyboardButton(get_text("button_close"), callback_data="cerrar")
 			)
 
 			if result['success']:
-				send_message(message=f"✅ Stack **{stackName}** restarted successfully", reply_markup=markup)
+				send_message(message=get_text("stack_restarted", stackName), reply_markup=markup)
 			else:
-				error_msg = f"❌ Failed to restart stack **{stackName}**\n\n```\n{result['stderr']}\n```"
+				error_msg = get_text("stack_error_restart", stackName, result['stderr'])
 				send_message(message=error_msg, reply_markup=markup)
 
 		# CONFIRM STACK UPDATE
 		elif comando == "confirmStackUpdate":
 			markup = InlineKeyboardMarkup(row_width=2)
 			markup.add(
-				InlineKeyboardButton("✅ Confirm", callback_data=f"stackUpdate|{stackName}"),
-				InlineKeyboardButton("❌ Cancel", callback_data=f"stackInfo|{stackName}")
+				InlineKeyboardButton(get_text("button_confirm"), callback_data=f"stackUpdate|{stackName}"),
+				InlineKeyboardButton(get_text("button_cancel"), callback_data=f"stackInfo|{stackName}")
 			)
-			send_message(message=f"🔼 Update stack **{stackName}**?\n\nThis will pull new images and recreate containers.", reply_markup=markup)
+			send_message(message=get_text("stack_confirm_update", stackName), reply_markup=markup)
 
 		# STACK UPDATE
 		elif comando == "stackUpdate":
-			send_message(message=f"🔼 Updating stack **{stackName}**...\n\nPulling images and recreating containers...")
+			send_message(message=get_text("stack_updating", stackName))
 			result = compose_manager.stack_update(stackName)
 
 			markup = InlineKeyboardMarkup(row_width=2)
 			markup.add(
-				InlineKeyboardButton("« Back to Stacks", callback_data="listStacks"),
-				InlineKeyboardButton("❌ Close", callback_data="cerrar")
+				InlineKeyboardButton(get_text("button_back_to_stacks"), callback_data="listStacks"),
+				InlineKeyboardButton(get_text("button_close"), callback_data="cerrar")
 			)
 
 			if result['success']:
-				send_message(message=f"✅ Stack **{stackName}** updated successfully", reply_markup=markup)
+				send_message(message=get_text("stack_updated", stackName), reply_markup=markup)
 			else:
-				error_msg = f"❌ Failed to update stack **{stackName}**\n\n```\n{result['stderr']}\n```"
+				error_msg = get_text("stack_error_update", stackName, result['stderr'])
 				send_message(message=error_msg, reply_markup=markup)
 
 		# STACK LOGS
@@ -2054,10 +2155,33 @@ def confirm_change_tag(containerId, containerName, tag):
 	send_message(message=get_text("confirm_change_tag", containerName, tag), reply_markup=markup)
 
 def update(containerId, containerName):
-	x = send_message(message=get_text("updating", containerName))
-	result = docker_manager.update(container_id=containerId, container_name=containerName, message=x, bot=bot)
-	delete_message(x.message_id)
-	send_message(message=result)
+	# Verificar si el contenedor pertenece a un stack
+	try:
+		client = docker.from_env()
+		container = client.containers.get(containerId)
+		labels = container.labels
+		stack_name = labels.get('com.docker.compose.project')
+
+		if stack_name and COMPOSE_STACKS_ENABLED:
+			# Es un contenedor de stack - actualizar todo el stack
+			x = send_message(message=get_text("stack_updating", stack_name))
+			result = docker_compose_manager.update_stack(stack_name)
+			delete_message(x.message_id)
+
+			if result['success']:
+				send_message(message=get_text("stack_updated", stack_name))
+			else:
+				error_msg = get_text("stack_error_update", stack_name, result.get('stderr', result.get('error', 'Unknown error')))
+				send_message(message=error_msg)
+		else:
+			# Contenedor standalone - actualización normal
+			x = send_message(message=get_text("updating", containerName))
+			result = docker_manager.update(container_id=containerId, container_name=containerName, message=x, bot=bot)
+			delete_message(x.message_id)
+			send_message(message=result)
+	except Exception as e:
+		error(f"Error updating container {containerName}: {e}")
+		send_message(message=get_text("error_callback_processing"))
 
 def change_tag_container(containerId, containerName):
 	markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)

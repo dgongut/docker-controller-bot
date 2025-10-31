@@ -487,6 +487,352 @@ class TestStackIntegration(unittest.TestCase):
 
         print("✓ Test 12: Stack multi-servicio OK")
 
+    def test_13_custom_compose_file_patterns(self):
+        """Test: Patrones personalizados de nombres de archivos compose"""
+        from docker_compose_manager import DockerComposeManager
+        import config
+
+        # Guardar patrón original
+        original_patterns = config.COMPOSE_FILE_PATTERNS
+
+        try:
+            # Test 1: Patrón con wildcard docker-compose-*.yml
+            config.COMPOSE_FILE_PATTERNS = ['docker-compose-*.yml']
+
+            # Crear archivos de test
+            stack_dir = os.path.join(self.test_stacks_dir, 'pihole')
+            os.makedirs(stack_dir, exist_ok=True)
+            compose_file = os.path.join(stack_dir, 'docker-compose-pihole.yml')
+            with open(compose_file, 'w') as f:
+                yaml.dump({'version': '3', 'services': {'pihole': {'image': 'pihole/pihole:latest'}}}, f)
+
+            manager = DockerComposeManager(self.test_stacks_dir)
+            found = manager._find_compose_file(stack_dir)
+
+            self.assertIsNotNone(found, "Debe encontrar docker-compose-pihole.yml con patrón docker-compose-*.yml")
+            self.assertTrue(found.endswith('docker-compose-pihole.yml'))
+
+            # Test 2: Patrón *compose*.yml debe encontrar cualquier archivo con "compose"
+            config.COMPOSE_FILE_PATTERNS = ['*compose*.yml', '*compose*.yaml']
+
+            # Crear más archivos de test
+            test_files = [
+                'compose.yml',
+                'docker-compose-nginx.yml',
+                'my-compose-file.yml',
+                'stack-compose-prod.yml'
+            ]
+
+            for filename in test_files:
+                test_dir = os.path.join(self.test_stacks_dir, f'test_{filename.replace(".", "_")}')
+                os.makedirs(test_dir, exist_ok=True)
+                test_file = os.path.join(test_dir, filename)
+                with open(test_file, 'w') as f:
+                    yaml.dump({'version': '3', 'services': {'app': {'image': 'nginx:latest'}}}, f)
+
+                found = manager._find_compose_file(test_dir)
+                self.assertIsNotNone(found, f"Debe encontrar {filename} con patrón *compose*.yml")
+
+            print("✓ Test 13: Patrones personalizados de archivos compose OK")
+
+        finally:
+            # Restaurar patrón original
+            config.COMPOSE_FILE_PATTERNS = original_patterns
+
+    def test_14_scan_with_wildcard_patterns(self):
+        """Test: Escanear directorio con diferentes patrones de nombres"""
+        from docker_compose_manager import DockerComposeManager
+        import config
+
+        # Guardar patrón original
+        original_patterns = config.COMPOSE_FILE_PATTERNS
+
+        try:
+            # Configurar patrón que acepta cualquier archivo con "compose"
+            config.COMPOSE_FILE_PATTERNS = ['*compose*.yml', '*compose*.yaml']
+
+            # Crear varios stacks con diferentes nombres
+            stacks_config = {
+                'pihole': 'docker-compose-pihole.yml',
+                'nginx': 'docker-compose-nginx.yml',
+                'redis': 'compose.yml',
+                'grafana': 'my-compose-grafana.yml'
+            }
+
+            for stack_name, compose_filename in stacks_config.items():
+                stack_dir = os.path.join(self.test_stacks_dir, stack_name)
+                os.makedirs(stack_dir, exist_ok=True)
+                compose_file = os.path.join(stack_dir, compose_filename)
+                with open(compose_file, 'w') as f:
+                    yaml.dump({
+                        'version': '3',
+                        'services': {
+                            stack_name: {'image': f'{stack_name}:latest'}
+                        }
+                    }, f)
+
+            manager = DockerComposeManager(self.test_stacks_dir)
+            stacks = manager.scan_stacks_directory()
+
+            self.assertEqual(len(stacks), 4, "Debe detectar los 4 stacks con diferentes nombres")
+            stack_names = [s['name'] for s in stacks]
+
+            for stack_name in stacks_config.keys():
+                self.assertIn(stack_name, stack_names, f"Debe detectar stack {stack_name}")
+
+            print("✓ Test 14: Escaneo con patrones wildcard OK")
+
+        finally:
+            # Restaurar patrón original
+            config.COMPOSE_FILE_PATTERNS = original_patterns
+
+    def test_15_flat_directory_with_wildcards(self):
+        """Test: Archivos compose en directorio plano con wildcards"""
+        from docker_compose_manager import DockerComposeManager
+        import config
+
+        # Guardar patrón original
+        original_patterns = config.COMPOSE_FILE_PATTERNS
+
+        try:
+            # Usar patrón permisivo
+            config.COMPOSE_FILE_PATTERNS = ['*compose*.yml', '*compose*.yaml']
+
+            # Crear archivos compose directamente en el directorio raíz
+            compose_files = {
+                'docker-compose-pihole.yml': {'pihole': {'image': 'pihole/pihole:latest'}},
+                'docker-compose-nginx.yml': {'nginx': {'image': 'nginx:latest'}},
+                'compose-redis.yml': {'redis': {'image': 'redis:alpine'}},
+                'my-compose-grafana.yaml': {'grafana': {'image': 'grafana/grafana:latest'}}
+            }
+
+            for filename, services in compose_files.items():
+                compose_file = os.path.join(self.test_stacks_dir, filename)
+                with open(compose_file, 'w') as f:
+                    yaml.dump({'version': '3', 'services': services}, f)
+
+            manager = DockerComposeManager(self.test_stacks_dir)
+            stacks = manager.scan_stacks_directory()
+
+            self.assertGreaterEqual(len(stacks), 4, "Debe detectar al menos 4 stacks en directorio plano")
+
+            # Verificar que los nombres se extraen correctamente
+            stack_names = [s['name'] for s in stacks]
+            # docker-compose-pihole.yml -> pihole
+            self.assertIn('pihole', stack_names)
+            self.assertIn('nginx', stack_names)
+            # compose-redis.yml -> redis
+            self.assertIn('redis', stack_names)
+            # my-compose-grafana.yaml -> grafana
+            self.assertIn('grafana', stack_names)
+
+            print("✓ Test 15: Directorio plano con wildcards OK")
+
+        finally:
+            # Restaurar patrón original
+            config.COMPOSE_FILE_PATTERNS = original_patterns
+
+    def test_16_mixed_subdirs_and_flat_with_wildcards(self):
+        """Test: Mezcla de subdirectorios y archivos planos con wildcards"""
+        from docker_compose_manager import DockerComposeManager
+        import config
+
+        # Guardar patrón original
+        original_patterns = config.COMPOSE_FILE_PATTERNS
+
+        try:
+            # Usar patrón por defecto (*compose*.yml)
+            config.COMPOSE_FILE_PATTERNS = ['*compose*.yml', '*compose*.yaml']
+
+            # Subdirectorios con compose files
+            subdir_stacks = {
+                'pihole': 'docker-compose.yml',
+                'nginx': 'compose.yml',
+                'grafana': 'docker-compose-grafana.yml'
+            }
+
+            for stack_name, compose_filename in subdir_stacks.items():
+                stack_dir = os.path.join(self.test_stacks_dir, stack_name)
+                os.makedirs(stack_dir, exist_ok=True)
+                compose_file = os.path.join(stack_dir, compose_filename)
+                with open(compose_file, 'w') as f:
+                    yaml.dump({
+                        'version': '3',
+                        'services': {stack_name: {'image': f'{stack_name}:latest'}}
+                    }, f)
+
+            # Archivos planos en el directorio raíz
+            flat_files = {
+                'docker-compose-redis.yml': {'redis': {'image': 'redis:alpine'}},
+                'compose-postgres.yml': {'postgres': {'image': 'postgres:14'}}
+            }
+
+            for filename, services in flat_files.items():
+                compose_file = os.path.join(self.test_stacks_dir, filename)
+                with open(compose_file, 'w') as f:
+                    yaml.dump({'version': '3', 'services': services}, f)
+
+            manager = DockerComposeManager(self.test_stacks_dir)
+            stacks = manager.scan_stacks_directory()
+
+            # Debe detectar todos: 3 subdirectorios + 2 archivos planos = 5 stacks
+            self.assertGreaterEqual(len(stacks), 5, "Debe detectar 5 stacks (3 subdirs + 2 flat)")
+
+            stack_names = [s['name'] for s in stacks]
+            # Subdirectorios
+            self.assertIn('pihole', stack_names)
+            self.assertIn('nginx', stack_names)
+            self.assertIn('grafana', stack_names)
+            # Archivos planos
+            self.assertIn('redis', stack_names)
+            self.assertIn('postgres', stack_names)
+
+            print("✓ Test 16: Mezcla subdirectorios y archivos planos OK")
+
+        finally:
+            # Restaurar patrón original
+            config.COMPOSE_FILE_PATTERNS = original_patterns
+
+    def test_17_check_stack_updates_no_checker(self):
+        """Test: Verificar actualizaciones de stack sin función de verificación"""
+        from docker_compose_manager import DockerComposeManager
+
+        # Crear stack de test
+        stack_dir = os.path.join(self.test_stacks_dir, 'teststack')
+        os.makedirs(stack_dir, exist_ok=True)
+        compose_file = os.path.join(stack_dir, 'docker-compose.yml')
+        with open(compose_file, 'w') as f:
+            yaml.dump({
+                'version': '3',
+                'services': {
+                    'web': {'image': 'nginx:latest'},
+                    'db': {'image': 'postgres:14'}
+                }
+            }, f)
+
+        manager = DockerComposeManager(self.test_stacks_dir)
+
+        # Sin función de verificación (solo detecta que está corriendo)
+        result = manager.check_stack_updates('teststack')
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result['stack_name'], 'teststack')
+        self.assertEqual(result['total_services'], 2)
+        self.assertFalse(result['has_updates'])  # Sin checker, no hay updates
+        self.assertEqual(len(result['services_with_updates']), 0)
+
+        print("✓ Test 17: Verificar actualizaciones sin checker OK")
+
+    @patch('docker_compose_manager.docker.from_env')
+    def test_18_check_stack_updates_with_checker(self, mock_docker_from_env):
+        """Test: Verificar actualizaciones con función checker"""
+        from docker_compose_manager import DockerComposeManager
+
+        # Crear stack de test
+        stack_dir = os.path.join(self.test_stacks_dir, 'teststack')
+        os.makedirs(stack_dir, exist_ok=True)
+        compose_file = os.path.join(stack_dir, 'docker-compose.yml')
+        with open(compose_file, 'w') as f:
+            yaml.dump({
+                'version': '3',
+                'services': {
+                    'web': {'image': 'nginx:latest'},
+                    'db': {'image': 'postgres:14'}
+                }
+            }, f)
+
+        # Mock contenedores corriendo
+        mock_container_web = MagicMock()
+        mock_container_web.name = 'teststack_web'
+        mock_container_web.status = 'running'
+        mock_container_web.labels = {
+            'com.docker.compose.project': 'teststack',
+            'com.docker.compose.service': 'web'
+        }
+        mock_container_web.attrs = {'Config': {'Image': 'nginx:latest'}}
+        mock_container_web.id = 'web123'
+
+        mock_container_db = MagicMock()
+        mock_container_db.name = 'teststack_db'
+        mock_container_db.status = 'running'
+        mock_container_db.labels = {
+            'com.docker.compose.project': 'teststack',
+            'com.docker.compose.service': 'db'
+        }
+        mock_container_db.attrs = {'Config': {'Image': 'postgres:14'}}
+        mock_container_db.id = 'db456'
+
+        mock_client = MagicMock()
+        mock_client.containers.list.return_value = [mock_container_web, mock_container_db]
+        mock_client.containers.get.side_effect = lambda id: mock_container_web if id == 'web123' else mock_container_db
+        mock_docker_from_env.return_value = mock_client
+
+        manager = DockerComposeManager(self.test_stacks_dir)
+
+        # Función checker que simula que web tiene actualización
+        def mock_update_checker(container):
+            return container.name == 'teststack_web'
+
+        result = manager.check_stack_updates('teststack', mock_update_checker)
+
+        self.assertTrue(result['has_updates'])
+        self.assertEqual(len(result['services_with_updates']), 1)
+        self.assertEqual(result['services_with_updates'][0]['service_name'], 'web')
+        self.assertEqual(result['services_with_updates'][0]['container_name'], 'teststack_web')
+
+        print("✓ Test 18: Verificar actualizaciones con checker OK")
+
+    @patch('docker_compose_manager.docker.from_env')
+    def test_19_get_all_stacks_with_updates(self, mock_docker_from_env):
+        """Test: Obtener todos los stacks con actualizaciones"""
+        from docker_compose_manager import DockerComposeManager
+
+        # Crear dos stacks
+        for stack_name in ['stack1', 'stack2']:
+            stack_dir = os.path.join(self.test_stacks_dir, stack_name)
+            os.makedirs(stack_dir, exist_ok=True)
+            compose_file = os.path.join(stack_dir, 'docker-compose.yml')
+            with open(compose_file, 'w') as f:
+                yaml.dump({
+                    'version': '3',
+                    'services': {
+                        'app': {'image': 'nginx:latest'}
+                    }
+                }, f)
+
+        # Mock contenedores corriendo
+        mock_containers = []
+        for i, stack_name in enumerate(['stack1', 'stack2']):
+            mock_container = MagicMock()
+            mock_container.name = f'{stack_name}_app'
+            mock_container.status = 'running'
+            mock_container.labels = {
+                'com.docker.compose.project': stack_name,
+                'com.docker.compose.service': 'app'
+            }
+            mock_container.attrs = {'Config': {'Image': 'nginx:latest'}}
+            mock_container.id = f'id{i}'
+            mock_containers.append(mock_container)
+
+        mock_client = MagicMock()
+        mock_client.containers.list.return_value = mock_containers
+        mock_client.containers.get.side_effect = lambda id: mock_containers[0] if id == 'id0' else mock_containers[1]
+        mock_docker_from_env.return_value = mock_client
+
+        manager = DockerComposeManager(self.test_stacks_dir)
+
+        # Checker que dice que solo stack1 tiene updates
+        def mock_update_checker(container):
+            return 'stack1' in container.name
+
+        stacks_with_updates = manager.get_all_stacks_with_updates(mock_update_checker)
+
+        self.assertEqual(len(stacks_with_updates), 1)
+        self.assertEqual(stacks_with_updates[0]['stack_name'], 'stack1')
+        self.assertTrue(stacks_with_updates[0]['has_updates'])
+
+        print("✓ Test 19: Obtener todos los stacks con actualizaciones OK")
+
 
 def run_tests():
     """Ejecutar todos los tests"""

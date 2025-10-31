@@ -7,18 +7,23 @@ import os
 import subprocess
 import yaml
 import docker
+from fnmatch import fnmatch
 from typing import Dict, List, Optional
 
 # Import de config para labels y variables
 try:
     from config import (
         COMPOSE_STACKS_FORCE_RECREATE,
-        LABEL_STACK_NO_FORCE_RECREATE
+        LABEL_STACK_NO_FORCE_RECREATE,
+        COMPOSE_FILE_PATTERNS,
+        CONTAINER_NAME
     )
 except ImportError:
     # Defaults si no se puede importar config
     COMPOSE_STACKS_FORCE_RECREATE = True
     LABEL_STACK_NO_FORCE_RECREATE = "DCB-Stack-No-Force-Recreate"
+    COMPOSE_FILE_PATTERNS = ["*compose*.yml", "*compose*.yaml"]
+    CONTAINER_NAME = None
 
 
 class DockerComposeManager:
@@ -39,6 +44,98 @@ class DockerComposeManager:
         """
         self.stacks_dir = stacks_dir
         self.client = docker.from_env()
+
+    def _extract_stack_name_from_filename(self, filename: str) -> str:
+        """
+        Extrae el nombre del stack del nombre de archivo.
+
+        Ejemplos:
+        - docker-compose-pihole.yml -> pihole
+        - docker-compose.yml -> docker-compose
+        - compose-redis.yml -> redis
+        - my-compose-grafana.yaml -> grafana
+        - stack-compose-prod.yml -> prod
+
+        Args:
+            filename: Nombre del archivo
+
+        Returns:
+            Nombre extraído del stack
+        """
+        # Remover extensiones
+        name = filename
+        for ext in ['.yml', '.yaml']:
+            if name.endswith(ext):
+                name = name[:-len(ext)]
+                break
+
+        # Casos especiales: si el nombre termina en -compose o empieza con compose-
+        # my-compose-grafana -> grafana
+        # compose-redis -> redis
+        if '-compose-' in name:
+            # Hay texto antes y después de "compose"
+            parts = name.split('-compose-')
+            # Preferir la parte después de compose
+            if len(parts) > 1 and parts[1]:
+                return parts[1]
+            # Si no hay nada después, usar lo que hay antes
+            if parts[0]:
+                return parts[0]
+
+        # Casos especiales: archivos base sin sufijo (compose.yml, docker-compose.yml)
+        if name in ['compose', 'docker-compose']:
+            return name
+
+        # Remover prefijos comunes (orden importante: más específicos primero)
+        prefixes = ['docker-compose-', 'compose-']
+        for prefix in prefixes:
+            if name.startswith(prefix):
+                name = name[len(prefix):]
+                break
+
+        # Remover sufijos comunes
+        suffixes = ['-compose', '-docker-compose']
+        for suffix in suffixes:
+            if name.endswith(suffix):
+                name = name[:-len(suffix)]
+                break
+
+        return name if name else 'stack'
+
+    def _find_compose_file(self, directory: str) -> Optional[str]:
+        """
+        Busca un archivo compose en un directorio usando los patrones configurados.
+
+        Args:
+            directory: Directorio donde buscar
+
+        Returns:
+            Ruta al archivo encontrado o None
+        """
+        if not os.path.exists(directory):
+            return None
+
+        try:
+            # Si es un archivo directo, verificar si coincide con algún patrón
+            if os.path.isfile(directory):
+                filename = os.path.basename(directory)
+                for pattern in COMPOSE_FILE_PATTERNS:
+                    if fnmatch(filename, pattern):
+                        return directory
+                return None
+
+            # Si es directorio, buscar archivos que coincidan con los patrones
+            for item in os.listdir(directory):
+                for pattern in COMPOSE_FILE_PATTERNS:
+                    if fnmatch(item, pattern):
+                        candidate = os.path.join(directory, item)
+                        if os.path.isfile(candidate):
+                            return candidate
+
+        except Exception:
+            pass
+
+        return None
 
     def scan_stacks_directory(self) -> List[Dict]:
         """
@@ -71,14 +168,9 @@ class DockerComposeManager:
             for item in os.listdir(self.stacks_dir):
                 stack_path = os.path.join(self.stacks_dir, item)
 
-                # Opción 1: Subdirectorios con docker-compose.yml
+                # Opción 1: Subdirectorios con archivos compose
                 if os.path.isdir(stack_path):
-                    compose_file = None
-                    for filename in ['docker-compose.yml', 'docker-compose.yaml']:
-                        candidate = os.path.join(stack_path, filename)
-                        if os.path.isfile(candidate):
-                            compose_file = candidate
-                            break
+                    compose_file = self._find_compose_file(stack_path)
 
                     if compose_file and self.validate_compose_file(compose_file):
                         stack_info = self._parse_compose_file(compose_file)
@@ -89,26 +181,26 @@ class DockerComposeManager:
                             stack_info['source'] = 'directory'
                             stacks.append(stack_info)
 
-                # Opción 2: Archivos docker-compose-*.yml en el directorio raíz
+                # Opción 2: Archivos compose en el directorio raíz
                 elif os.path.isfile(stack_path):
-                    # Buscar archivos que empiecen con docker-compose y terminen en .yml/.yaml
-                    if (item.startswith('docker-compose') and
-                        (item.endswith('.yml') or item.endswith('.yaml'))):
+                    # Verificar si coincide con algún patrón
+                    matches_pattern = False
+                    for pattern in COMPOSE_FILE_PATTERNS:
+                        if fnmatch(item, pattern):
+                            matches_pattern = True
+                            break
 
-                        if self.validate_compose_file(stack_path):
-                            stack_info = self._parse_compose_file(stack_path)
-                            if stack_info:
-                                # Extraer nombre del stack del nombre de archivo
-                                # docker-compose-pihole.yml -> pihole
-                                # docker-compose.yml -> compose (fallback)
-                                name = item.replace('docker-compose-', '').replace('docker-compose', 'compose')
-                                name = name.replace('.yml', '').replace('.yaml', '')
+                    if matches_pattern and self.validate_compose_file(stack_path):
+                        stack_info = self._parse_compose_file(stack_path)
+                        if stack_info:
+                            # Extraer nombre del stack del nombre de archivo
+                            name = self._extract_stack_name_from_filename(item)
 
-                                stack_info['name'] = name if name else 'compose'
-                                stack_info['path'] = self.stacks_dir
-                                stack_info['compose_file'] = stack_path
-                                stack_info['source'] = 'file'
-                                stacks.append(stack_info)
+                            stack_info['name'] = name if name else 'stack'
+                            stack_info['path'] = self.stacks_dir
+                            stack_info['compose_file'] = stack_path
+                            stack_info['source'] = 'file'
+                            stacks.append(stack_info)
 
         except Exception as e:
             print(f"Error escaneando directorio de stacks: {e}")
@@ -183,6 +275,10 @@ class DockerComposeManager:
         # Añadir stacks corriendo que no están en el directorio
         for name, containers in running_stacks.items():
             if name not in dir_stacks:
+                # Si este stack contiene el bot y no está en el directorio, no lo mostramos
+                if CONTAINER_NAME and any(c.get('name') == CONTAINER_NAME for c in containers):
+                    continue
+
                 all_stacks.append({
                     'name': name,
                     'source': 'running',
@@ -203,16 +299,33 @@ class DockerComposeManager:
         Returns:
             Diccionario con información del stack o None si no existe
         """
-        # Buscar en directorio
+        # Buscar en directorio como subdirectorio
         stack_path = os.path.join(self.stacks_dir, stack_name)
         compose_file = None
 
         if os.path.isdir(stack_path):
-            for filename in ['docker-compose.yml', 'docker-compose.yaml']:
-                candidate = os.path.join(stack_path, filename)
-                if os.path.isfile(candidate):
-                    compose_file = candidate
-                    break
+            compose_file = self._find_compose_file(stack_path)
+
+        # Si no se encuentra como subdirectorio, buscar en archivos flat del directorio
+        if not compose_file:
+            # Buscar archivos que coincidan con los patrones y contengan el nombre del stack
+            try:
+                for item in os.listdir(self.stacks_dir):
+                    item_path = os.path.join(self.stacks_dir, item)
+                    if os.path.isfile(item_path):
+                        # Verificar si coincide con patrones
+                        for pattern in COMPOSE_FILE_PATTERNS:
+                            if fnmatch(item, pattern):
+                                # Extraer nombre del stack del archivo
+                                extracted_name = self._extract_stack_name_from_filename(item)
+                                if extracted_name == stack_name:
+                                    compose_file = item_path
+                                    stack_path = item_path
+                                    break
+                        if compose_file:
+                            break
+            except Exception:
+                pass
 
         if not compose_file:
             # No está en directorio, buscar en corriendo
@@ -313,28 +426,34 @@ class DockerComposeManager:
         Returns:
             Diccionario con resultado: {'success': bool, 'stdout': str, 'stderr': str}
         """
-        stack_path = os.path.join(self.stacks_dir, stack_name)
-        compose_file = None
+        # Obtener información del stack (soporta subdirectorios y archivos flat)
+        stack_info = self.get_stack_info(stack_name)
 
-        for filename in ['docker-compose.yml', 'docker-compose.yaml']:
-            candidate = os.path.join(stack_path, filename)
-            if os.path.isfile(candidate):
-                compose_file = candidate
-                break
-
-        if not compose_file:
+        if not stack_info or 'compose_file' not in stack_info:
             return {
                 'success': False,
                 'stdout': '',
                 'stderr': f'Stack {stack_name} no encontrado'
             }
 
+        compose_file = stack_info['compose_file']
+
+        # Determinar el directorio de trabajo correcto
+        # Si path es un archivo (flat structure), usar su directorio
+        # Si path es un directorio (subdirectory structure), usarlo directamente
+        stack_path = stack_info.get('path', os.path.dirname(compose_file))
+        if os.path.isfile(stack_path):
+            working_dir = os.path.dirname(stack_path)
+        else:
+            working_dir = stack_path
+
         try:
-            cmd = ['docker', 'compose', '-f', compose_file] + command
+            # Incluir -p <project_name> para asegurar consistencia del nombre del stack
+            cmd = ['docker', 'compose', '-f', compose_file, '-p', stack_name] + command
 
             result = subprocess.run(
                 cmd,
-                cwd=stack_path,
+                cwd=working_dir,
                 capture_output=True,
                 text=True,
                 timeout=300  # 5 minutos timeout
@@ -492,3 +611,114 @@ class DockerComposeManager:
             Resultado con logs
         """
         return self._run_compose_command(stack_name, ['logs', '--tail', str(tail)])
+
+    def check_stack_updates(self, stack_name: str, update_checker_func=None) -> Dict:
+        """
+        Verifica si un stack tiene actualizaciones disponibles.
+
+        Args:
+            stack_name: Nombre del stack
+            update_checker_func: Función para verificar si un contenedor tiene actualizaciones.
+                                 Debe aceptar un contenedor y devolver bool.
+                                 Si es None, se verifica solo si los contenedores están corriendo.
+
+        Returns:
+            Diccionario con información de actualizaciones:
+            {
+                'stack_name': str,
+                'has_updates': bool,
+                'total_services': int,
+                'services_with_updates': [
+                    {
+                        'service_name': str,
+                        'container_name': str,
+                        'container_id': str,
+                        'image': str
+                    }
+                ],
+                'running_services': int
+            }
+        """
+        result = {
+            'stack_name': stack_name,
+            'has_updates': False,
+            'total_services': 0,
+            'services_with_updates': [],
+            'running_services': 0
+        }
+
+        try:
+            # Obtener información del stack
+            stack_info = self.get_stack_info(stack_name)
+            if not stack_info:
+                return result
+
+            result['total_services'] = len(stack_info.get('services', []))
+
+            # Verificar si hay contenedores corriendo
+            if not stack_info.get('running', False):
+                return result
+
+            containers = stack_info.get('containers', [])
+            result['running_services'] = len(containers)
+
+            # Si no hay función de verificación, solo contamos contenedores corriendo
+            if update_checker_func is None:
+                return result
+
+            # Verificar cada contenedor del stack
+            for container_info in containers:
+                try:
+                    container = self.client.containers.get(container_info['id'])
+
+                    # Usar la función de verificación provista
+                    if update_checker_func(container):
+                        result['services_with_updates'].append({
+                            'service_name': container_info.get('service', 'unknown'),
+                            'container_name': container_info['name'],
+                            'container_id': container_info['id'],
+                            'image': container_info.get('image', 'unknown')
+                        })
+                except Exception as e:
+                    print(f"Error verificando actualizaciones para {container_info['name']}: {e}")
+                    continue
+
+            result['has_updates'] = len(result['services_with_updates']) > 0
+
+        except Exception as e:
+            print(f"Error verificando actualizaciones del stack {stack_name}: {e}")
+
+        return result
+
+    def get_all_stacks_with_updates(self, update_checker_func=None) -> List[Dict]:
+        """
+        Obtiene lista de todos los stacks que tienen actualizaciones disponibles.
+
+        Args:
+            update_checker_func: Función para verificar si un contenedor tiene actualizaciones
+
+        Returns:
+            Lista de diccionarios con información de stacks que tienen actualizaciones
+        """
+        stacks_with_updates = []
+
+        try:
+            all_stacks = self.list_all_stacks()
+
+            for stack in all_stacks:
+                # Solo verificar stacks que están corriendo
+                if not stack.get('running', False):
+                    continue
+
+                update_info = self.check_stack_updates(
+                    stack['name'],
+                    update_checker_func
+                )
+
+                if update_info['has_updates']:
+                    stacks_with_updates.append(update_info)
+
+        except Exception as e:
+            print(f"Error obteniendo stacks con actualizaciones: {e}")
+
+        return stacks_with_updates

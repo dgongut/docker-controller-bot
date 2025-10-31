@@ -16,6 +16,8 @@ BUTTON_COLUMNS = int(os.environ.get("BUTTON_COLUMNS"))
 COMPOSE_STACKS_ENABLED = bool(int(os.environ.get("COMPOSE_STACKS_ENABLED", "0")))
 COMPOSE_STACKS_DIR = os.environ.get("COMPOSE_STACKS_DIR", "/srv/stacks")
 COMPOSE_STACKS_FORCE_RECREATE = bool(int(os.environ.get("COMPOSE_STACKS_FORCE_RECREATE", "1")))
+COMPOSE_FILE_PATTERNS = os.environ.get("COMPOSE_FILE_PATTERNS", "*compose*.yml,*compose*.yaml").split(",")
+COMPOSE_STACKS_GROUP_NOTIFICATIONS = bool(int(os.environ.get("COMPOSE_STACKS_GROUP_NOTIFICATIONS", "1")))
 
 # CONSTANTS
 UPDATER_IMAGE = "dgongut/docker-container-updater:latest"

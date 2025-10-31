@@ -52,7 +52,9 @@ Lleva el control de tus contenedores docker desde un único lugar.
 |EXTENDED_MESSAGES |❌| Si se desea que muestre más mensajes de información. 0 no - 1 sí. Por defecto 0 |
 |COMPOSE_STACKS_ENABLED |❌| Habilita la gestión de stacks. 0 no - 1 sí. Por defecto 0 |
 |COMPOSE_STACKS_DIR |❌| Directorio donde están los stacks. Por defecto `/srv/stacks` |
-|COMPOSE_STACKS_FORCE_RECREATE |❌| Usa `--force-recreate` en updates. 0 no - 1 sí. Por defecto 1 | 
+|COMPOSE_STACKS_FORCE_RECREATE |❌| Usa `--force-recreate` en updates. 0 no - 1 sí. Por defecto 1 |
+|COMPOSE_FILE_PATTERNS |❌| Patrones de nombres de archivos compose (separados por comas). Soporta wildcards. Por defecto `*compose*.yml,*compose*.yaml` |
+|COMPOSE_STACKS_GROUP_NOTIFICATIONS |❌| Agrupa notificaciones de actualizaciones por stack. 0 no - 1 sí. Por defecto 1 | 
 
 ## Anotaciones
 > [!WARNING]
@@ -114,6 +116,8 @@ Gestiona stacks completos de Docker Compose directamente desde Telegram con el c
 |COMPOSE_STACKS_ENABLED |0/1| Habilita la gestión de stacks. Por defecto 0 |
 |COMPOSE_STACKS_DIR |ruta| Directorio donde están los stacks. Por defecto `/srv/stacks` |
 |COMPOSE_STACKS_FORCE_RECREATE |0/1| Usa `--force-recreate` en updates. Por defecto 1 |
+|COMPOSE_FILE_PATTERNS |patrones| Patrones de nombres separados por comas. Soporta wildcards (`*`). Por defecto `*compose*.yml,*compose*.yaml` |
+|COMPOSE_STACKS_GROUP_NOTIFICATIONS |0/1| Agrupa notificaciones de actualizaciones por stack. Por defecto 1 |
 
 ### Ejemplo de Docker-Compose con Stacks habilitados
 
@@ -162,11 +166,118 @@ El bot soporta dos estructuras de organización:
 
 Puedes mezclar ambas opciones en el mismo directorio. El bot detectará automáticamente todos los stacks disponibles.
 
+### Personalización de nombres de archivos
+
+Por defecto, el bot busca archivos que contengan "compose" en su nombre:
+- Patrones: `*compose*.yml` y `*compose*.yaml`
+- Esto incluye: `compose.yml`, `docker-compose.yml`, `docker-compose-pihole.yml`, `stack-compose-prod.yaml`, etc.
+
+Puedes personalizar estos patrones usando la variable `COMPOSE_FILE_PATTERNS` con soporte para wildcards:
+
+**Ejemplo 1: Usar solo `compose.yml`**
+```yaml
+- COMPOSE_FILE_PATTERNS=compose.yml
+```
+
+**Ejemplo 2: Archivos con prefijo personalizado (ej: `docker-compose-pihole.yml`)**
+```yaml
+- COMPOSE_FILE_PATTERNS=docker-compose-*.yml,docker-compose-*.yaml
+```
+
+**Ejemplo 3: Múltiples patrones**
+```yaml
+- COMPOSE_FILE_PATTERNS=compose.yml,stack-*.yml,docker-compose*.yaml
+```
+
+Los patrones usan wildcards estándar donde `*` coincide con cualquier secuencia de caracteres.
+
 ### Uso desde Telegram
 
 1. Envía `/stacks` al bot
 2. Selecciona un stack de la lista
 3. Elige la operación: Start, Stop, Restart, Update o Logs
+
+### Notificaciones de Actualizaciones Agrupadas
+
+Por defecto, cuando hay actualizaciones disponibles en contenedores de un stack, el bot agrupa las notificaciones en un **solo mensaje por stack**:
+
+```
+📦 Stack 'pihole' tiene actualizaciones disponibles
+
+Servicios con actualizaciones (2):
+   • pihole
+   • dnsmasq
+
+[🔄 Actualizar Stack 'pihole'] [Cancelar]
+```
+
+**Ventajas:**
+- ✅ Menos spam - Una notificación por stack en lugar de N notificaciones
+- ✅ Mejor contexto - Ves todos los servicios del stack que necesitan actualización
+- ✅ Acción unificada - Actualiza todo el stack de una vez
+
+**Desactivar notificaciones agrupadas:**
+
+Si prefieres notificaciones individuales por contenedor:
+
+```yaml
+- COMPOSE_STACKS_GROUP_NOTIFICATIONS=0
+```
+
+### 🎯 Actualizaciones Inteligentes: Stacks vs Contenedores Standalone
+
+El bot **detecta automáticamente** si un contenedor pertenece a un stack y utiliza el método de actualización correcto:
+
+#### Contenedor de Stack (tiene label `com.docker.compose.project`)
+```bash
+# Cuando detecta actualización en un contenedor de stack:
+docker-compose -f /ruta/docker-compose.yml -p nombre-stack up --pull always --force-recreate -d
+
+✅ Actualiza TODO el stack de una vez
+✅ Respeta la configuración del archivo compose
+✅ Recrea todos los servicios con --force-recreate
+```
+
+#### Contenedor Standalone (sin label de compose)
+```bash
+# Usa el método tradicional:
+docker pull nueva-imagen
+docker stop contenedor
+docker rm contenedor
+docker run <misma-configuración>
+
+✅ Actualiza solo el contenedor individual
+✅ Mantiene toda la configuración original
+```
+
+**¿Cómo funciona?**
+
+Docker Compose añade **automáticamente** estos labels cuando levantas un stack:
+- `com.docker.compose.project=nombre-stack`
+- `com.docker.compose.service=nombre-servicio`
+
+El bot lee estos labels para determinar si debe actualizar:
+- Un contenedor individual → `docker pull` + recrear contenedor
+- Todo el stack → `docker-compose up --force-recreate`
+
+**No necesitas configurar nada adicional** - funciona automáticamente.
+
+### 🎨 Estados Visuales Dinámicos
+
+Los stacks muestran su estado con colores:
+
+- 🟢 **Verde**: Todos los servicios corriendo
+- 🟠 **Naranja**: Algunos servicios corriendo, otros parados
+- 🔴 **Rojo**: Ningún servicio corriendo
+
+### 👑 Auto-Protección del Bot
+
+El bot **no puede gestionarse a sí mismo** para evitar interrupciones:
+
+- Si el stack del bot **no está** en `COMPOSE_STACKS_DIR`: No aparece en la lista
+- Si el stack del bot **está** en el directorio: Aparece con icono 👑 pero sin botones de acción
+
+Esto previene que accidentalmente detengas el bot, lo que cortaría la conexión con Telegram.
 
 ### Opciones Avanzadas
 
