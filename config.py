@@ -13,6 +13,11 @@ CONTAINER_NAME = os.environ.get("CONTAINER_NAME")
 LANGUAGE = os.environ.get("LANGUAGE")
 EXTENDED_MESSAGES = bool(int(os.environ.get("EXTENDED_MESSAGES")))
 BUTTON_COLUMNS = int(os.environ.get("BUTTON_COLUMNS"))
+COMPOSE_STACKS_ENABLED = bool(int(os.environ.get("COMPOSE_STACKS_ENABLED", "0")))
+COMPOSE_STACKS_DIR = os.environ.get("COMPOSE_STACKS_DIR", "/srv/stacks")
+COMPOSE_STACKS_FORCE_RECREATE = bool(int(os.environ.get("COMPOSE_STACKS_FORCE_RECREATE", "1")))
+COMPOSE_FILE_PATTERNS = os.environ.get("COMPOSE_FILE_PATTERNS", "*compose*.yml,*compose*.yaml").split(",")
+COMPOSE_STACKS_GROUP_NOTIFICATIONS = bool(int(os.environ.get("COMPOSE_STACKS_GROUP_NOTIFICATIONS", "1")))
 
 # CONSTANTS
 UPDATER_IMAGE = "dgongut/docker-container-updater:latest"
@@ -31,6 +36,7 @@ ICON_CONTAINER_MARKED_FOR_UPDATE = "✅"
 # LABELS
 LABEL_IGNORE_CHECK_UPDATES = "DCB-Ignore-Check-Updates"
 LABEL_AUTO_UPDATE = "DCB-Auto-Update"
+LABEL_STACK_NO_FORCE_RECREATE = "DCB-Stack-No-Force-Recreate"
 
 docker_architectures = {
     "x86_64": "amd64",
@@ -86,4 +92,15 @@ CALL_PATTERNS = {
     "stopSelected": ["originalMessageId"],
     "confirmRestartSelected": ["originalMessageId"],
     "restartSelected": ["originalMessageId"],
+    "listStacks": [],
+    "stackInfo": ["stackName"],
+    "stackStart": ["stackName"],
+    "stackStop": ["stackName"],
+    "stackRestart": ["stackName"],
+    "stackUpdate": ["stackName"],
+    "stackLogs": ["stackName"],
+    "confirmStackStart": ["stackName"],
+    "confirmStackStop": ["stackName"],
+    "confirmStackRestart": ["stackName"],
+    "confirmStackUpdate": ["stackName"],
 }
