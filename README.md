@@ -16,7 +16,7 @@
   <span> | </span>
   <a href="./README_EN.md">ReadMe in English</a>
   <span> | </span>
-  <a href="https://t.me/dockercontrollerbotnews">Comunidad en Telegram</a>
+  <a href="https://t.me/dockercontrollerbotnews">Canal de Noticias en Telegram</a>
 </h3>
 
 Lleva el control de tus contenedores docker desde un único lugar.
