@@ -11,6 +11,14 @@
 ![Github last-commit](https://badgen.net/github/license/dgongut/docker-controller-bot)
 ![alt text](https://github.com/dgongut/pictures/blob/main/Docker-Controller-Bot/mockup.png)
 
+<h3 align="center">
+  ReadMe en Español
+  <span> | </span>
+  <a href="./README_EN.md">ReadMe in English</a>
+  <span> | </span>
+  <a href="https://t.me/dockercontrollerbotnews">Canal de Noticias en Telegram</a>
+</h3>
+
 Lleva el control de tus contenedores docker desde un único lugar.
 
 - ✅ Listar contenedores
