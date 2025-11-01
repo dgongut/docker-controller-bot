@@ -752,7 +752,7 @@ class DockerUpdateMonitor:
 					local_image = container.image.id
 					remote_image = self.client.images.pull(image_with_tag)
 					debug(get_text("debug_checking_update", container.name, image_with_tag, local_image.replace('sha256:', '')[:CONTAINER_ID_LENGTH], remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]))
-					if local_image == remote_image.id:
+					if local_image != remote_image.id:
 						if LABEL_AUTO_UPDATE in labels:
 							if EXTENDED_MESSAGES and not is_muted():
 								send_message_to_notification_channel(message=get_text("auto_update", container.name))
