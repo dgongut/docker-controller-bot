@@ -15,11 +15,10 @@ import yaml
 from config import *
 from croniter import croniter
 from datetime import datetime
-from telebot import util
 from telebot.types import InlineKeyboardButton
 from telebot.types import InlineKeyboardMarkup
 
-VERSION = "3.9.3"
+VERSION = "3.9.4"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -354,7 +353,7 @@ class DockerManager:
 				if image_status and get_text("NEED_UPDATE_CONTAINER_TEXT") in image_status:
 					possible_update = True
 
-			text = '```\n'
+			text = '<pre><code>\n'
 			text += f'{get_text("status")}: {get_status_emoji(container.status, container_name, container)} ({container.status})\n\n'
 			if container.status == "running":
 				health_text = get_health_status_text(container)
@@ -369,8 +368,8 @@ class DockerManager:
 			text += f'- {get_text("image_id")}: {container.image.id.replace("sha256:", "")[:CONTAINER_ID_LENGTH]}'
 			if CHECK_UPDATES:
 				text += f"\n\n{image_status}"
-			text += "```"
-			return f'📜 {get_text("information")} *{container_name}*:\n{text}', possible_update
+			text += "</code></pre>"
+			return f'📜 {get_text("information")} <b>{container_name}</b>:\n{text}', possible_update
 		except Exception as e:
 			error(get_text("error_showing_info_container_with_error", container_name, e))
 			return get_text("error_showing_info_container", container_name), False
@@ -442,7 +441,7 @@ class DockerManager:
 					debug(get_text("debug_pulling_image", image_with_tag))
 					if message:
 						try:
-							edit_message_text(get_text("updating_downloading", container_name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+							edit_message_text(get_text("updating_downloading", container_name), TELEGRAM_GROUP, message.message_id)
 						except Exception as e:
 							debug(get_text("debug_edit_message_failed", container_name, e))
 
@@ -460,7 +459,7 @@ class DockerManager:
 					if container_is_running:
 						if message:
 							try:
-								edit_message_text(get_text("updating_stopping", container_name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+								edit_message_text(get_text("updating_stopping", container_name), TELEGRAM_GROUP, message.message_id)
 							except Exception as e:
 								debug(get_text("debug_edit_message_failed", container_name, e))
 						debug(get_text("debug_stopping_container", container_name))
@@ -476,7 +475,7 @@ class DockerManager:
 					debug(get_text("debug_creating_new_container", remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]))
 					if message:
 						try:
-							edit_message_text(get_text("updating_creating", container_name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+							edit_message_text(get_text("updating_creating", container_name), TELEGRAM_GROUP, message.message_id)
 						except Exception as e:
 							debug(get_text("debug_edit_message_failed", container_name, e))
 
@@ -511,7 +510,7 @@ class DockerManager:
 						debug(get_text("debug_container_need_to_be_started"))
 						if message:
 							try:
-								edit_message_text(get_text("updating_starting", container_name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+								edit_message_text(get_text("updating_starting", container_name), TELEGRAM_GROUP, message.message_id)
 							except Exception as e:
 								debug(get_text("debug_edit_message_failed", container_name, e))
 						new_container.start()
@@ -520,7 +519,7 @@ class DockerManager:
 						debug(get_text("debug_container_deleting_old_container", container.name))
 						if message:
 							try:
-								edit_message_text(get_text("updating_deleting_old", container.name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
+								edit_message_text(get_text("updating_deleting_old", container.name), TELEGRAM_GROUP, message.message_id)
 							except Exception as e:
 								debug(get_text("debug_edit_message_failed", container.name, e))
 						container.remove()
@@ -753,7 +752,7 @@ class DockerUpdateMonitor:
 					local_image = container.image.id
 					remote_image = self.client.images.pull(image_with_tag)
 					debug(get_text("debug_checking_update", container.name, image_with_tag, local_image.replace('sha256:', '')[:CONTAINER_ID_LENGTH], remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]))
-					if local_image != remote_image.id:
+					if local_image == remote_image.id:
 						if LABEL_AUTO_UPDATE in labels:
 							if EXTENDED_MESSAGES and not is_muted():
 								send_message_to_notification_channel(message=get_text("auto_update", container.name))
@@ -1040,7 +1039,7 @@ def command_controller(message):
 				error(get_text("error_reading_schedule_file", e))
 
 			if empty:
-				send_message(message=get_text("empty_schedule"), parse_mode="html")
+				send_message(message=get_text("empty_schedule"))
 			else:
 				markup.add(*botones)
 				markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
@@ -1048,7 +1047,7 @@ def command_controller(message):
 		else: # SAVE
 			data = parse_cron_line(full_schedule)
 			if not data:
-				send_message(message=get_text("error_adding_schedule", message.text), parse_mode="html")
+				send_message(message=get_text("error_adding_schedule", message.text))
 				return
 			action = data.get("action")
 			schedule = data.get("schedule")
@@ -1056,7 +1055,7 @@ def command_controller(message):
 			minutes = data.get("minutes")
 			command = data.get("command")
 			if not schedule or not is_valid_cron(schedule) or not action or action not in ('run', 'stop', 'restart', 'mute', 'exec') or ('exec' in action and not command):
-				send_message(message=get_text("error_adding_schedule", message.text), parse_mode="html")
+				send_message(message=get_text("error_adding_schedule", message.text))
 				return
 			if 'mute' != action and not get_container_id_by_name(container):
 				send_message(message=get_text("container_does_not_exist", container))
@@ -1418,7 +1417,7 @@ def button_controller(call):
 			containers, selected = load_action_data(chatId, originalMessageId, "run")
 			containersToRun = ""
 			for container in selected:
-				containersToRun += f"· *{container}*\n"
+				containersToRun += f"· <b>{container}</b>\n"
 			markup = InlineKeyboardMarkup(row_width = 1)
 			markup.add(InlineKeyboardButton(get_text("button_run"), callback_data=f"runSelected|{originalMessageId}"))
 			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
@@ -1464,7 +1463,7 @@ def button_controller(call):
 			containers, selected = load_action_data(chatId, originalMessageId, "stop")
 			containersToStop = ""
 			for container in selected:
-				containersToStop += f"· *{container}*\n"
+				containersToStop += f"· <b>{container}</b>\n"
 			markup = InlineKeyboardMarkup(row_width = 1)
 			markup.add(InlineKeyboardButton(get_text("button_stop"), callback_data=f"stopSelected|{originalMessageId}"))
 			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
@@ -1510,7 +1509,7 @@ def button_controller(call):
 			containers, selected = load_action_data(chatId, originalMessageId, "restart")
 			containersToRestart = ""
 			for container in selected:
-				containersToRestart += f"· *{container}*\n"
+				containersToRestart += f"· <b>{container}</b>\n"
 			markup = InlineKeyboardMarkup(row_width = 1)
 			markup.add(InlineKeyboardButton(get_text("button_restart"), callback_data=f"restartSelected|{originalMessageId}"))
 			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
@@ -1799,7 +1798,7 @@ def execute_command(containerId, containerName, command, sendMessage=True):
 			send_message(message=get_text("executed_command", containerName, command, first_part))
 			for i in range(max_length, len(result), max_length):
 				part = result[i:i + max_length]
-				send_message(message=f"```SHELL\n{part}```")
+				send_message(message=f"<pre><code>{part}</code></pre>")
 
 def confirm_change_tag(containerId, containerName, tag):
 	markup = InlineKeyboardMarkup(row_width = 1)
@@ -1845,7 +1844,7 @@ def confirm_update_selected(chatId, messageId):
 	_, selected = load_update_data(chatId, messageId)
 	containersToUpdate = ""
 	for container in selected:
-		containersToUpdate += f"· *{container}*\n"
+		containersToUpdate += f"· <b>{container}</b>\n"
 	markup = InlineKeyboardMarkup(row_width = 1)
 	markup.add(InlineKeyboardButton(get_text("button_confirm_update"), callback_data=f"updateSelected|{messageId}"))
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
@@ -1898,19 +1897,19 @@ def display_containers(containers):
 	pending_updates = sum(1 for c in containers if update_available(c))
 
 	# Build summary
-	result = f"📊 *{get_text('containers')}:* {total_containers}\n"
+	result = f"📊 <b>{get_text('containers')}:</b> {total_containers}\n"
 	result += f"🟢 {get_text('status_running')}: {running_containers}\n"
 	result += f"🔴 {get_text('status_stopped')}: {stopped_containers}\n"
 	result += f"⬆️ {get_text('status_updates')}: {pending_updates}\n\n"
 
 	# Build container list
-	result += "```\n"
+	result += "<pre>"
 	for container in containers:
 		result += f"{get_status_emoji(container.status, container.name, container)} {container.name}"
 		if update_available(container):
 			result += " ⬆️"
 		result += "\n"
-	result += "```"
+	result += "</pre>"
 	return result
 
 def get_container_health_status(container):
@@ -2237,21 +2236,21 @@ def delete_message(message_id):
 	"""Elimina un mensaje usando la cola (asíncrono)"""
 	message_queue.add_message(_delete_message_direct, TELEGRAM_GROUP, message_id, wait_for_result=False)
 
-def send_message(chat_id=TELEGRAM_GROUP, message=None, reply_markup=None, parse_mode="markdown", disable_web_page_preview=True):
+def send_message(chat_id=TELEGRAM_GROUP, message=None, reply_markup=None, parse_mode="html", disable_web_page_preview=True):
 	"""Envía un mensaje usando la cola (espera resultado para obtener message_id)"""
 	return message_queue.add_message(_send_message_direct, chat_id, message, reply_markup, parse_mode, disable_web_page_preview, wait_for_result=True)
 
-def send_message_to_notification_channel(chat_id=TELEGRAM_NOTIFICATION_CHANNEL, message=None, reply_markup=None, parse_mode="markdown", disable_web_page_preview=True):
+def send_message_to_notification_channel(chat_id=TELEGRAM_NOTIFICATION_CHANNEL, message=None, reply_markup=None, parse_mode="html", disable_web_page_preview=True):
 	"""Envía un mensaje al canal de notificaciones usando la cola"""
 	if TELEGRAM_NOTIFICATION_CHANNEL is None or TELEGRAM_NOTIFICATION_CHANNEL == '':
 		return send_message(chat_id=TELEGRAM_GROUP, message=message, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
 	return send_message(chat_id=chat_id, message=message, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
 
-def send_document(chat_id=TELEGRAM_GROUP, document=None, reply_markup=None, caption=None, parse_mode="markdown"):
+def send_document(chat_id=TELEGRAM_GROUP, document=None, reply_markup=None, caption=None, parse_mode="html"):
 	"""Envía un documento usando la cola (espera resultado para obtener message_id)"""
 	return message_queue.add_message(_send_document_direct, chat_id, document, reply_markup, caption, parse_mode, wait_for_result=True)
 
-def edit_message_text(text, chat_id, message_id, parse_mode="markdown", reply_markup=None):
+def edit_message_text(text, chat_id, message_id, parse_mode="html", reply_markup=None):
 	"""Edita el texto de un mensaje usando la cola (asíncrono)"""
 	message_queue.add_message(_edit_message_text_direct, chat_id, message_id, text, parse_mode, reply_markup, wait_for_result=False)
 
@@ -2434,12 +2433,12 @@ if __name__ == '__main__':
 	delete_updater()
 	check_CONTAINER_NAME()
 	check_mute()
-	starting_message = f"🫡 *{CONTAINER_NAME}\n{get_text('active')}*"
+	starting_message = f"🫡 <b>{CONTAINER_NAME}</b>\n{get_text('active')}"
 	if CHECK_UPDATES:
 		starting_message += f"\n✅ {get_text('check_for_updates')}"
 	else:
 		starting_message += f"\n❌ {get_text('check_for_updates')}"
-	starting_message += f"\n_⚙️ v{VERSION}_"
+	starting_message += f"\n<i>⚙️ v{VERSION}</i>"
 	starting_message += f"\n{get_text('channel')}"
 	send_message(message=starting_message)
 	bot.infinity_polling(timeout=60)

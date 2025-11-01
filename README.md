@@ -110,6 +110,7 @@ services:
 - Traducción al italiano: [zichichi](https://github.com/zichichi)
 - Traducción al catalán: [flancky](https://t.me/flancky)
 - Pruebas del Docker Login: [garanda](https://github.com/garanda21)
+- Readme en inglés: [phampyk](https://github.com/phampyk)
 
 ## ❓ Preguntas Frecuentes (FAQ)
 
