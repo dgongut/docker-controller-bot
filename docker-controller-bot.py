@@ -15,10 +15,15 @@ import yaml
 from config import *
 from croniter import croniter
 from datetime import datetime
+from telebot import util
 from telebot.types import InlineKeyboardButton
 from telebot.types import InlineKeyboardMarkup
 
-VERSION = "3.9.4"
+# Docker Compose Manager
+if COMPOSE_STACKS_ENABLED:
+	from docker_compose_manager import DockerComposeManager
+
+VERSION = "3.9.3"
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -353,7 +358,7 @@ class DockerManager:
 				if image_status and get_text("NEED_UPDATE_CONTAINER_TEXT") in image_status:
 					possible_update = True
 
-			text = '<pre><code>\n'
+			text = '```\n'
 			text += f'{get_text("status")}: {get_status_emoji(container.status, container_name, container)} ({container.status})\n\n'
 			if container.status == "running":
 				health_text = get_health_status_text(container)
@@ -368,8 +373,8 @@ class DockerManager:
 			text += f'- {get_text("image_id")}: {container.image.id.replace("sha256:", "")[:CONTAINER_ID_LENGTH]}'
 			if CHECK_UPDATES:
 				text += f"\n\n{image_status}"
-			text += "</code></pre>"
-			return f'📜 {get_text("information")} <b>{container_name}</b>:\n{text}', possible_update
+			text += "```"
+			return f'📜 {get_text("information")} *{container_name}*:\n{text}', possible_update
 		except Exception as e:
 			error(get_text("error_showing_info_container_with_error", container_name, e))
 			return get_text("error_showing_info_container", container_name), False
@@ -441,7 +446,7 @@ class DockerManager:
 					debug(get_text("debug_pulling_image", image_with_tag))
 					if message:
 						try:
-							edit_message_text(get_text("updating_downloading", container_name), TELEGRAM_GROUP, message.message_id)
+							edit_message_text(get_text("updating_downloading", container_name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
 						except Exception as e:
 							debug(get_text("debug_edit_message_failed", container_name, e))
 
@@ -459,7 +464,7 @@ class DockerManager:
 					if container_is_running:
 						if message:
 							try:
-								edit_message_text(get_text("updating_stopping", container_name), TELEGRAM_GROUP, message.message_id)
+								edit_message_text(get_text("updating_stopping", container_name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
 							except Exception as e:
 								debug(get_text("debug_edit_message_failed", container_name, e))
 						debug(get_text("debug_stopping_container", container_name))
@@ -475,7 +480,7 @@ class DockerManager:
 					debug(get_text("debug_creating_new_container", remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]))
 					if message:
 						try:
-							edit_message_text(get_text("updating_creating", container_name), TELEGRAM_GROUP, message.message_id)
+							edit_message_text(get_text("updating_creating", container_name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
 						except Exception as e:
 							debug(get_text("debug_edit_message_failed", container_name, e))
 
@@ -510,7 +515,7 @@ class DockerManager:
 						debug(get_text("debug_container_need_to_be_started"))
 						if message:
 							try:
-								edit_message_text(get_text("updating_starting", container_name), TELEGRAM_GROUP, message.message_id)
+								edit_message_text(get_text("updating_starting", container_name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
 							except Exception as e:
 								debug(get_text("debug_edit_message_failed", container_name, e))
 						new_container.start()
@@ -519,7 +524,7 @@ class DockerManager:
 						debug(get_text("debug_container_deleting_old_container", container.name))
 						if message:
 							try:
-								edit_message_text(get_text("updating_deleting_old", container.name), TELEGRAM_GROUP, message.message_id)
+								edit_message_text(get_text("updating_deleting_old", container.name), TELEGRAM_GROUP, message.message_id, parse_mode="markdown")
 							except Exception as e:
 								debug(get_text("debug_edit_message_failed", container.name, e))
 						container.remove()
@@ -689,6 +694,11 @@ class DockerManager:
 # Instanciamos el DockerManager
 docker_manager = DockerManager()
 
+# Instanciamos el DockerComposeManager si está habilitado
+if COMPOSE_STACKS_ENABLED:
+	compose_manager = DockerComposeManager(COMPOSE_STACKS_DIR)
+	debug(f"Docker Compose Stacks enabled. Directory: {COMPOSE_STACKS_DIR}")
+
 class DockerEventMonitor:
 	def __init__(self):
 		self.client = docker.from_env()
@@ -735,6 +745,7 @@ class DockerUpdateMonitor:
 		while True:
 			containers = self.client.containers.list(all=True)
 			grouped_updates_containers = []
+			stack_containers = {}  # Diccionario para agrupar contenedores por stack
 			should_notify = False
 			for container in containers:
 				if (container.status == "exited" or container.status == "dead") and not CHECK_UPDATE_STOPPED_CONTAINERS:
@@ -776,7 +787,21 @@ class DockerUpdateMonitor:
 							pass # Si no se puede borrar es porque esta siendo usada por otro contenedor
 
 						if container.name != CONTAINER_NAME:
-							grouped_updates_containers.append(container.name)
+							# Verificar si el contenedor pertenece a un stack
+							stack_name = labels.get('com.docker.compose.project')
+							if stack_name and COMPOSE_STACKS_ENABLED and COMPOSE_STACKS_GROUP_NOTIFICATIONS:
+								# Agrupar por stack
+								if stack_name not in stack_containers:
+									stack_containers[stack_name] = []
+								stack_containers[stack_name].append({
+									'name': container.name,
+									'id': container.id,
+									'service': labels.get('com.docker.compose.service', 'unknown'),
+									'image': image_with_tag
+								})
+							else:
+								# Contenedor individual o notificaciones de stack deshabilitadas
+								grouped_updates_containers.append(container.name)
 						
 						if image_status == old_image_status:
 							debug(get_text("debug_update_already_notified"))
@@ -799,6 +824,31 @@ class DockerUpdateMonitor:
 					image_status = ""
 				save_container_update_status(image_with_tag, container.name, image_status)
 
+			# Enviar notificaciones agrupadas por stack
+			if stack_containers and COMPOSE_STACKS_ENABLED and COMPOSE_STACKS_GROUP_NOTIFICATIONS:
+				for stack_name, services in stack_containers.items():
+					if not is_muted():
+						# Crear mensaje de actualización de stack
+						service_count = len(services)
+						message_text = f"📦 *Stack '{stack_name}'* tiene actualizaciones disponibles\n\n"
+						message_text += f"Servicios con actualizaciones ({service_count}):\n"
+						for service in services:
+							service_name = service['service']
+							message_text += f"   • {service_name}\n"
+
+						# Botón para actualizar el stack completo
+						markup = InlineKeyboardMarkup(row_width=1)
+						markup.add(
+							InlineKeyboardButton(f"🔄 Actualizar Stack '{stack_name}'", callback_data=f"confirmStackUpdate|{stack_name}"),
+							InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar")
+						)
+
+						send_message(message=message_text, reply_markup=markup)
+						debug(f"Stack '{stack_name}' notificado con {service_count} servicios con actualizaciones")
+					else:
+						debug(f"Stack '{stack_name}' tiene actualizaciones (muted)")
+
+			# Enviar notificaciones de contenedores individuales
 			if grouped_updates_containers and should_notify:
 				markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
 				markup.add(*[
@@ -892,7 +942,7 @@ class DockerScheduleMonitor:
 			error(get_text("error_schedule_daemon", e))
 			self.demonio_schedule()
 
-@bot.message_handler(commands=["start", "list", "run", "stop", "restart", "delete", "exec", "checkupdate", "updateall", "changetag", "logs", "logfile", "compose", "mute", "schedule", "info", "version", "donate", "donors", "prune"])
+@bot.message_handler(commands=["start", "list", "run", "stop", "restart", "delete", "exec", "checkupdate", "updateall", "changetag", "logs", "logfile", "compose", "mute", "schedule", "info", "version", "donate", "donors", "prune", "stacks"])
 def command_controller(message):
 	userId = message.from_user.id
 	comando = message.text.split(' ', 1)[0]
@@ -1039,7 +1089,7 @@ def command_controller(message):
 				error(get_text("error_reading_schedule_file", e))
 
 			if empty:
-				send_message(message=get_text("empty_schedule"))
+				send_message(message=get_text("empty_schedule"), parse_mode="html")
 			else:
 				markup.add(*botones)
 				markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
@@ -1047,7 +1097,7 @@ def command_controller(message):
 		else: # SAVE
 			data = parse_cron_line(full_schedule)
 			if not data:
-				send_message(message=get_text("error_adding_schedule", message.text))
+				send_message(message=get_text("error_adding_schedule", message.text), parse_mode="html")
 				return
 			action = data.get("action")
 			schedule = data.get("schedule")
@@ -1055,7 +1105,7 @@ def command_controller(message):
 			minutes = data.get("minutes")
 			command = data.get("command")
 			if not schedule or not is_valid_cron(schedule) or not action or action not in ('run', 'stop', 'restart', 'mute', 'exec') or ('exec' in action and not command):
-				send_message(message=get_text("error_adding_schedule", message.text))
+				send_message(message=get_text("error_adding_schedule", message.text), parse_mode="html")
 				return
 			if 'mute' != action and not get_container_id_by_name(container):
 				send_message(message=get_text("container_does_not_exist", container))
@@ -1182,6 +1232,56 @@ def command_controller(message):
 	elif comando in ('/donors', f'/donors@{bot.get_me().username}'):
 		print_donors()
 
+	# STACKS (Docker Compose)
+	elif comando in ('/stacks', f'/stacks@{bot.get_me().username}'):
+		if not COMPOSE_STACKS_ENABLED:
+			send_message(message="⚠️ Docker Compose stacks feature is not enabled. Set COMPOSE_STACKS_ENABLED=1")
+			return
+
+		try:
+			stacks = compose_manager.list_all_stacks()
+
+			if not stacks:
+				send_message(message=get_text("stack_no_stacks", COMPOSE_STACKS_DIR))
+				return
+
+			markup = InlineKeyboardMarkup(row_width=2)
+			buttons = []
+
+			for stack in stacks:
+				stack_name = stack['name']
+				service_count = len(stack.get('services', []))
+
+				# Calcular estado del stack basado en contenedores corriendo
+				containers = stack.get('containers', [])
+				total_services = service_count
+				running_containers = sum(1 for c in containers if c.get('status') == 'running')
+
+				# Determinar color del icono
+				if running_containers == 0:
+					running_icon = "🔴"  # Ninguno corriendo - ROJO
+				elif running_containers < total_services:
+					running_icon = "🟠"  # Algunos corriendo - NARANJA
+				else:
+					running_icon = "🟢"  # Todos corriendo - VERDE
+
+				button_text = f"{running_icon} {stack_name} ({service_count})"
+				buttons.append(InlineKeyboardButton(button_text, callback_data=f"stackInfo|{stack_name}"))
+
+			markup.add(*buttons)
+			markup.add(InlineKeyboardButton(get_text("button_refresh"), callback_data="listStacks"))
+			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
+
+			message_text = f"📦 **Docker Compose Stacks** ({len(stacks)})\n\n"
+			message_text += f"🟢 = {get_text('status_running')} | 🟠 = Parcial | 🔴 = {get_text('status_stopped')}\n\n"
+			message_text += f"{get_text('stack_directory')}: `{COMPOSE_STACKS_DIR}`"
+
+			send_message(message=message_text, reply_markup=markup)
+
+		except Exception as e:
+			error(f"Error listing stacks: {e}")
+			send_message(message=f"❌ Error listing stacks: {str(e)}")
+
 def parse_call_data(call_data):
 	parts = call_data.split("|")
 	comando = parts[0]
@@ -1223,6 +1323,7 @@ def button_controller(call):
 		originalMessageId = data.get("originalMessageId")
 		commandId = data.get("commandId")
 		scheduleHash = data.get("scheduleHash")
+		stackName = data.get("stackName")
 	except Exception as e:
 		error(get_text("error_callback_initialization", str(e)))
 		try:
@@ -1290,9 +1391,23 @@ def button_controller(call):
 		# CONFIRM UPDATE ALL
 		elif comando == "updateAll":
 			containers = docker_manager.list_containers()
+			updated_stacks = set()  # Para evitar actualizar el mismo stack múltiples veces
+
 			for container in containers:
 				if update_available(container):
+					labels = container.labels
+					stack_name = labels.get('com.docker.compose.project')
+
+					# Si es un contenedor de stack y ya actualizamos ese stack, saltar
+					if stack_name and COMPOSE_STACKS_ENABLED and stack_name in updated_stacks:
+						continue
+
+					# Actualizar el contenedor o stack
 					update(container.id, container.name)
+
+					# Si era un stack, marcarlo como actualizado
+					if stack_name and COMPOSE_STACKS_ENABLED:
+						updated_stacks.add(stack_name)
 
 		# CONFIRM DELETE
 		elif comando == "confirmDelete":
@@ -1377,6 +1492,8 @@ def button_controller(call):
 		# UPDATE SELECTED
 		elif comando == "updateSelected":
 			containers, selected = load_update_data(chatId, originalMessageId)
+			updated_stacks = set()  # Para evitar actualizar el mismo stack múltiples veces
+
 			for containerName in selected:
 				container_id = get_container_id_by_name(container_name=containerName)
 				if not container_id:
@@ -1386,7 +1503,19 @@ def button_controller(call):
 				client = docker.from_env()
 				container = client.containers.get(container_id)
 				if update_available(container):
+					labels = container.labels
+					stack_name = labels.get('com.docker.compose.project')
+
+					# Si es un contenedor de stack y ya actualizamos ese stack, saltar
+					if stack_name and COMPOSE_STACKS_ENABLED and stack_name in updated_stacks:
+						continue
+
+					# Actualizar el contenedor o stack
 					update(container.id, container.name)
+
+					# Si era un stack, marcarlo como actualizado
+					if stack_name and COMPOSE_STACKS_ENABLED:
+						updated_stacks.add(stack_name)
 			clear_update_data(chatId, originalMessageId)
 
 		# TOGGLE RUN
@@ -1417,7 +1546,7 @@ def button_controller(call):
 			containers, selected = load_action_data(chatId, originalMessageId, "run")
 			containersToRun = ""
 			for container in selected:
-				containersToRun += f"· <b>{container}</b>\n"
+				containersToRun += f"· *{container}*\n"
 			markup = InlineKeyboardMarkup(row_width = 1)
 			markup.add(InlineKeyboardButton(get_text("button_run"), callback_data=f"runSelected|{originalMessageId}"))
 			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
@@ -1463,7 +1592,7 @@ def button_controller(call):
 			containers, selected = load_action_data(chatId, originalMessageId, "stop")
 			containersToStop = ""
 			for container in selected:
-				containersToStop += f"· <b>{container}</b>\n"
+				containersToStop += f"· *{container}*\n"
 			markup = InlineKeyboardMarkup(row_width = 1)
 			markup.add(InlineKeyboardButton(get_text("button_stop"), callback_data=f"stopSelected|{originalMessageId}"))
 			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
@@ -1509,7 +1638,7 @@ def button_controller(call):
 			containers, selected = load_action_data(chatId, originalMessageId, "restart")
 			containersToRestart = ""
 			for container in selected:
-				containersToRestart += f"· <b>{container}</b>\n"
+				containersToRestart += f"· *{container}*\n"
 			markup = InlineKeyboardMarkup(row_width = 1)
 			markup.add(InlineKeyboardButton(get_text("button_restart"), callback_data=f"restartSelected|{originalMessageId}"))
 			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
@@ -1526,6 +1655,225 @@ def button_controller(call):
 					continue
 				restart(container_id, containerName)
 			clear_action_data(chatId, originalMessageId, "restart")
+
+		# ========== DOCKER COMPOSE STACKS ==========
+		# LIST STACKS (refresh)
+		elif comando == "listStacks":
+			if not COMPOSE_STACKS_ENABLED:
+				send_message(message="⚠️ Docker Compose stacks feature is not enabled")
+				return
+
+			stacks = compose_manager.list_all_stacks()
+			markup = InlineKeyboardMarkup(row_width=2)
+			buttons = []
+
+			for stack in stacks:
+				stack_name = stack['name']
+				service_count = len(stack.get('services', []))
+
+				# Calcular estado del stack basado en contenedores corriendo
+				containers = stack.get('containers', [])
+				total_services = service_count
+				running_containers = sum(1 for c in containers if c.get('status') == 'running')
+
+				# Determinar color del icono
+				if running_containers == 0:
+					running_icon = "🔴"  # Ninguno corriendo - ROJO
+				elif running_containers < total_services:
+					running_icon = "🟠"  # Algunos corriendo - NARANJA
+				else:
+					running_icon = "🟢"  # Todos corriendo - VERDE
+
+				button_text = f"{running_icon} {stack_name} ({service_count})"
+				buttons.append(InlineKeyboardButton(button_text, callback_data=f"stackInfo|{stack_name}"))
+
+			markup.add(*buttons)
+			markup.add(InlineKeyboardButton(get_text("button_refresh"), callback_data="listStacks"))
+			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
+
+			message_text = f"📦 **Docker Compose Stacks** ({len(stacks)})\n\n"
+			message_text += f"🟢 = {get_text('status_running')} | 🟠 = Parcial | 🔴 = {get_text('status_stopped')}\n\n"
+			message_text += f"{get_text('stack_directory')}: `{COMPOSE_STACKS_DIR}`"
+
+			send_message(message=message_text, reply_markup=markup)
+
+		# STACK INFO
+		elif comando == "stackInfo":
+			if not COMPOSE_STACKS_ENABLED:
+				return
+
+			stack_info = compose_manager.get_stack_info(stackName)
+			if not stack_info:
+				send_message(message=get_text("stack_not_found", stackName))
+				return
+
+			# Build info message
+			running = stack_info.get('running', False)
+			status_text = get_text('status_running') if running else get_text('status_stopped')
+			status_icon = "🟢" if running else "⚪"
+			services = stack_info.get('services', [])
+			containers = stack_info.get('containers', [])
+
+			# Verificar si este stack contiene el bot mismo
+			is_bot_stack = any(c.get('name') == CONTAINER_NAME for c in containers)
+			stack_icon = "👑" if is_bot_stack else "📦"
+
+			message_text = f"{stack_icon} **Stack: {stackName}**\n\n"
+			message_text += f"{get_text('status')}: {status_icon} {status_text}\n"
+			message_text += f"{get_text('stack_services')}: {len(services)}\n"
+
+			if stack_info.get('source') == 'directory':
+				message_text += f"{get_text('stack_path')}: `{stack_info['path']}`\n"
+
+			message_text += f"\n**{get_text('stack_services_list')}**\n"
+			for svc in services:
+				message_text += f"• {svc['name']}\n"
+
+			if containers:
+				message_text += "\n**Containers:**\n"
+				for c in containers:
+					status_icon = "🟢" if c['status'] == 'running' else "🔴"
+					message_text += f"{status_icon} {c['name']} ({c['status']})\n"
+
+			# Build action buttons
+			markup = InlineKeyboardMarkup(row_width=2)
+
+			# No mostrar botones de acción si el stack contiene el bot
+			if not is_bot_stack:
+				if running:
+					markup.add(
+						InlineKeyboardButton(get_text("stack_button_restart"), callback_data=f"confirmStackRestart|{stackName}"),
+						InlineKeyboardButton(get_text("stack_button_stop"), callback_data=f"confirmStackStop|{stackName}")
+					)
+					markup.add(InlineKeyboardButton(get_text("stack_button_update"), callback_data=f"confirmStackUpdate|{stackName}"))
+					markup.add(InlineKeyboardButton("📄 Logs", callback_data=f"stackLogs|{stackName}"))
+				else:
+					markup.add(InlineKeyboardButton(get_text("stack_button_start"), callback_data=f"confirmStackStart|{stackName}"))
+
+			markup.add(InlineKeyboardButton("« Back", callback_data="listStacks"))
+			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
+
+			send_message(message=message_text, reply_markup=markup)
+
+		# CONFIRM STACK START
+		elif comando == "confirmStackStart":
+			markup = InlineKeyboardMarkup(row_width=2)
+			markup.add(
+				InlineKeyboardButton(get_text("button_confirm"), callback_data=f"stackStart|{stackName}"),
+				InlineKeyboardButton(get_text("button_cancel"), callback_data=f"stackInfo|{stackName}")
+			)
+			send_message(message=get_text("stack_confirm_start", stackName), reply_markup=markup)
+
+		# STACK START
+		elif comando == "stackStart":
+			send_message(message=get_text("stack_starting", stackName))
+			result = compose_manager.stack_start(stackName)
+
+			markup = InlineKeyboardMarkup(row_width=2)
+			markup.add(
+				InlineKeyboardButton(get_text("button_back_to_stacks"), callback_data="listStacks"),
+				InlineKeyboardButton(get_text("button_close"), callback_data="cerrar")
+			)
+
+			if result['success']:
+				send_message(message=get_text("stack_started", stackName), reply_markup=markup)
+			else:
+				error_msg = get_text("stack_error_start", stackName, result['stderr'])
+				send_message(message=error_msg, reply_markup=markup)
+
+		# CONFIRM STACK STOP
+		elif comando == "confirmStackStop":
+			markup = InlineKeyboardMarkup(row_width=2)
+			markup.add(
+				InlineKeyboardButton(get_text("button_confirm"), callback_data=f"stackStop|{stackName}"),
+				InlineKeyboardButton(get_text("button_cancel"), callback_data=f"stackInfo|{stackName}")
+			)
+			send_message(message=get_text("stack_confirm_stop", stackName), reply_markup=markup)
+
+		# STACK STOP
+		elif comando == "stackStop":
+			send_message(message=get_text("stack_stopping", stackName))
+			result = compose_manager.stack_stop(stackName)
+
+			markup = InlineKeyboardMarkup(row_width=2)
+			markup.add(
+				InlineKeyboardButton(get_text("button_back_to_stacks"), callback_data="listStacks"),
+				InlineKeyboardButton(get_text("button_close"), callback_data="cerrar")
+			)
+
+			if result['success']:
+				send_message(message=get_text("stack_stopped", stackName), reply_markup=markup)
+			else:
+				error_msg = get_text("stack_error_stop", stackName, result['stderr'])
+				send_message(message=error_msg, reply_markup=markup)
+
+		# CONFIRM STACK RESTART
+		elif comando == "confirmStackRestart":
+			markup = InlineKeyboardMarkup(row_width=2)
+			markup.add(
+				InlineKeyboardButton(get_text("button_confirm"), callback_data=f"stackRestart|{stackName}"),
+				InlineKeyboardButton(get_text("button_cancel"), callback_data=f"stackInfo|{stackName}")
+			)
+			send_message(message=get_text("stack_confirm_restart", stackName), reply_markup=markup)
+
+		# STACK RESTART
+		elif comando == "stackRestart":
+			send_message(message=get_text("stack_restarting", stackName))
+			result = compose_manager.stack_restart(stackName)
+
+			markup = InlineKeyboardMarkup(row_width=2)
+			markup.add(
+				InlineKeyboardButton(get_text("button_back_to_stacks"), callback_data="listStacks"),
+				InlineKeyboardButton(get_text("button_close"), callback_data="cerrar")
+			)
+
+			if result['success']:
+				send_message(message=get_text("stack_restarted", stackName), reply_markup=markup)
+			else:
+				error_msg = get_text("stack_error_restart", stackName, result['stderr'])
+				send_message(message=error_msg, reply_markup=markup)
+
+		# CONFIRM STACK UPDATE
+		elif comando == "confirmStackUpdate":
+			markup = InlineKeyboardMarkup(row_width=2)
+			markup.add(
+				InlineKeyboardButton(get_text("button_confirm"), callback_data=f"stackUpdate|{stackName}"),
+				InlineKeyboardButton(get_text("button_cancel"), callback_data=f"stackInfo|{stackName}")
+			)
+			send_message(message=get_text("stack_confirm_update", stackName), reply_markup=markup)
+
+		# STACK UPDATE
+		elif comando == "stackUpdate":
+			send_message(message=get_text("stack_updating", stackName))
+			result = compose_manager.stack_update(stackName)
+
+			markup = InlineKeyboardMarkup(row_width=2)
+			markup.add(
+				InlineKeyboardButton(get_text("button_back_to_stacks"), callback_data="listStacks"),
+				InlineKeyboardButton(get_text("button_close"), callback_data="cerrar")
+			)
+
+			if result['success']:
+				send_message(message=get_text("stack_updated", stackName), reply_markup=markup)
+			else:
+				error_msg = get_text("stack_error_update", stackName, result['stderr'])
+				send_message(message=error_msg, reply_markup=markup)
+
+		# STACK LOGS
+		elif comando == "stackLogs":
+			send_message(message=f"📄 Fetching logs for stack **{stackName}**...")
+			result = compose_manager.stack_logs(stackName, tail=100)
+
+			if result['success']:
+				logs = result['stdout']
+				if len(logs) > 4000:
+					# Send as file if too long
+					fichero_temporal = get_temporal_file(logs, f"{stackName}_logs")
+					send_document(document=fichero_temporal, caption=f"📄 Logs for stack **{stackName}**")
+				else:
+					send_message(message=f"📄 **Logs for {stackName}:**\n\n```\n{logs}\n```")
+			else:
+				send_message(message=f"❌ Failed to get logs: {result['stderr']}")
 
 		# PRUNE
 		elif comando == "prune":
@@ -1798,7 +2146,7 @@ def execute_command(containerId, containerName, command, sendMessage=True):
 			send_message(message=get_text("executed_command", containerName, command, first_part))
 			for i in range(max_length, len(result), max_length):
 				part = result[i:i + max_length]
-				send_message(message=f"<pre><code>{part}</code></pre>")
+				send_message(message=f"```SHELL\n{part}```")
 
 def confirm_change_tag(containerId, containerName, tag):
 	markup = InlineKeyboardMarkup(row_width = 1)
@@ -1807,10 +2155,33 @@ def confirm_change_tag(containerId, containerName, tag):
 	send_message(message=get_text("confirm_change_tag", containerName, tag), reply_markup=markup)
 
 def update(containerId, containerName):
-	x = send_message(message=get_text("updating", containerName))
-	result = docker_manager.update(container_id=containerId, container_name=containerName, message=x, bot=bot)
-	delete_message(x.message_id)
-	send_message(message=result)
+	# Verificar si el contenedor pertenece a un stack
+	try:
+		client = docker.from_env()
+		container = client.containers.get(containerId)
+		labels = container.labels
+		stack_name = labels.get('com.docker.compose.project')
+
+		if stack_name and COMPOSE_STACKS_ENABLED:
+			# Es un contenedor de stack - actualizar todo el stack
+			x = send_message(message=get_text("stack_updating", stack_name))
+			result = docker_compose_manager.update_stack(stack_name)
+			delete_message(x.message_id)
+
+			if result['success']:
+				send_message(message=get_text("stack_updated", stack_name))
+			else:
+				error_msg = get_text("stack_error_update", stack_name, result.get('stderr', result.get('error', 'Unknown error')))
+				send_message(message=error_msg)
+		else:
+			# Contenedor standalone - actualización normal
+			x = send_message(message=get_text("updating", containerName))
+			result = docker_manager.update(container_id=containerId, container_name=containerName, message=x, bot=bot)
+			delete_message(x.message_id)
+			send_message(message=result)
+	except Exception as e:
+		error(f"Error updating container {containerName}: {e}")
+		send_message(message=get_text("error_callback_processing"))
 
 def change_tag_container(containerId, containerName):
 	markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
@@ -1844,7 +2215,7 @@ def confirm_update_selected(chatId, messageId):
 	_, selected = load_update_data(chatId, messageId)
 	containersToUpdate = ""
 	for container in selected:
-		containersToUpdate += f"· <b>{container}</b>\n"
+		containersToUpdate += f"· *{container}*\n"
 	markup = InlineKeyboardMarkup(row_width = 1)
 	markup.add(InlineKeyboardButton(get_text("button_confirm_update"), callback_data=f"updateSelected|{messageId}"))
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
@@ -1897,19 +2268,19 @@ def display_containers(containers):
 	pending_updates = sum(1 for c in containers if update_available(c))
 
 	# Build summary
-	result = f"📊 <b>{get_text('containers')}:</b> {total_containers}\n"
+	result = f"📊 *{get_text('containers')}:* {total_containers}\n"
 	result += f"🟢 {get_text('status_running')}: {running_containers}\n"
 	result += f"🔴 {get_text('status_stopped')}: {stopped_containers}\n"
 	result += f"⬆️ {get_text('status_updates')}: {pending_updates}\n\n"
 
 	# Build container list
-	result += "<pre>"
+	result += "```\n"
 	for container in containers:
 		result += f"{get_status_emoji(container.status, container.name, container)} {container.name}"
 		if update_available(container):
 			result += " ⬆️"
 		result += "\n"
-	result += "</pre>"
+	result += "```"
 	return result
 
 def get_container_health_status(container):
@@ -2236,21 +2607,21 @@ def delete_message(message_id):
 	"""Elimina un mensaje usando la cola (asíncrono)"""
 	message_queue.add_message(_delete_message_direct, TELEGRAM_GROUP, message_id, wait_for_result=False)
 
-def send_message(chat_id=TELEGRAM_GROUP, message=None, reply_markup=None, parse_mode="html", disable_web_page_preview=True):
+def send_message(chat_id=TELEGRAM_GROUP, message=None, reply_markup=None, parse_mode="markdown", disable_web_page_preview=True):
 	"""Envía un mensaje usando la cola (espera resultado para obtener message_id)"""
 	return message_queue.add_message(_send_message_direct, chat_id, message, reply_markup, parse_mode, disable_web_page_preview, wait_for_result=True)
 
-def send_message_to_notification_channel(chat_id=TELEGRAM_NOTIFICATION_CHANNEL, message=None, reply_markup=None, parse_mode="html", disable_web_page_preview=True):
+def send_message_to_notification_channel(chat_id=TELEGRAM_NOTIFICATION_CHANNEL, message=None, reply_markup=None, parse_mode="markdown", disable_web_page_preview=True):
 	"""Envía un mensaje al canal de notificaciones usando la cola"""
 	if TELEGRAM_NOTIFICATION_CHANNEL is None or TELEGRAM_NOTIFICATION_CHANNEL == '':
 		return send_message(chat_id=TELEGRAM_GROUP, message=message, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
 	return send_message(chat_id=chat_id, message=message, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
 
-def send_document(chat_id=TELEGRAM_GROUP, document=None, reply_markup=None, caption=None, parse_mode="html"):
+def send_document(chat_id=TELEGRAM_GROUP, document=None, reply_markup=None, caption=None, parse_mode="markdown"):
 	"""Envía un documento usando la cola (espera resultado para obtener message_id)"""
 	return message_queue.add_message(_send_document_direct, chat_id, document, reply_markup, caption, parse_mode, wait_for_result=True)
 
-def edit_message_text(text, chat_id, message_id, parse_mode="html", reply_markup=None):
+def edit_message_text(text, chat_id, message_id, parse_mode="markdown", reply_markup=None):
 	"""Edita el texto de un mensaje usando la cola (asíncrono)"""
 	message_queue.add_message(_edit_message_text_direct, chat_id, message_id, text, parse_mode, reply_markup, wait_for_result=False)
 
@@ -2408,7 +2779,8 @@ if __name__ == '__main__':
 	schedule.demonio_schedule()
 	debug(get_text("debug_started_schedule_daemon"))
 
-	bot.set_my_commands([
+	# Build commands list
+	commands = [
 		telebot.types.BotCommand("/start", get_text("menu_start")),
 		telebot.types.BotCommand("/list", get_text("menu_list")),
 		telebot.types.BotCommand("/run", get_text("menu_run")),
@@ -2421,24 +2793,33 @@ if __name__ == '__main__':
 		telebot.types.BotCommand("/changetag", get_text("menu_change_tag")),
 		telebot.types.BotCommand("/logs", get_text("menu_logs")),
 		telebot.types.BotCommand("/logfile", get_text("menu_logfile")),
-		telebot.types.BotCommand("/schedule", get_text("menu_schedule")),
+		telebot.types.BotCommand("/schedule", get_text("menu_schedule"))
+	]
+
+	# Add stacks command if enabled
+	if COMPOSE_STACKS_ENABLED:
+		commands.append(telebot.types.BotCommand("/stacks", get_text("menu_stacks")))
+
+	commands.extend([
 		telebot.types.BotCommand("/compose", get_text("menu_compose")),
-		telebot.types.BotCommand("/prune", get_text("menu_prune")),		
+		telebot.types.BotCommand("/prune", get_text("menu_prune")),
 		telebot.types.BotCommand("/mute", get_text("menu_mute")),
 		telebot.types.BotCommand("/info", get_text("menu_info")),
 		telebot.types.BotCommand("/version", get_text("menu_version")),
 		telebot.types.BotCommand("/donate", get_text("menu_donate")),
 		telebot.types.BotCommand("/donors", get_text("menu_donors"))
-		])
+	])
+
+	bot.set_my_commands(commands)
 	delete_updater()
 	check_CONTAINER_NAME()
 	check_mute()
-	starting_message = f"🫡 <b>{CONTAINER_NAME}</b>\n{get_text('active')}"
+	starting_message = f"🫡 *{CONTAINER_NAME}\n{get_text('active')}*"
 	if CHECK_UPDATES:
 		starting_message += f"\n✅ {get_text('check_for_updates')}"
 	else:
 		starting_message += f"\n❌ {get_text('check_for_updates')}"
-	starting_message += f"\n<i>⚙️ v{VERSION}</i>"
+	starting_message += f"\n_⚙️ v{VERSION}_"
 	starting_message += f"\n{get_text('channel')}"
 	send_message(message=starting_message)
 	bot.infinity_polling(timeout=60)
