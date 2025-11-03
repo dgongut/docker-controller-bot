@@ -11,6 +11,14 @@
 ![Github last-commit](https://badgen.net/github/license/dgongut/docker-controller-bot)
 ![alt text](https://github.com/dgongut/pictures/blob/main/Docker-Controller-Bot/mockup.png)
 
+<h3 align="center">
+  ReadMe en Español
+  <span> | </span>
+  <a href="./README_EN.md">ReadMe in English</a>
+  <span> | </span>
+  <a href="https://t.me/dockercontrollerbotnews">Canal de Noticias en Telegram</a>
+</h3>
+
 Lleva el control de tus contenedores docker desde un único lugar.
 
 - ✅ Listar contenedores
@@ -317,6 +325,7 @@ Para más detalles sobre los tests, consulta [tests/README.md](tests/README.md).
 - Traducción al italiano: [zichichi](https://github.com/zichichi)
 - Traducción al catalán: [flancky](https://t.me/flancky)
 - Pruebas del Docker Login: [garanda](https://github.com/garanda21)
+- Readme en inglés: [phampyk](https://github.com/phampyk)
 
 ## ❓ Preguntas Frecuentes (FAQ)
 
