@@ -151,9 +151,9 @@ services:
 
 ### Organización de Stacks
 
-El bot soporta dos estructuras de organización:
+El bot soporta **DOS estructuras de organización flexibles** - elige la que prefieras:
 
-**Opción 1: Subdirectorios (recomendado)**
+**Opción 1: Subdirectorios** (cada stack en su propia carpeta)
 ```
 /srv/stacks/
 ├── stack1/
@@ -164,7 +164,7 @@ El bot soporta dos estructuras de organización:
     └── docker-compose.yml
 ```
 
-**Opción 2: Archivos en mismo directorio**
+**Opción 2: Archivos en mismo directorio** (todos los compose juntos)
 ```
 /srv/stacks/
 ├── docker-compose-stack1.yml
@@ -172,7 +172,17 @@ El bot soporta dos estructuras de organización:
 └── docker-compose-stack3.yml
 ```
 
-Puedes mezclar ambas opciones en el mismo directorio. El bot detectará automáticamente todos los stacks disponibles.
+**Opción 3: Mezcla de ambas** (lo que más te convenga)
+```
+/srv/stacks/
+├── pihole/
+│   └── docker-compose.yml
+├── docker-compose-nginx.yml
+└── docker-compose-redis.yml
+```
+
+✅ **Ninguna estructura es obligatoria** - el bot detecta automáticamente cualquier configuración.
+✅ Stack names are normalized to lowercase (Docker Compose standard).
 
 ### Personalización de nombres de archivos
 

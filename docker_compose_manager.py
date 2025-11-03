@@ -175,7 +175,8 @@ class DockerComposeManager:
                     if compose_file and self.validate_compose_file(compose_file):
                         stack_info = self._parse_compose_file(compose_file)
                         if stack_info:
-                            stack_info['name'] = item
+                            # Normalizar nombre a lowercase para evitar duplicados (Docker Compose usa lowercase)
+                            stack_info['name'] = item.lower()
                             stack_info['path'] = stack_path
                             stack_info['compose_file'] = compose_file
                             stack_info['source'] = 'directory'
@@ -196,7 +197,8 @@ class DockerComposeManager:
                             # Extraer nombre del stack del nombre de archivo
                             name = self._extract_stack_name_from_filename(item)
 
-                            stack_info['name'] = name if name else 'stack'
+                            # Normalizar nombre a lowercase para evitar duplicados (Docker Compose usa lowercase)
+                            stack_info['name'] = (name if name else 'stack').lower()
                             stack_info['path'] = self.stacks_dir
                             stack_info['compose_file'] = stack_path
                             stack_info['source'] = 'file'
@@ -262,7 +264,8 @@ class DockerComposeManager:
         # Combinar información
         all_stacks = []
 
-        # Añadir stacks del directorio
+        # Solo añadir stacks que tienen archivo compose en el directorio
+        # NO mostrar stacks que solo están corriendo sin archivo compose
         for name, stack in dir_stacks.items():
             if name in running_stacks:
                 stack['running'] = True
@@ -271,21 +274,6 @@ class DockerComposeManager:
                 stack['running'] = False
                 stack['containers'] = []
             all_stacks.append(stack)
-
-        # Añadir stacks corriendo que no están en el directorio
-        for name, containers in running_stacks.items():
-            if name not in dir_stacks:
-                # Si este stack contiene el bot y no está en el directorio, no lo mostramos
-                if CONTAINER_NAME and any(c.get('name') == CONTAINER_NAME for c in containers):
-                    continue
-
-                all_stacks.append({
-                    'name': name,
-                    'source': 'running',
-                    'running': True,
-                    'containers': containers,
-                    'services': [{'name': c['service']} for c in containers]
-                })
 
         return sorted(all_stacks, key=lambda x: x['name'])
 
@@ -480,7 +468,7 @@ class DockerComposeManager:
 
     def stack_start(self, stack_name: str) -> Dict:
         """
-        Inicia un stack (docker compose up -d)
+        Inicia un stack (docker compose up -d --remove-orphans)
 
         Args:
             stack_name: Nombre del stack
@@ -488,7 +476,7 @@ class DockerComposeManager:
         Returns:
             Resultado de la operación
         """
-        return self._run_compose_command(stack_name, ['up', '-d'])
+        return self._run_compose_command(stack_name, ['up', '-d', '--remove-orphans'])
 
     def stack_stop(self, stack_name: str) -> Dict:
         """
@@ -546,7 +534,7 @@ class DockerComposeManager:
         should_force_recreate = self._should_force_recreate(stack_name, force_recreate)
 
         # Construir comando
-        up_command = ['up', '-d']
+        up_command = ['up', '-d', '--remove-orphans']
         if should_force_recreate:
             up_command.append('--force-recreate')
 
