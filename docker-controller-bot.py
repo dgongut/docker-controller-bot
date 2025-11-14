@@ -18,7 +18,9 @@ from datetime import datetime
 from telebot.types import InlineKeyboardButton
 from telebot.types import InlineKeyboardMarkup
 
-VERSION = "3.9.4"
+VERSION = "3.10.0"
+
+_unmute_timer = None
 
 def debug(message):
 	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
@@ -831,58 +833,167 @@ class DockerScheduleMonitor:
 		super().__init__()
 		self.cron_file = SCHEDULE_PATH + "/" + SCHEDULE_FILE
 		self.last_run = {}
+		self._reboot_tasks_executed = set()  # Track which @reboot tasks have been executed
+		self._file_lock = threading.Lock()  # Lock for file synchronization
 		self._ensure_cron_file_exists()
+		self._execute_reboot_tasks()  # Execute @reboot tasks on startup
 
 	def _ensure_cron_file_exists(self):
 		if not os.path.exists(self.cron_file):
-			with open(self.cron_file, "w") as file:
-				pass  # Create an empty file
+			open(self.cron_file, "w").close()  # Create an empty file
 
-	def run(self):
-		while True:
-			try:
+	def _execute_reboot_tasks(self):
+		"""Execute all @reboot tasks immediately on bot startup"""
+		try:
+			with self._file_lock:
 				with open(self.cron_file, "r") as file:
 					lines = file.readlines()
+
+			for line in lines:
+				data = parse_cron_line(line)
+				if data is None:
+					continue
+
+				schedule = data.get("schedule")
+
+				# Only execute @reboot tasks
+				if schedule == "@reboot":
+					success = self._execute_action(data, line)
+					if success:
+						# Mark this task as executed (using line hash to identify it)
+						self._reboot_tasks_executed.add(short_hash(line))
+		except Exception as e:
+			error(get_text("error_reading_schedule_file", e))
+
+	def _execute_action(self, data, line=None):
+		"""
+		Execute a schedule action.
+
+		Args:
+			data: Parsed schedule data dict
+			line: Original line from schedule file (for error reporting/deletion)
+
+		Returns:
+			True if successful, False if failed
+		"""
+		try:
+			action = data.get("action")
+			container = data.get("container")
+			minutes = data.get("minutes")
+			command = data.get("command")
+			show_output = bool(data.get("show_output", "1"))
+
+			if action == "run":
+				containerId = get_container_id_by_name(container)
+				if not containerId:
+					error(get_text("error_schedule_container_not_found", container, action))
+					if line:
+						delete_line_from_file(self.cron_file, short_hash(line), self._file_lock)
+						send_message(message=get_text("error_schedule_removed_line", line.strip()))
+					return False
+				run(containerId, container)
+
+			elif action == "stop":
+				containerId = get_container_id_by_name(container)
+				if not containerId:
+					error(get_text("error_schedule_container_not_found", container, action))
+					if line:
+						delete_line_from_file(self.cron_file, short_hash(line), self._file_lock)
+						send_message(message=get_text("error_schedule_removed_line", line.strip()))
+					return False
+				stop(containerId, container)
+
+			elif action == "restart":
+				containerId = get_container_id_by_name(container)
+				if not containerId:
+					error(get_text("error_schedule_container_not_found", container, action))
+					if line:
+						delete_line_from_file(self.cron_file, short_hash(line), self._file_lock)
+						send_message(message=get_text("error_schedule_removed_line", line.strip()))
+					return False
+				restart(containerId, container)
+
+			elif action == "mute":
+				try:
+					minutes = int(minutes)
+					if minutes <= 0:
+						error(get_text("error_schedule_invalid_minutes", minutes))
+						if line:
+							delete_line_from_file(self.cron_file, short_hash(line), self._file_lock)
+							send_message(message=get_text("error_schedule_removed_line", line.strip()))
+						return False
+					mute(minutes)
+				except (ValueError, TypeError) as e:
+					error(get_text("error_schedule_invalid_minutes", minutes))
+					if line:
+						delete_line_from_file(self.cron_file, short_hash(line), self._file_lock)
+						send_message(message=get_text("error_schedule_removed_line", line.strip()))
+					return False
+
+			elif action == "exec":
+				containerId = get_container_id_by_name(container)
+				if not containerId:
+					error(get_text("error_schedule_container_not_found", container, action))
+					if line:
+						delete_line_from_file(self.cron_file, short_hash(line), self._file_lock)
+						send_message(message=get_text("error_schedule_removed_line", line.strip()))
+					return False
+				execute_command(containerId, container, command, show_output)
+
+			return True
+
+		except Exception as e:
+			error(get_text("error_schedule_execution", action, str(e)))
+			if line:
+				delete_line_from_file(self.cron_file, short_hash(line), self._file_lock)
+				send_message(message=get_text("error_schedule_removed_line", line.strip()))
+			return False
+
+	def run(self):
+		"""Main loop: check and execute scheduled tasks every minute"""
+		while True:
+			try:
+				with self._file_lock:
+					with open(self.cron_file, "r") as file:
+						lines = file.readlines()
 
 				now = datetime.now()
 				for line in lines:
 					data = parse_cron_line(line)
-					action = data.get("action")
+					if data is None:  # Skip invalid lines
+						continue
+
 					schedule = data.get("schedule")
-					container = data.get("container")
-					minutes = data.get("minutes")
-					command = data.get("command")
-					show_output = bool(data.get("show_output", "1"))
-					if schedule and action and self.should_run(schedule, now):
-						if action == "run":
-							containerId = get_container_id_by_name(container)
-							run(containerId, container)
-						elif action == "stop":
-							containerId = get_container_id_by_name(container)
-							stop(containerId, container)
-						elif action == "restart":
-							containerId = get_container_id_by_name(container)
-							restart(containerId, container)
-						elif action == "mute":
-							minutes = int(minutes)
-							mute(minutes)
-						elif action == "exec":
-							containerId = get_container_id_by_name(container)
-							if containerId:
-								execute_command(containerId, container, command, show_output)
+
+					# Skip @reboot tasks in the main loop (they're executed at startup)
+					if schedule == "@reboot":
+						continue
+
+					# Check if this task should run now
+					if self.should_run(schedule, now):
+						self._execute_action(data, line)
 			except Exception as e:
 				error(get_text("error_reading_schedule_file", e))
 			time.sleep(60)
 
 	def should_run(self, schedule, now):
-		cron = croniter(schedule, now)
-		last_execution = cron.get_prev(datetime)
-		should_run = last_execution.year == now.year and \
-					last_execution.month == now.month and \
-					last_execution.day == now.day and \
-					last_execution.hour == now.hour and \
-					last_execution.minute == now.minute
-		return should_run
+		"""
+		Check if a cron expression should run at the given time.
+
+		Note: @reboot tasks are handled separately in _execute_reboot_tasks()
+		and should not reach this method.
+		"""
+		try:
+			cron = croniter(schedule, now)
+			last_execution = cron.get_prev(datetime)
+			should_run = last_execution.year == now.year and \
+						last_execution.month == now.month and \
+						last_execution.day == now.day and \
+						last_execution.hour == now.hour and \
+						last_execution.minute == now.minute
+			return should_run
+		except Exception:
+			return False
 
 	def demonio_schedule(self):
 		try:
@@ -1027,8 +1138,14 @@ def command_controller(message):
 			empty = False
 			botones = []
 			try:
-				with open(FULL_SCHEDULE_PATH, "r") as file:
-					lines = file.readlines()
+				# Use lock for file synchronization
+				if schedule_monitor:
+					with schedule_monitor._file_lock:
+						with open(FULL_SCHEDULE_PATH, "r") as file:
+							lines = file.readlines()
+				else:
+					with open(FULL_SCHEDULE_PATH, "r") as file:
+						lines = file.readlines()
 
 				if len(lines) == 0:
 					empty = True
@@ -1045,29 +1162,32 @@ def command_controller(message):
 				markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
 				send_message(message=get_text("delete_schedule"), reply_markup=markup)
 		else: # SAVE
+			# Validate that the schedule line is not empty
+			if not full_schedule or not full_schedule.strip():
+				send_message(message=get_text("error_adding_schedule", message.text))
+				return
+
 			data = parse_cron_line(full_schedule)
 			if not data:
 				send_message(message=get_text("error_adding_schedule", message.text))
 				return
+
 			action = data.get("action")
-			schedule = data.get("schedule")
 			container = data.get("container")
-			minutes = data.get("minutes")
-			command = data.get("command")
-			if not schedule or not is_valid_cron(schedule) or not action or action not in ('run', 'stop', 'restart', 'mute', 'exec') or ('exec' in action and not command):
-				send_message(message=get_text("error_adding_schedule", message.text))
-				return
-			if 'mute' != action and not get_container_id_by_name(container):
+
+			# Validate container exists (except for 'mute' action which doesn't need a container)
+			if action != 'mute' and not get_container_id_by_name(container):
 				send_message(message=get_text("container_does_not_exist", container))
 				return
-			if 'mute' in action:
-				try:
-					int(minutes)
-				except (IndexError, ValueError):
-					send_message(message=get_text("error_use_mute_schedule"))
-					return
-			with open(FULL_SCHEDULE_PATH, "a") as file:
-				file.write(f'{full_schedule}\n')
+
+			# Save to schedule file with lock for synchronization
+			if schedule_monitor:
+				with schedule_monitor._file_lock:
+					with open(FULL_SCHEDULE_PATH, "a") as file:
+						file.write(f'{full_schedule}\n')
+			else:
+				with open(FULL_SCHEDULE_PATH, "a") as file:
+					file.write(f'{full_schedule}\n')
 			send_message(message=get_text("schedule_saved", full_schedule))
 	elif comando in ('/info', f'/info@{bot.get_me().username}'):
 		if container_id:
@@ -1344,7 +1464,10 @@ def button_controller(call):
 
 		# DELETE SCHEDULE
 		elif comando == "deleteSchedule":
-			deleted = delete_line_from_file(FULL_SCHEDULE_PATH, scheduleHash)
+			if schedule_monitor:
+				deleted = delete_line_from_file(FULL_SCHEDULE_PATH, scheduleHash, schedule_monitor._file_lock)
+			else:
+				deleted = delete_line_from_file(FULL_SCHEDULE_PATH, scheduleHash)
 			send_message(message=get_text("deleted_schedule", deleted))
 
 		# MARCAR COMO UPDATE
@@ -1671,9 +1794,17 @@ def get_temporal_file(data, fileName):
 	return fichero_temporal
 
 def mute(minutes):
+	global _unmute_timer
+
 	if minutes == 0:
 		unmute()
 		return
+
+	# Cancel any existing unmute timer
+	if _unmute_timer is not None:
+		_unmute_timer.cancel()
+		_unmute_timer = None
+
 	with open(FULL_MUTE_FILE_PATH, 'w') as mute_file:
 		mute_file.write(str(time.time() + minutes * 60))
 	debug(get_text("muted", minutes))
@@ -1682,9 +1813,17 @@ def mute(minutes):
 			send_message(message=get_text("muted_singular"))
 		else:
 			send_message(message=get_text("muted", minutes))
-	threading.Timer(minutes * 60, unmute).start()
+	_unmute_timer = threading.Timer(minutes * 60, unmute)
+	_unmute_timer.start()
 
 def unmute():
+	global _unmute_timer
+
+	# Cancel any existing unmute timer
+	if _unmute_timer is not None:
+		_unmute_timer.cancel()
+		_unmute_timer = None
+
 	with open(FULL_MUTE_FILE_PATH, 'w') as mute_file:
 		mute_file.write('0')
 	debug(get_text("unmuted"))
@@ -1697,17 +1836,24 @@ def is_muted():
 		return time.time() < mute_until
 	
 def check_mute():
+	global _unmute_timer
+
 	with open(FULL_MUTE_FILE_PATH, 'r+') as fichero:
 		mute_until = float(fichero.readline().strip())
-		
+
 		if mute_until != 0:
-			if time.time() < mute_until:
-				mute_until_seconds = mute_until - time.time()
-				threading.Timer(mute_until_seconds, unmute).start()
-			else:
+			if time.time() >= mute_until:
+				# Mute time has expired, unmute immediately
 				fichero.seek(0)
 				fichero.write('0')
 				fichero.truncate()
+				unmute()
+			else:
+				# Mute is still active, calculate remaining time and set timer (only if no timer exists)
+				if _unmute_timer is None:
+					mute_until_seconds = mute_until - time.time()
+					_unmute_timer = threading.Timer(mute_until_seconds, unmute)
+					_unmute_timer.start()
 
 def compose(containerId, containerName):
 	debug(get_text("run_command_for_container", "compose", containerName))
@@ -2278,62 +2424,167 @@ def check_CONTAINER_NAME():
 		error(get_text("error_bot_container_name"))
 		sys.exit(1)
 
-def parse_cron_line(line):
+def parse_schedule_expression(line):
+	"""
+	Parse a schedule line into schedule expression and action+params.
+
+	Supports two formats:
+	1. Special cron: @daily run container
+	2. Normal cron: 0 0 * * * run container
+
+	Returns: (schedule_expression, action, params) or (None, None, None) if invalid
+	"""
 	parts = line.strip().split()
-	if len(parts) < 6:
+
+	if not parts:
+		return None, None, None
+
+	# Check if it's a special cron expression (starts with @)
+	if parts[0].startswith("@"):
+		schedule = parts[0]
+		action_and_params = parts[1:]
+	else:
+		# Normal cron expression (5 parts: minute hour day month weekday)
+		if len(parts) < 5:
+			return None, None, None
+
+		schedule = " ".join(parts[:5])
+		action_and_params = parts[5:]
+
+	# Extract action and parameters
+	if not action_and_params:
+		return None, None, None
+
+	action = action_and_params[0].lower()
+	params = action_and_params[1:]
+
+	return schedule, action, params
+
+
+def parse_cron_line(line):
+	"""
+	Parse a complete schedule line and validate all components.
+
+	Format: [CRON_EXPRESSION] ACTION [PARAMS...]
+
+	Returns: dict with schedule, action, and parsed parameters, or None if invalid
+	"""
+	schedule, action, params = parse_schedule_expression(line)
+
+	if schedule is None or action is None:
 		return None
 
-	schedule = " ".join(parts[:5])
-	action = parts[5].lower()
-	params = parts[6:]
+	# Validate schedule expression
+	if not is_valid_cron(schedule):
+		return None
+
+	# Validate action and parameters using SCHEDULE_PATTERNS
+	if action not in SCHEDULE_PATTERNS:
+		return None  # Acción no reconocida
+
+	pattern = SCHEDULE_PATTERNS[action]
+	required_params = pattern.get("params", [])
+	validators = pattern.get("validators", {})
+
+	# Check if we have enough parameters
+	if len(params) < len(required_params):
+		return None
 
 	result = {
 		"schedule": schedule,
 		"action": action,
 	}
 
-	if action in ("run", "stop", "restart"):
-		if len(params) >= 1:
-			result["container"] = params[0]
-	elif action == "mute":
-		if len(params) >= 1:
-			result["minutes"] = params[0]
-	elif action == "exec":
-		if len(params) >= 3:
-			result["container"] = params[0]
-			if params[1] not in ("0", "1"):
-				return None # Formato inválido
-			result["show_output"] = int(params[1])
-			result["command"] = " ".join(params[2:])
+	# Parse and validate parameters
+	for i, param_name in enumerate(required_params):
+		param_value = params[i] if i < len(params) else None
+
+		if param_value is None:
+			return None
+
+		# Apply validator if exists
+		if param_name in validators:
+			validator = validators[param_name]
+			try:
+				if not validator(param_value):
+					return None
+			except Exception as e:
+				# Validator threw an exception, consider it invalid
+				error(f"Validator error for {param_name}: {str(e)}")
+				return None
+
+		# Special handling for command parameter (joins remaining params)
+		if param_name == "command":
+			result[param_name] = " ".join(params[i:])
+		# Special handling for show_output (convert to int)
+		elif param_name == "show_output":
+			try:
+				result[param_name] = int(param_value)
+			except (ValueError, TypeError):
+				return None
 		else:
-			return None  # Formato inválido
-	else:
-		result["params"] = params
+			result[param_name] = param_value
 
 	return result
 
 def is_valid_cron(cron_expression):
+	"""
+	Validate a cron expression.
+
+	Supports:
+	- Special expressions: @reboot, @daily, @hourly, etc.
+	- Normal cron: 0 0 * * *, etc.
+	"""
+	# @reboot is not a valid croniter expression, but we support it
+	if cron_expression == "@reboot":
+		return True
+
+	# Check other special cron expressions (supported by croniter)
+	if cron_expression in SPECIAL_CRON_EXPRESSIONS:
+		try:
+			croniter(cron_expression)
+			return True
+		except Exception:
+			return False
+
+	# Try to validate as normal cron expression
 	try:
 		croniter(cron_expression)
 		return True
 	except Exception:
 		return False
 
-def delete_line_from_file(file_path, hash):
+def delete_line_from_file(file_path, hash, lock=None):
 	try:
-		with open(file_path, "r") as file:
-			lines = file.readlines()
-		
-		deleted = ""
-		with open(file_path, "w") as file:
-			for line in lines:
-				if short_hash(line) != hash:
-					file.write(line)
-				else:
-					deleted = line.strip()
-		return deleted
+		# Use lock if provided (for schedule file synchronization)
+		if lock:
+			with lock:
+				with open(file_path, "r") as file:
+					lines = file.readlines()
+
+				deleted = ""
+				with open(file_path, "w") as file:
+					for line in lines:
+						if short_hash(line) != hash:
+							file.write(line)
+						else:
+							deleted = line.strip()
+				return deleted
+		else:
+			with open(file_path, "r") as file:
+				lines = file.readlines()
+
+			deleted = ""
+			with open(file_path, "w") as file:
+				for line in lines:
+					if short_hash(line) != hash:
+						file.write(line)
+					else:
+						deleted = line.strip()
+			return deleted
 	except Exception as e:
 		error(get_text("error_deleting_from_file_with_error", e))
+		return ""  # Return empty string instead of None
 
 def get_my_architecture():
 	try:
@@ -2392,6 +2643,9 @@ def get_docker_tags_from_GitHub(repo_name):
 	data = response.json()
 	return [tag['name'] for tag in data]
 
+# Global schedule monitor instance (used by /schedule command)
+schedule_monitor = None
+
 if __name__ == '__main__':
 	debug(get_text("debug_starting_bot", VERSION))
 	eventMonitor = DockerEventMonitor()
@@ -2403,9 +2657,9 @@ if __name__ == '__main__':
 		debug(get_text("debug_started_update_daemon"))
 	else:
 		debug(get_text("debug_disabled_update_daemon"))
-	
-	schedule = DockerScheduleMonitor()
-	schedule.demonio_schedule()
+
+	schedule_monitor = DockerScheduleMonitor()
+	schedule_monitor.demonio_schedule()
 	debug(get_text("debug_started_schedule_daemon"))
 
 	bot.set_my_commands([

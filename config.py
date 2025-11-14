@@ -87,3 +87,45 @@ CALL_PATTERNS = {
     "confirmRestartSelected": ["originalMessageId"],
     "restartSelected": ["originalMessageId"],
 }
+
+# SCHEDULE COMMAND PATTERNS - Define required parameters for each schedule action
+# Format: "action": {
+#     "params": ["param1", "param2", ...],  # Required parameters
+#     "validators": {"param_name": validation_function}  # Optional validators
+# }
+SCHEDULE_PATTERNS = {
+    "run": {
+        "params": ["container"],
+    },
+    "stop": {
+        "params": ["container"],
+    },
+    "restart": {
+        "params": ["container"],
+    },
+    "mute": {
+        "params": ["minutes"],
+        "validators": {
+            "minutes": lambda x: x.isdigit() and int(x) > 0,
+        },
+    },
+    "exec": {
+        "params": ["container", "show_output", "command"],
+        "validators": {
+            "show_output": lambda x: x in ("0", "1"),
+        },
+    },
+}
+
+# SPECIAL CRON EXPRESSIONS - Supported by croniter and custom
+# These are aliases that can be used instead of full cron expressions
+SPECIAL_CRON_EXPRESSIONS = [
+    "@yearly",      # Run once a year (0 0 1 1 *)
+    "@annually",    # Same as @yearly
+    "@monthly",     # Run once a month (0 0 1 * *)
+    "@weekly",      # Run once a week (0 0 * * 0)
+    "@daily",       # Run once a day (0 0 * * *)
+    "@midnight",    # Same as @daily
+    "@hourly",      # Run once an hour (0 * * * *)
+    "@reboot",      # Run at system boot (custom handling)
+]
