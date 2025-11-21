@@ -17,8 +17,9 @@ from croniter import croniter
 from datetime import datetime
 from telebot.types import InlineKeyboardButton
 from telebot.types import InlineKeyboardMarkup
+from docker_update import extract_container_config, perform_update
 
-VERSION = "3.10.0"
+VERSION = "3.10.1"
 
 _unmute_timer = None
 
@@ -236,39 +237,42 @@ class DockerManager:
 		sorted_containers = sorted(containers, key=lambda x: (0 if x.name == CONTAINER_NAME else 1, status_order.get(x.status, 6), x.name.lower()))
 		return sorted_containers
 
-	def stop_container(self, container_id, container_name):
+	def stop_container(self, container_id, container_name, from_schedule=False):
 		try:
 			if CONTAINER_NAME == container_name:
 				return get_text("error_can_not_do_that")
 			container = self.client.containers.get(container_id)
 			container.stop()
-			if is_muted():
+			# Send confirmation only for manual commands when muted
+			if from_schedule is False and is_muted():
 				send_message_to_notification_channel(message=get_text("stopped_container", container_name))
 			return None
 		except Exception as e:
 			error(get_text("error_stopping_container_with_error", container_name, e))
 			return get_text("error_stopping_container", container_name)
-		
-	def restart_container(self, container_id, container_name):
+
+	def restart_container(self, container_id, container_name, from_schedule=False):
 		try:
 			if CONTAINER_NAME == container_name:
 				return get_text("error_can_not_do_that")
 			container = self.client.containers.get(container_id)
 			container.restart()
-			if is_muted():
+			# Send confirmation only for manual commands when muted
+			if from_schedule is False and is_muted():
 				send_message_to_notification_channel(message=get_text("restarted_container", container_name))
 			return None
 		except Exception as e:
 			error(get_text("error_restarting_container_with_error", container_name, e))
 			return get_text("error_restarting_container", container_name)
 
-	def start_container(self, container_id, container_name):
+	def start_container(self, container_id, container_name, from_schedule=False):
 		try:
 			if CONTAINER_NAME == container_name:
 				return get_text("error_can_not_do_that")
 			container = self.client.containers.get(container_id)
 			container.start()
-			if is_muted():
+			# Send confirmation only for manual commands when muted
+			if from_schedule is False and is_muted():
 				send_message_to_notification_channel(message=get_text("started_container", container_name))
 			return None
 		except Exception as e:
@@ -377,8 +381,13 @@ class DockerManager:
 			return get_text("error_showing_info_container", container_name), False
 
 	def update(self, container_id, container_name, message, bot, tag=None):
+		"""
+		Update a container with a new image while preserving all configuration.
+		Uses docker_update module for the actual update logic.
+		"""
 		try:
 			if CONTAINER_NAME == container_name:
+				# Self-update: use updater container
 				if not tag:
 					container_environment = {'CONTAINER_NAME': container_name}
 				else:
@@ -394,175 +403,29 @@ class DockerManager:
 				)
 				return get_text("self_update_message")
 			else:
+				# Regular container update
 				client = self.client
 				container = client.containers.get(container_id)
-				container_attrs = container.attrs.get('Config', {})
 
-				container_command = container_attrs.get('Cmd', [])
-				container_environment = container_attrs.get('Env', [])
-				host_config = container.attrs.get('HostConfig', {})
+				# Extract all configuration from current container
+				config = extract_container_config(container, tag)
 
-				container_volumes = host_config.get('Binds', []) if host_config else []
-				container_network_mode = host_config.get('NetworkMode', None) if host_config else None
-				container_ports = host_config.get('PortBindings', {}) if host_config else {}
-				container_restart_policy = host_config.get('RestartPolicy', {}) if host_config else {}
-				container_devices = host_config.get('Devices', []) if host_config else []
-				container_labels = container_attrs.get('Labels', {})
-				container_user = container_attrs.get('User', 'root')
-
-				privileged_mode = host_config.get('Privileged', False) if host_config else False
-				tmpfs_mounts = {}
-				if host_config and 'Mounts' in host_config:
-					tmpfs_mounts = {
-						mount.get('Target'): f"size={mount.get('TmpfsOptions', {}).get('SizeBytes', 0)}"
-						for mount in host_config.get('Mounts', [])
-						if mount.get('Type') == 'tmpfs' and mount.get('TmpfsOptions', {}).get('SizeBytes')
-					}
-
-				cap_add_list = host_config.get('CapAdd', []) if host_config else []
-				runtime = host_config.get('Runtime', None) if host_config else None
-				image_with_tag = container_attrs.get('Image', '')
-
-				if tag:
-					image_with_tag = f'{image_with_tag.split(":")[0]}:{tag}'
-
-				STATES_TO_STOP = ['running', 'restarting', 'paused', 'created']
-				container_is_running = container.status in STATES_TO_STOP
-
-				network_settings = container.attrs.get('NetworkSettings', {})
-
-				ipam_config = {}
-				ipv4_address = None
-				if network_settings and container_network_mode:
-					ipam_config = network_settings.get('Networks', {}).get(container_network_mode, {}).get('IPAMConfig', {})
-					if ipam_config:
-						ipv4_address = ipam_config.get('IPv4Address', None)
-
-				debug(get_text("debug_updating_container", container_name))
-				try:
-					debug(get_text("debug_pulling_image", image_with_tag))
-					if message:
-						try:
-							edit_message_text(get_text("updating_downloading", container_name), TELEGRAM_GROUP, message.message_id)
-						except Exception as e:
-							debug(get_text("debug_edit_message_failed", container_name, e))
-
-					local_image = container.image.id
-					try:
-						debug(get_text("debug_pulling_image", image_with_tag))
-						remote_image = client.images.pull(image_with_tag)
-						if not remote_image or not remote_image.id:
-							return get_text("error_pulling_image", image_with_tag)
-					except docker.errors.ImageNotFound:
-						return get_text("error_image_not_found", image_with_tag)
-					except docker.errors.APIError as e:
-						return get_text("error_pulling_image_with_error", image_with_tag, e)
-					debug(get_text("debug_pulled_image", image_with_tag))
-					if container_is_running:
-						if message:
-							try:
-								edit_message_text(get_text("updating_stopping", container_name), TELEGRAM_GROUP, message.message_id)
-							except Exception as e:
-								debug(get_text("debug_edit_message_failed", container_name, e))
-						debug(get_text("debug_stopping_container", container_name))
-						container.stop()
-
-					try:
-						debug(get_text("debug_renaming_old_container", container_name))
-						container.rename(f'{container_name}_old')
-					except docker.errors.APIError as e:
-						error(get_text("error_renaming_container_with_error", container_name, e))
-						return get_text("error_renaming_container", container_name)
-
-					debug(get_text("debug_creating_new_container", remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]))
-					if message:
-						try:
-							edit_message_text(get_text("updating_creating", container_name), TELEGRAM_GROUP, message.message_id)
-						except Exception as e:
-							debug(get_text("debug_edit_message_failed", container_name, e))
-
-					networking_config = None
-					if ipv4_address:
-						networking_config = client.api.create_networking_config({
-							container_network_mode: client.api.create_endpoint_config(ipv4_address=ipv4_address)
-						})
-
-					new_container = client.containers.create(
-						image_with_tag,
-						name=container_name,
-						command=container_command,
-						environment=container_environment,
-						volumes=container_volumes,
-						network_mode=container_network_mode,
-						ports=container_ports,
-						restart_policy=container_restart_policy,
-						devices=container_devices,
-						labels=container_labels,
-						privileged=privileged_mode,
-						tmpfs=tmpfs_mounts,
-						cap_add=cap_add_list,
-						runtime=runtime,
-						networking_config=networking_config,
-						user=container_user,
-						detach=True
-					)
-					debug(get_text("debug_updated_container", container_name))
-
-					if container_is_running:
-						debug(get_text("debug_container_need_to_be_started"))
-						if message:
-							try:
-								edit_message_text(get_text("updating_starting", container_name), TELEGRAM_GROUP, message.message_id)
-							except Exception as e:
-								debug(get_text("debug_edit_message_failed", container_name, e))
-						new_container.start()
-
-					try:
-						debug(get_text("debug_container_deleting_old_container", container.name))
-						if message:
-							try:
-								edit_message_text(get_text("updating_deleting_old", container.name), TELEGRAM_GROUP, message.message_id)
-							except Exception as e:
-								debug(get_text("debug_edit_message_failed", container.name, e))
-						container.remove()
-					except docker.errors.APIError as e:
-						error(get_text("error_deleting_container_with_error", container.name, e))
-						debug(get_text("debug_old_container_not_deleted", container.name))
-
-					debug(get_text("debug_deleting_image", local_image.replace('sha256:', '')[:CONTAINER_ID_LENGTH]))
-					try:
-						client.images.remove(local_image)
-					except Exception as e:
-						debug(get_text("debug_image_can_not_be_deleted", container_name, e))
-
-					if image_with_tag and container_name:
-						save_container_update_status(image_with_tag, container_name, get_text("UPDATED_CONTAINER_TEXT"))
-					return get_text("updated_container", container_name)
-				except Exception as e:
-					debug(get_text("debug_rollback_update", container_name))
-					try:
-						old_container_name = f'{container_name}_old'
-						try:
-							old_container = client.containers.get(old_container_name)
-							old_container.rename(container_name)
-							# Reiniciar si estaba corriendo
-							if container_is_running:
-								old_container.start()
-							debug(get_text("debug_rollback_successful", container_name))
-						except:
-							pass
-
-						# Intentar eliminar el nuevo contenedor fallido
-						try:
-							new_container.stop()
-							new_container.remove()
-						except:
-							pass
-					except:
-						pass
-
-					error(get_text("error_creating_new_container_with_error", container_name, e))
-					return get_text("error_updating_container", container_name)
+				# Perform the update using the extracted configuration
+				result = perform_update(
+					client=client,
+					container=container,
+					config=config,
+					container_name=container_name,
+					message=message,
+					edit_message_func=edit_message_text,
+					debug_func=debug,
+					error_func=error,
+					get_text_func=get_text,
+					save_status_func=save_container_update_status,
+					container_id_length=CONTAINER_ID_LENGTH,
+					telegram_group=TELEGRAM_GROUP
+				)
+				return result
 		except Exception as e:
 			error(get_text("error_updating_container_with_error", container_name, e))
 			return get_text("error_updating_container", container_name)
@@ -891,7 +754,7 @@ class DockerScheduleMonitor:
 						delete_line_from_file(self.cron_file, short_hash(line), self._file_lock)
 						send_message(message=get_text("error_schedule_removed_line", line.strip()))
 					return False
-				run(containerId, container)
+				run(containerId, container, from_schedule=True)
 
 			elif action == "stop":
 				containerId = get_container_id_by_name(container)
@@ -901,7 +764,7 @@ class DockerScheduleMonitor:
 						delete_line_from_file(self.cron_file, short_hash(line), self._file_lock)
 						send_message(message=get_text("error_schedule_removed_line", line.strip()))
 					return False
-				stop(containerId, container)
+				stop(containerId, container, from_schedule=True)
 
 			elif action == "restart":
 				containerId = get_container_id_by_name(container)
@@ -911,7 +774,7 @@ class DockerScheduleMonitor:
 						delete_line_from_file(self.cron_file, short_hash(line), self._file_lock)
 						send_message(message=get_text("error_schedule_removed_line", line.strip()))
 					return False
-				restart(containerId, container)
+				restart(containerId, container, from_schedule=True)
 
 			elif action == "mute":
 				try:
@@ -1737,28 +1600,28 @@ def handle_text(message):
 	else:
 		pass
 
-def run(containerId, containerName):
+def run(containerId, containerName, from_schedule=False):
 	debug(get_text("run_command_for_container", "run", containerName))
 	x = send_message(message=get_text("starting", containerName))
-	result = docker_manager.start_container(container_id=containerId, container_name=containerName)
+	result = docker_manager.start_container(container_id=containerId, container_name=containerName, from_schedule=from_schedule)
 	if x:
 		delete_message(x.message_id)
 	if result:
 		send_message(message=result)
 
-def stop(containerId, containerName):
+def stop(containerId, containerName, from_schedule=False):
 	debug(get_text("run_command_for_container", "stop", containerName))
 	x = send_message(message=get_text("stopping", containerName))
-	result = docker_manager.stop_container(container_id=containerId, container_name=containerName)
+	result = docker_manager.stop_container(container_id=containerId, container_name=containerName, from_schedule=from_schedule)
 	if x:
 		delete_message(x.message_id)
 	if result:
 		send_message(message=result)
 
-def restart(containerId, containerName):
+def restart(containerId, containerName, from_schedule=False):
 	debug(get_text("run_command_for_container", "restart", containerName))
 	x = send_message(message=get_text("restarting", containerName))
-	result = docker_manager.restart_container(container_id=containerId, container_name=containerName)
+	result = docker_manager.restart_container(container_id=containerId, container_name=containerName, from_schedule=from_schedule)
 	if x:
 		delete_message(x.message_id)
 	if result:
@@ -1959,26 +1822,32 @@ def update(containerId, containerName):
 	send_message(message=result)
 
 def change_tag_container(containerId, containerName):
-	markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
-	client = docker.from_env()
-	container = client.containers.get(containerId)
-	repo = container.attrs['Config']['Image'].split(":")[0]
-	tags = get_docker_tags(repo)
-	if not tags:
-		return
+	try:
+		markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
+		client = docker.from_env()
+		container = client.containers.get(containerId)
+		repo = container.attrs['Config']['Image'].split(":")[0]
+		tags = get_docker_tags(repo)
 
-	botones = []
-	for tag in tags:
-		callback_data = f"confirmChangeTag|{containerId}|{containerName}|{tag}"
-		if len(callback_data) <= 64:
-			botones.append(InlineKeyboardButton(tag, callback_data=f"confirmChangeTag|{containerId}|{containerName}|{tag}"))
-		else:
-			warning(get_text("error_tag_name_too_long", containerName, tag))
-		
+		if not tags:
+			error(get_text("error_getting_tags", repo))
+			send_message(message=get_text("error_getting_tags", repo))
+			return
 
-	markup.add(*botones)
-	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
-	send_message(message=get_text("change_tag", containerName), reply_markup=markup)
+		botones = []
+		for tag in tags:
+			callback_data = f"confirmChangeTag|{containerId}|{containerName}|{tag}"
+			if len(callback_data) <= 64:
+				botones.append(InlineKeyboardButton(tag, callback_data=callback_data))
+			else:
+				warning(get_text("error_tag_name_too_long", containerName, tag))
+
+		markup.add(*botones)
+		markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+		send_message(message=get_text("change_tag", containerName), reply_markup=markup)
+	except Exception as e:
+		error(get_text("error_changing_tag_with_error", containerName, e))
+		send_message(message=get_text("error_changing_tag", containerName))
 
 def confirm_update(containerId, containerName):
 	markup = InlineKeyboardMarkup(row_width = 1)
@@ -2397,7 +2266,7 @@ def send_document(chat_id=TELEGRAM_GROUP, document=None, reply_markup=None, capt
 	return message_queue.add_message(_send_document_direct, chat_id, document, reply_markup, caption, parse_mode, wait_for_result=True)
 
 def edit_message_text(text, chat_id, message_id, parse_mode="html", reply_markup=None):
-	"""Edita el texto de un mensaje usando la cola (asíncrono)"""
+	"""Edita el texto de un mensaje usando la cola (asíncrono, no bloquea si falla)"""
 	message_queue.add_message(_edit_message_text_direct, chat_id, message_id, text, parse_mode, reply_markup, wait_for_result=False)
 
 def edit_message_reply_markup(chat_id, message_id, reply_markup):
@@ -2597,21 +2466,41 @@ def get_my_architecture():
 		return None
 
 def get_docker_tags(repo_name):
-	architecture = get_my_architecture()
-	if architecture is None:
-		return None
-
+	"""Get available tags for a Docker image"""
 	try:
 		if repo_name.startswith("ghcr.io/"):
-			return get_docker_tags_from_GitHub(repo_name.replace("ghcr.io/", ""))
+			debug(f"Getting tags from ghcr.io registry for {repo_name}")
+			try:
+				tags = get_docker_tags_from_ghcr(repo_name.replace("ghcr.io/", ""))
+				return tags if tags else []
+			except Exception as e:
+				error(f"Failed to get tags from ghcr.io for {repo_name}: {str(e)}")
+				return []
 		elif repo_name.startswith("lscr.io/"):
-			return get_docker_tags_from_DockerHub(repo_name.replace("lscr.io/", ""))
+			debug(f"Getting tags from DockerHub for {repo_name}")
+			try:
+				architecture = get_my_architecture()
+				if architecture is None:
+					error(f"Could not determine system architecture for {repo_name}")
+					return []
+				return get_docker_tags_from_DockerHub(repo_name.replace("lscr.io/", ""))
+			except Exception as e:
+				error(f"Failed to get tags from DockerHub for {repo_name}: {str(e)}")
+				return []
 		else:
-			return get_docker_tags_from_DockerHub(repo_name)
+			debug(f"Getting tags from DockerHub for {repo_name}")
+			try:
+				architecture = get_my_architecture()
+				if architecture is None:
+					error(f"Could not determine system architecture for {repo_name}")
+					return []
+				return get_docker_tags_from_DockerHub(repo_name)
+			except Exception as e:
+				error(f"Failed to get tags from DockerHub for {repo_name}: {str(e)}")
+				return []
 	except Exception as e:
-		error(get_text("error_getting_tags_with_error", repo_name, e))
-		send_message(message=get_text("error_getting_tags", repo_name))
-		return None
+		error(f"Failed to get tags for {repo_name}: {str(e)}")
+		return []
 
 def get_docker_tags_from_DockerHub(repo_name):
 	architecture = get_my_architecture()
@@ -2619,29 +2508,58 @@ def get_docker_tags_from_DockerHub(repo_name):
 		return []
 
 	url = f"https://hub.docker.com/v2/repositories/{repo_name}/tags?page_size=99"
-	response = requests.get(url)
-	if response.status_code != 200:
-		raise Exception(f'Error calling to {url}: {response.status_code}')
+	try:
+		response = requests.get(url, timeout=10)
+		if response.status_code == 404:
+			raise Exception(f'Repository not found: {repo_name}')
+		elif response.status_code != 200:
+			raise Exception(f'Error calling to {url}: {response.status_code}')
 
-	data = response.json()
-	tags = data.get('results', [])
-	filtered_tags = []
-	for tag in tags:
-		images = tag.get('images', [])
-		for image in images:
-			if image['architecture'] == architecture:
-				filtered_tags.append(tag['name'])
-				break
-	return filtered_tags
+		data = response.json()
+		tags = data.get('results', [])
+		filtered_tags = []
+		for tag in tags:
+			images = tag.get('images', [])
+			for image in images:
+				if image['architecture'] == architecture:
+					filtered_tags.append(tag['name'])
+					break
 
-def get_docker_tags_from_GitHub(repo_name):
-	url = f"https://api.github.com/repos/{repo_name}/tags?per_page=99"
-	response = requests.get(url)
-	if response.status_code != 200:
-		raise Exception(f'Error calling to {url}: {response.status_code}')
+		# If no tags found for this architecture, return all tags
+		if not filtered_tags and tags:
+			debug(f"No tags found for architecture {architecture} in {repo_name}, returning all tags")
+			filtered_tags = [tag['name'] for tag in tags]
 
-	data = response.json()
-	return [tag['name'] for tag in data]
+		return filtered_tags
+	except Exception as e:
+		error(f"Error getting tags from DockerHub for {repo_name}: {e}")
+		raise
+
+def get_docker_tags_from_ghcr(repo_name):
+	"""Get tags from ghcr.io using Docker Registry V2 API"""
+	try:
+		# Get auth token
+		token_url = f'https://ghcr.io/token?service=ghcr.io&scope=repository:{repo_name}:pull'
+		token = requests.get(token_url, timeout=10).json().get('token')
+		if not token:
+			return ['latest']
+
+		# Get tags
+		tags_url = f'https://ghcr.io/v2/{repo_name}/tags/list'
+		tags = requests.get(tags_url, headers={'Authorization': f'Bearer {token}'}, timeout=10).json().get('tags', [])
+
+		if not tags:
+			return ['latest']
+
+		# Sort: version tags first (newest), then others
+		version_tags = sorted([t for t in tags if t and t[0] == 'v' and any(c.isdigit() for c in t)], reverse=True)
+		other_tags = sorted([t for t in tags if t not in version_tags])
+
+		return (version_tags + other_tags)[:20]  # Limit to 20
+
+	except Exception as e:
+		error(f"Error getting tags from ghcr.io/{repo_name}: {e}")
+		return ['latest']
 
 # Global schedule monitor instance (used by /schedule command)
 schedule_monitor = None

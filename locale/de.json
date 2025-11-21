@@ -112,6 +112,8 @@
   "error_getting_donors_with_error": "Konnte die Spender nicht erreichen. Versuchen Sie es später. Fehler: [$1]",
   "error_getting_tags": "❌ Konnte Tags von <b>$1</b> nicht abrufen. Repository wird derzeit nicht unterstützt.",
   "error_getting_tags_with_error": "Fehler beim Abrufen der $1 Tags. Fehler: [$2]",
+  "error_changing_tag": "❌ Das Tag für Container <b>$1</b> konnte nicht geändert werden. Weitere Informationen finden Sie in den Bot-Protokollen.",
+  "error_changing_tag_with_error": "Fehler beim Ändern des Tags für Container $1. Fehler: [$2]",
   "error_monitor_daemon": "Es ist ein Fehler im Ereignis-Daemon aufgetreten. Neustart... Fehler: [$1]",
   "error_multiple_admin_only_with_group": "Mehrere Administratoren können nur angegeben werden, wenn sie in einer Gruppe verwendet werden (unter Verwendung der TELEGRAM_GROUP-Variable)",
   "error_prune_containers": "❌ Ein Fehler ist beim Löschen ungenutzter Container aufgetreten. Weitere Informationen findest du in den Bot-Logs.",
@@ -231,5 +233,10 @@
   "used_image": "Verwendetes Image",
   "user_not_admin": "❌ Dieser Bot gehört nicht dir.\n\nWenn du deine Docker-Container über Telegram steuern möchtest, deploye mich auf deinem Server.\n\nSchau auf <a href=\"https://hub.docker.com /r/dgongut/docker-controller-bot\">DockerHub</a> vorbei, dort findest du ein docker-compose.\n\nBist du neugierig? Der Code ist auf <a href=\"https://github.com/dgongut/docker-controller- bot\">GitHub</a> veröffentlicht.\n\nWenn du Fragen hast, frag mich, ich bin @dgongut",
   "version": "⚙️ <i>Version: $1</i>\nEntwickelt mit ❤️ von @dgongut\n\nWenn du Fehler findest oder Vorschläge hast, kontaktiere mich.\n\nAlles rund um diesen Bot findest du auf <a href=\"https://hub.docker.com/r/dgongut/docker-controller-bot\">DockerHub</a> oder auf <a href=\"https://github.com/dgongut/docker-controller-bot\">GitHub</a>.\n\nUm den News-Kanal auf Spanisch zu sehen, <a href=\"https://t.me/dockercontrollerbotnews\">klicke hier</a>.",
-  "warning_not_admin": "Benutzer $1 (@$2) ist kein Administrator und hat versucht, den Bot zu verwenden."
+  "warning_not_admin": "Benutzer $1 (@$2) ist kein Administrator und hat versucht, den Bot zu verwenden.",
+  "debug_creating_container": "Container $1 wird erstellt",
+  "debug_renaming_container": "Container $1 wird in $2 umbenannt",
+  "debug_starting_container": "Container $1 wird gestartet",
+  "updating_pulling_image": "<i>Aktualisierung</i> <b>$1</b>...\nBild wird heruntergeladen...",
+  "updating_renaming": "<i>Aktualisierung</i> <b>$1</b>...\nContainer wird umbenannt..."
 }

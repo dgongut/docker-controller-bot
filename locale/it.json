@@ -112,6 +112,8 @@
   "error_getting_donors_with_error": "Non è stato possibile ottenere i donatori. Riprova più tardi. Errore: [$1]",
   "error_getting_tags": "❌ Impossibile ottenere i tag da <b>$1</b>. Repository non supportato al momento.",
   "error_getting_tags_with_error": "Errore nell'ottenere i tag di $1. Errore: [$2]",
+  "error_changing_tag": "❌ Impossibile modificare il tag del contenitore <b>$1</b>. Consulta i log del bot per ulteriori informazioni.",
+  "error_changing_tag_with_error": "Errore nel cambio del tag del contenitore $1. Errore: [$2]",
   "error_monitor_daemon": "Si è verificato un errore nel demone eventi. Riavvio in corso... Errore: [$1]",
   "error_multiple_admin_only_with_group": "Più amministratori possono essere specificati solo se il bot viene utilizzato in un gruppo (usando la variabile TELEGRAM_GROUP)",
   "error_prune_containers": "❌ Si è verificato un errore durante l'eliminazione dei contenitori inutilizzati. Vedi i log del bot per ulteriori informazioni.",
@@ -231,5 +233,10 @@
   "used_image": "Immagine utilizzata",
   "user_not_admin": "❌ Questo bot non appartiene a te.\n\nSe vuoi controllare i tuoi contenitori Docker tramite Telegram, implementami sul tuo server.\n\nDai un'occhiata a <a href=\"https://hub.docker.com/r/dgongut/docker-controller-bot\">DockerHub</a> dove troverai un docker-compose.\n\nCurioso? Il codice è pubblicato su <a href=\"https://github.com/dgongut/docker-controller-bot\">GitHub</a>.\n\nSe hai domande, chiedi a me, sono @dgongut",
   "version": "⚙️ <i>Versione: $1</i>\nSviluppato con ❤️ da @dgongut\n\nSe trovi bug o hai suggerimenti, contattami.\n\nPuoi trovare tutto ciò che riguarda questo bot su <a href=\"https://hub.docker.com/r/dgongut/docker-controller-bot\">DockerHub</a> o su <a href=\"https://github.com/dgongut/docker-controller-bot\">GitHub</a>.\n\nPer seguire il canale delle novità in spagnolo, <a href=\"https://t.me/dockercontrollerbotnews\">clicca qui</a>.",
-  "warning_not_admin": "L'utente $1 (@$2) non è un amministratore e ha provato a utilizzare il bot."
+  "warning_not_admin": "L'utente $1 (@$2) non è un amministratore e ha provato a utilizzare il bot.",
+  "debug_creating_container": "Creazione del contenitore $1",
+  "debug_renaming_container": "Rinominazione del contenitore $1 in $2",
+  "debug_starting_container": "Avvio del contenitore $1",
+  "updating_pulling_image": "<i>Aggiornamento</i> <b>$1</b>...\nScaricamento dell'immagine...",
+  "updating_renaming": "<i>Aggiornamento</i> <b>$1</b>...\nRinominazione del contenitore..."
 }

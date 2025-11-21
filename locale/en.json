@@ -116,6 +116,8 @@
   "error_getting_donors_with_error": "An error occurred while obtaining donors. Error: [$1]",
   "error_getting_tags": "❌ Could not get tags from <b>$1</b>. Repository not supported at this time.",
   "error_getting_tags_with_error": "Error getting $1 tags. Error: [$2]",
+  "error_changing_tag": "❌ Could not change tag for container <b>$1</b>. See bot logs for more information.",
+  "error_changing_tag_with_error": "Error changing tag for container $1. Error: [$2]",
   "error_image_not_found": "❌ Image <b>$1</b> not found in registry. Check the image name.",
   "error_monitor_daemon": "An error occurred in the event daemon. Relaunching... Error: [$1]",
   "error_multiple_admin_only_with_group": "Multiple administrators can only be specified if used in a group (using the TELEGRAM_GROUP variable)",
@@ -238,5 +240,10 @@
   "used_image": "Used image",
   "user_not_admin": "❌ This bot does not belong to you.\n\nIf you want to control your docker containers via telegram deploy me on your server.\n\nTake a look at <a href=\"https://hub.docker.com /r/dgongut/docker-controller-bot\">DockerHub</a> where you will find a docker-compose. \n\nAre you curious? The code is published on <a href=\"https://github.com/dgongut/docker-controller- bot\">GitHub</a>.\n\nIf you have questions, ask me, I'm @dgongut",
   "version": "⚙️ <i>Version: $1</i>\nDeveloped with ❤️ by @dgongut\n\nIf you find any bugs or suggestions, contact me.\n\nYou can find everything related to this bot at <a href=\"https://hub.docker.com/r/dgongut/docker-controller-bot\">DockerHub</a> or on <a href=\"https://github.com/dgongut/docker-controller-bot\">GitHub</a>.\n\nTo watch the news channel in Spanish, <a href=\"https://t.me/dockercontrollerbotnews\">click here</a>.",
-  "warning_not_admin": "User $1 (@$2) is not an administrator and has tried to use the bot."
+  "warning_not_admin": "User $1 (@$2) is not an administrator and has tried to use the bot.",
+  "debug_creating_container": "Creating container $1",
+  "debug_renaming_container": "Renaming container $1 to $2",
+  "debug_starting_container": "Starting container $1",
+  "updating_pulling_image": "<i>Updating</i> <b>$1</b>...\nPulling image...",
+  "updating_renaming": "<i>Updating</i> <b>$1</b>...\nRenaming container..."
 }

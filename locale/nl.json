@@ -112,6 +112,8 @@
   "error_getting_donors_with_error": "De donateurs konden niet worden verkregen. Probeer het later opnieuw. Fout: [$1]",
   "error_getting_tags": "❌ Kon geen tags ophalen van <b>$1</b>. Repository wordt op dit moment niet ondersteund.",
   "error_getting_tags_with_error": "Fout bij het verkrijgen van $1 tags. Fout: [$2]",
+  "error_changing_tag": "❌ Kon de tag voor container <b>$1</b> niet wijzigen. Zie botlogs voor meer informatie.",
+  "error_changing_tag_with_error": "Fout bij het wijzigen van de tag voor container $1. Fout: [$2]",
   "error_monitor_daemon": "Er is een fout opgetreden in de event daemon. Opnieuw starten... Fout: [$1]",
   "error_multiple_admin_only_with_group": "Meerdere beheerders kunnen alleen worden opgegeven als ze in een groep worden gebruikt (met behulp van de variabele TELEGRAM_GROUP)",
   "error_prune_containers": "Er is een fout opgetreden bij het verwijderen van ongebruikte containers. Zie de botlogs voor meer informatie.",
@@ -231,5 +233,10 @@
   "used_image": "Gebruikte image",
   "user_not_admin": "❌ Deze bot is niet van jou.\n\nAls je je dockercontainers via Telegram wilt besturen, zet me dan op je server.\n\nKijk eens op [DockerHub] (https://hub.docker.com /r/dgongut/docker-controller-bot) waar je een docker-compose kunt vinden.\n\nBen je nieuwsgierig? De code is gepubliceerd op <a href=\"https://github.com/dgongut/docker-controller- bot\">GitHub</a>.\n\nAls je vragen hebt, stel ze me, ik ben @dgongut",
   "version": "⚙️ <i>Versie: $1</i>\nOntwikkeld met ❤️ door @dgongut\n\nAls je bugs of suggesties tegenkomt, neem dan contact met me op.\n\nJe kunt alles over deze bot vinden op <a href=\"https://hub.docker.com/r/dgongut/docker-controller-bot\">DockerHub</a> of op <a href=\"https://github.com/dgongut/docker-controller-bot\">GitHub</a>\n\nVertaald door <a href=\"https://github.com/ManCaveMedia\">ManCaveMedia</a>.\n\nAls je het nieuwskanaal in het Spaans wilt bekijken, <a href=\"https://t.me/dockercontrollerbotnews\">klik dan hier</a>.",
-  "warning_not_admin": "Gebruiker $1 (@$2) is geen beheerder en heeft geprobeerd de bot te gebruiken"
+  "warning_not_admin": "Gebruiker $1 (@$2) is geen beheerder en heeft geprobeerd de bot te gebruiken",
+  "debug_creating_container": "Container $1 wordt aangemaakt",
+  "debug_renaming_container": "Container $1 wordt hernoemd naar $2",
+  "debug_starting_container": "Container $1 wordt gestart",
+  "updating_pulling_image": "<i>Bijwerken</i> <b>$1</b>...\nAfbeelding wordt gedownload...",
+  "updating_renaming": "<i>Bijwerken</i> <b>$1</b>...\nContainer wordt hernoemd..."
 }

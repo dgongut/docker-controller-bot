@@ -116,6 +116,8 @@
   "error_getting_donors_with_error": "No s'han pogut obtenir els donants. Torna-ho a provar més tard. Error: [$1]",
   "error_getting_tags": "❌ No s'han pogut obtindre els tags de <b>$1</b>. Repositori no suportat en aquest moment.",
   "error_getting_tags_with_error": "Error al obtindre els tags de $1. Error: [$2]",
+  "error_changing_tag": "❌ No s'ha pogut canviar el tag del contenidor <b>$1</b>. Consulta els logs del bot per major informació.",
+  "error_changing_tag_with_error": "Error al canviar el tag del contenidor $1. Error: [$2]",
   "error_monitor_daemon": "S'ha produit un error en el Dimoni d'events. Rellensant... Error: [$1]",
   "error_multiple_admin_only_with_group": "Només es poden especificar varis administradors si es fa servir en un grup (utilitzant la variable TELEGRAM_GROUP)",
   "error_prune_containers": "❌ S'ha produit un error eliminant els contenidors no utilitzats. Consulta els logs del bot per major informació.",
@@ -235,5 +237,10 @@
   "used_image": "Imatge usada",
   "user_not_admin": "❌ Aquest bot no et pertany.\n\nSi vols controlar els teus contenidors Docker a través de Telegram desplegam al teu servidor.\n\nMira a <a href=\"https://hub.docker.com/r/dgongut/docker-controller-bot\">DockerHub</a> a on trobaràs un docker-compose. \n\n¿Ets curios? El codi està publicat a <a href=\"https://github.com/dgongut/docker-controller-bot\">GitHub</a>.\n\nSi tens dubtes, preguntam, sóc @dgongut",
   "version": "⚙️ <i>Versió: $1</i>\nProgramat amb ❤️ per @dgongut\n\nSi trobes qualsevol error o sugerencia contactam.\n\nPots trobar tot ho relacionat amb aquest bot a <a href=\"https://hub.docker.com/r/dgongut/docker-controller-bot\">DockerHub</a> o a <a href=\"https://github.com/dgongut/docker-controller-bot\">GitHub</a>.\n\nSi vols entrar al canal de noticies <a href=\"https://t.me/dockercontrollerbotnews\">haz click aquí</a>.",
-  "warning_not_admin": "L'suari $1 (@$2) no es un administrador y ha tractat de fer servir el bot."
+  "warning_not_admin": "L'suari $1 (@$2) no es un administrador y ha tractat de fer servir el bot.",
+  "debug_creating_container": "Creant contenidor $1",
+  "debug_renaming_container": "Renombrant contenidor $1 a $2",
+  "debug_starting_container": "Iniciant contenidor $1",
+  "updating_pulling_image": "<i>Actualitzant</i> <b>$1</b>...\nDescarregant imatge...",
+  "updating_renaming": "<i>Actualitzant</i> <b>$1</b>...\nRenombrant contenidor..."
 }

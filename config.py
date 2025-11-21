@@ -5,14 +5,14 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_ADMIN = os.environ.get("TELEGRAM_ADMIN")
 TELEGRAM_GROUP = os.environ.get("TELEGRAM_GROUP")
 TELEGRAM_NOTIFICATION_CHANNEL = os.environ.get("TELEGRAM_NOTIFICATION_CHANNEL")
-TELEGRAM_THREAD = os.environ.get("TELEGRAM_THREAD")
-CHECK_UPDATES = bool(int(os.environ.get("CHECK_UPDATES")))
-CHECK_UPDATE_EVERY_HOURS = float(os.environ.get("CHECK_UPDATE_EVERY_HOURS"))
-CHECK_UPDATE_STOPPED_CONTAINERS = bool(int(os.environ.get("CHECK_UPDATE_STOPPED_CONTAINERS")))
+TELEGRAM_THREAD = os.environ.get("TELEGRAM_THREAD", "1")
+CHECK_UPDATES = bool(int(os.environ.get("CHECK_UPDATES", "1")))
+CHECK_UPDATE_EVERY_HOURS = float(os.environ.get("CHECK_UPDATE_EVERY_HOURS", "4"))
+CHECK_UPDATE_STOPPED_CONTAINERS = bool(int(os.environ.get("CHECK_UPDATE_STOPPED_CONTAINERS", "1")))
 CONTAINER_NAME = os.environ.get("CONTAINER_NAME")
-LANGUAGE = os.environ.get("LANGUAGE")
-EXTENDED_MESSAGES = bool(int(os.environ.get("EXTENDED_MESSAGES")))
-BUTTON_COLUMNS = int(os.environ.get("BUTTON_COLUMNS"))
+LANGUAGE = os.environ.get("LANGUAGE", "ES")
+EXTENDED_MESSAGES = bool(int(os.environ.get("EXTENDED_MESSAGES", "0")))
+BUTTON_COLUMNS = int(os.environ.get("BUTTON_COLUMNS", "2"))
 
 # CONSTANTS
 UPDATER_IMAGE = "dgongut/docker-container-updater:latest"
@@ -39,6 +39,7 @@ docker_architectures = {
     "amd64": "amd64",
     "arm": "arm32v7",
     "arm64": "arm64",
+    "aarch64": "arm64",
     "ppc64le": "ppc64le",
     "s390x": "s390x",
     "unknown": "unknown",

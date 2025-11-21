@@ -112,6 +112,8 @@
   "error_getting_donors_with_error": "Non se puideron obter os doantes. Inténtao de novo máis tarde. Erro: [$1]",
   "error_getting_tags": "❌ Non se puido obter as tags de <b>$1</b>. Repositorio non soportado neste momento.",
   "error_getting_tags_with_error": "Erro ao obter as tags de $1. Erro: [$2]",
+  "error_changing_tag": "❌ Non se puido cambiar a tag do contedor <b>$1</b>. Consulta os logs do bot para mais información.",
+  "error_changing_tag_with_error": "Erro ao cambiar a tag do contedor $1. Erro: [$2]",
   "error_monitor_daemon": "Produciuse un erro no daemon de eventos. Relanzando... Erro: [$1]",
   "error_multiple_admin_only_with_group": "Só se poden especificar varios administradores se se usa nun grupo (utilizando a variable TELEGRAM_GROUP)",
   "error_prune_containers": "❌ Produciuse un erro eliminando os contedores non utilizados. Consulta os logs do bot para mais información.",
@@ -231,5 +233,10 @@
   "used_image": "Imaxe usada",
   "user_not_admin": "❌ Este bot non te pertence.\n\nSe queres controlar os teus contedores Docker a través de Telegram desprégame no teu servidor.\n\nBota unha ollada en <a href=\"https://hub.docker.com/r/dgongut/docker-controller-bot\">DockerHub</a> onde encontrarás un docker-compose. \n\nEs curioso? O código está publicado en <a href=\"https://github.com/dgongut/docker-controller-bot\">GitHub</a>.\n\nSi tes dúbidas, pregúntame, son @dgongut",
   "version": "⚙️ <i>Versión: $1</i>\nDesenvolvido con ❤️ por @dgongut\n\nSe encontras calquera fallo ou tes algunha suxestión contáctame.\n\nPodes encontrar todo o relacionado con este bot en <a href=\"https://hub.docker.com/r/dgongut/docker-controller-bot\">DockerHub</a> ou en <a href=\"https://github.com/dgongut/docker-controller-bot\">GitHub</a>.\n\nSe queres entrar á canle de novas <a href=\"https://t.me/dockercontrollerbotnews\">fai clic aquí</a>.",
-  "warning_not_admin": "O usuario $1 (@$2) non é un administrador e tratou de usar o bot."
+  "warning_not_admin": "O usuario $1 (@$2) non é un administrador e tratou de usar o bot.",
+  "debug_creating_container": "Creando contedor $1",
+  "debug_renaming_container": "Renomeando contedor $1 a $2",
+  "debug_starting_container": "Iniciando contedor $1",
+  "updating_pulling_image": "<i>Actualizando</i> <b>$1</b>...\nDescargando imaxe...",
+  "updating_renaming": "<i>Actualizando</i> <b>$1</b>...\nRenomeando contedor..."
 }

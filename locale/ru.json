@@ -112,6 +112,8 @@
   "error_getting_donors_with_error": "Не удалось получить доноров. Попробуйте позже. Ошибка: [$1]",
   "error_getting_tags": "❌ Не удалось получить теги из <b>$1</b>. Репозиторий в данный момент не поддерживается.",
   "error_getting_tags_with_error": "Ошибка получения тегов $1. Ошибка: [$2]",
+  "error_changing_tag": "❌ Не удалось изменить тег контейнера <b>$1</b>. Подробнее см. логи бота.",
+  "error_changing_tag_with_error": "Ошибка изменения тега контейнера $1. Ошибка: [$2]",
   "error_monitor_daemon": "Произошла ошибка в демоне событий. Перезапуск... Ошибка: [$1]",
   "error_multiple_admin_only_with_group": "Несколько администраторов можно указать, только если они используются в группе (с помощью переменной TELEGRAM_GROUP)",
   "error_prune_containers": "❌ Произошла ошибка при удалении неиспользуемых контейнеров. Подробнее см. логи бота.",
@@ -231,5 +233,10 @@
   "used_image": "Используемый образ",
   "user_not_admin": "❌ Этот бот вам не принадлежит.\n\nЕсли вы хотите управлять своими Docker-контейнерами через Telegram, разверните меня на своем сервере.\n\nВзгляните на <a href=\"https://hub.docker.com/r/dgongut/docker-controller-bot\">DockerHub</a>, где вы найдете docker-compose. \n\nВам интересно? Код опубликован на <a href=\"https://github.com/dgongut/docker-controller-bot\">GitHub</a>.\n\nЕсли у вас есть вопросы, спросите меня, я @dgongut",
   "version": "⚙️ <i>Версия: $1</i>\nРазработано с ❤️ от @dgongut\n\nЕсли вы обнаружите ошибки или у вас есть предложения, свяжитесь со мной.\n\nВы можете найти все, что связано с этим ботом, на <a href=\"https://hub.docker.com/r/dgongut/docker-controller-bot\">DockerHub</a> или на <a href=\"https://github.com/dgongut/docker-controller-bot\">GitHub</a>.\n\nЧтобы следить за новостями на испанском языке, <a href=\"https://t.me/dockercontrollerbotnews\">нажмите здесь</a>.",
-  "warning_not_admin": "Пользователь $1 (@$2) не является администратором и пытался использовать бота."
+  "warning_not_admin": "Пользователь $1 (@$2) не является администратором и пытался использовать бота.",
+  "debug_creating_container": "Создание контейнера $1",
+  "debug_renaming_container": "Переименование контейнера $1 в $2",
+  "debug_starting_container": "Запуск контейнера $1",
+  "updating_pulling_image": "<i>Обновление</i> <b>$1</b>...\nЗагрузка образа...",
+  "updating_renaming": "<i>Обновление</i> <b>$1</b>...\nПереименование контейнера..."
 }

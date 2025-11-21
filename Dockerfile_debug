@@ -1,18 +1,22 @@
 FROM alpine:3.21.3
 
-ENV TELEGRAM_THREAD=1
-ENV CHECK_UPDATES=1
-ENV CHECK_UPDATE_EVERY_HOURS=4
-ENV CHECK_UPDATE_STOPPED_CONTAINERS=1
-ENV BUTTON_COLUMNS=2
-ENV LANGUAGE=ES
-ENV EXTENDED_MESSAGES=0
 ENV TZ=UTC
 
 WORKDIR /app
 
-RUN apk add --no-cache python3 py3-pip tzdata 
-COPY requirements.txt /app/requirements.txt
-RUN export PIP_BREAK_SYSTEM_PACKAGES=1; pip3 install --no-cache-dir -Ur /app/requirements.txt && pip install debugpy -t /tmp
+# Install runtime dependencies and debugger
+RUN apk add --no-cache python3 py3-pip tzdata && \
+    export PIP_BREAK_SYSTEM_PACKAGES=1 && \
+    pip3 install --no-cache-dir debugpy
+
+COPY requirements.txt docker-controller-bot.py config.py docker_update.py /app/
+
+# Install application dependencies
+RUN export PIP_BREAK_SYSTEM_PACKAGES=1 && \
+    pip3 install --no-cache-dir -Ur /app/requirements.txt
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD python3 -c "import sys; sys.exit(0)" || exit 1
 
 CMD ["python3", "docker-controller-bot.py"]
