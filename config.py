@@ -20,9 +20,9 @@ UPDATER_CONTAINER_NAME = "UPDATER-Docker-Controler-Bot"
 CONTAINER_ID_LENGTH = 5
 ANONYMOUS_USER_ID = "1087968824"
 SCHEDULE_PATH = "/app/schedule"
-SCHEDULE_FILE = "schedule.txt"
+SCHEDULE_JSON_FILE = "schedules.json"
 MUTE_FILE = ".muted_until"
-FULL_SCHEDULE_PATH = f'{SCHEDULE_PATH}/{SCHEDULE_FILE}'
+FULL_SCHEDULE_JSON_PATH = f'{SCHEDULE_PATH}/{SCHEDULE_JSON_FILE}'
 FULL_MUTE_FILE_PATH = f'{SCHEDULE_PATH}/{MUTE_FILE}'
 DONORS_URL = "https://donate.dgongut.com/donors.json"
 ICON_CONTAINER_MARK_FOR_UPDATE = "➕"
@@ -87,6 +87,20 @@ CALL_PATTERNS = {
     "stopSelected": ["originalMessageId"],
     "confirmRestartSelected": ["originalMessageId"],
     "restartSelected": ["originalMessageId"],
+    "scheduleMenu": [],
+    "scheduleAdd": [],
+    "scheduleEdit": [],
+    "scheduleSelectEdit": ["action"],
+    "scheduleEditField": ["field", "scheduleId"],
+    "scheduleEditValue": ["field", "scheduleId", "value"],
+    "scheduleEditStatus": ["scheduleId"],
+    "scheduleDelete": [],
+    "scheduleSelectDelete": ["scheduleHash"],
+    "scheduleSelectToggle": ["scheduleHash"],
+    "scheduleSelectAction": ["action"],
+    "scheduleSelectContainer": ["containerIdx"],
+    "scheduleSelectShowOutput": ["action"],
+    "scheduleConfirm": [],
 }
 
 # SCHEDULE COMMAND PATTERNS - Define required parameters for each schedule action

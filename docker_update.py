@@ -6,6 +6,7 @@ while preserving all configuration, mounts, networks, and resources.
 
 import docker
 import docker.types
+import time
 
 
 def extract_container_config(container, tag=None):
@@ -173,12 +174,23 @@ def perform_update(client, container, config, container_name, message, edit_mess
 	Returns:
 		str: Success or error message
 	"""
+	new_container = None
+	old_container_name = f'{container_name}_old'
+
 	try:
-		# Pull new image
+		# Pull new image with timeout validation
 		debug_func(get_text_func("debug_pulling_image", config['image']))
 		if message:
 			edit_message_func(get_text_func("updating_pulling_image", container_name), telegram_group, message.message_id)
-		client.images.pull(config['image'])
+
+		try:
+			pulled_image = client.images.pull(config['image'])
+			if not pulled_image or not pulled_image.id:
+				raise Exception("Image pull returned invalid image object")
+			debug_func(f"Image pulled successfully: {pulled_image.id[:container_id_length]}")
+		except Exception as pull_error:
+			error_func(get_text_func("error_pulling_image", config['image'], str(pull_error)))
+			raise Exception(f"Failed to pull image {config['image']}: {pull_error}")
 
 		# Stop container
 		debug_func(get_text_func("debug_stopping_container", container_name))
@@ -187,7 +199,6 @@ def perform_update(client, container, config, container_name, message, edit_mess
 		container.stop()
 
 		# Rename to _old
-		old_container_name = f'{container_name}_old'
 		debug_func(get_text_func("debug_renaming_container", container_name, old_container_name))
 		if message:
 			edit_message_func(get_text_func("updating_renaming", container_name), telegram_group, message.message_id)
@@ -198,81 +209,125 @@ def perform_update(client, container, config, container_name, message, edit_mess
 		if message:
 			edit_message_func(get_text_func("updating_creating", container_name), telegram_group, message.message_id)
 
-		new_container = client.containers.create(
-			config['image'],
-			name=container_name,
-			command=config['command'] if config['command'] else None,
-			entrypoint=config['entrypoint'],
-			environment=config['environment'],
-			working_dir=config['working_dir'],
-			user=config['user'],
-			volumes=config['volumes'],
-			mounts=config['mounts_list'] if config['mounts_list'] else None,
-			network_mode=config['network_mode'],
-			hostname=config['hostname'],
-			domainname=config['domainname'],
-			dns=config['dns'] if config['dns'] else None,
-			dns_opt=config['dns_opt'] if config['dns_opt'] else None,
-			dns_search=config['dns_search'] if config['dns_search'] else None,
-			extra_hosts=config['extra_hosts'] if config['extra_hosts'] else None,
-			mac_address=config['mac_address'],
-			network_disabled=config['network_disabled'],
-			stdin_open=config['stdin_open'],
-			tty=config['tty'],
-			stop_signal=config['stop_signal'],
-			labels=config['labels'],
-			healthcheck=config['healthcheck'],
-			restart_policy=config['restart_policy'] if config['restart_policy'] else None,
-			cpu_quota=config['cpu_quota'],
-			cpu_period=config['cpu_period'],
-			cpu_shares=config['cpu_shares'],
-			cpuset_cpus=config['cpuset_cpus'],
-			cpuset_mems=config['cpuset_mems'],
-			mem_limit=config['mem_limit'],
-			mem_reservation=config['mem_reservation'],
-			mem_swappiness=config['mem_swappiness'],
-			memswap_limit=config['memswap_limit'],
-			kernel_memory=config['kernel_memory'],
-			oom_kill_disable=config['oom_kill_disable'],
-			oom_score_adj=config['oom_score_adj'],
-			pids_limit=config['pids_limit'],
-			privileged=config['privileged'],
-			cap_add=config['cap_add'] if config['cap_add'] else None,
-			cap_drop=config['cap_drop'] if config['cap_drop'] else None,
-			security_opt=config['security_opt'] if config['security_opt'] else None,
-			devices=config['devices'] if config['devices'] else None,
-			device_cgroup_rules=config['device_cgroup_rules'] if config['device_cgroup_rules'] else None,
-			blkio_weight=config['blkio_weight'],
-			blkio_weight_device=config['blkio_weight_device'] if config['blkio_weight_device'] else None,
-			device_read_bps=config['device_read_bps'] if config['device_read_bps'] else None,
-			device_read_iops=config['device_read_iops'] if config['device_read_iops'] else None,
-			device_write_bps=config['device_write_bps'] if config['device_write_bps'] else None,
-			device_write_iops=config['device_write_iops'] if config['device_write_iops'] else None,
-			storage_opt=config['storage_opt'] if config['storage_opt'] else None,
-			log_config=config['log_config'] if config['log_config'] else None,
-			shm_size=config['shm_size'],
-			ipc_mode=config['ipc_mode'],
-			pid_mode=config['pid_mode'],
-			uts_mode=config['uts_mode'],
-			userns_mode=config['userns_mode'],
-			cgroup_parent=config['cgroup_parent'],
-			init=config['init'],
-			read_only=config['read_only'],
-			sysctls=config['sysctls'] if config['sysctls'] else None,
-			ulimits=config['ulimits'] if config['ulimits'] else None,
-			group_add=config['group_add'] if config['group_add'] else None,
-			links=config['links'] if config['links'] else None,
-			volumes_from=config['volumes_from'] if config['volumes_from'] else None,
-			runtime=config['runtime'],
-			tmpfs=config['tmpfs_mounts'] if config['tmpfs_mounts'] else None,
-			ports=config['ports'] if config['ports'] else None,
-		)
+		try:
+			# Build networking config with IPAM if available
+			networking_config = None
+			if config['network_mode'] and (config['ipv4_address'] or config['ipv6_address']):
+				from docker.types import IPAMConfig
+				ipam_config = IPAMConfig(
+					v4_address=config['ipv4_address'],
+					v6_address=config['ipv6_address']
+				)
+				networking_config = {config['network_mode']: ipam_config}
+
+			new_container = client.containers.create(
+				config['image'],
+				name=container_name,
+				command=config['command'] if config['command'] else None,
+				entrypoint=config['entrypoint'],
+				environment=config['environment'],
+				working_dir=config['working_dir'],
+				user=config['user'],
+				volumes=config['volumes'],
+				mounts=config['mounts_list'] if config['mounts_list'] else None,
+				network_mode=config['network_mode'],
+				networking_config=networking_config,
+				hostname=config['hostname'],
+				domainname=config['domainname'],
+				dns=config['dns'] if config['dns'] else None,
+				dns_opt=config['dns_opt'] if config['dns_opt'] else None,
+				dns_search=config['dns_search'] if config['dns_search'] else None,
+				extra_hosts=config['extra_hosts'] if config['extra_hosts'] else None,
+				mac_address=config['mac_address'],
+				network_disabled=config['network_disabled'],
+				stdin_open=config['stdin_open'],
+				tty=config['tty'],
+				stop_signal=config['stop_signal'],
+				labels=config['labels'],
+				healthcheck=config['healthcheck'],
+				restart_policy=config['restart_policy'] if config['restart_policy'] else None,
+				cpu_quota=config['cpu_quota'],
+				cpu_period=config['cpu_period'],
+				cpu_shares=config['cpu_shares'],
+				cpu_rt_period=config['cpu_rt_period'],
+				cpu_rt_runtime=config['cpu_rt_runtime'],
+				cpuset_cpus=config['cpuset_cpus'],
+				cpuset_mems=config['cpuset_mems'],
+				mem_limit=config['mem_limit'],
+				mem_reservation=config['mem_reservation'],
+				mem_swappiness=config['mem_swappiness'],
+				memswap_limit=config['memswap_limit'],
+				kernel_memory=config['kernel_memory'],
+				oom_kill_disable=config['oom_kill_disable'],
+				oom_score_adj=config['oom_score_adj'],
+				pids_limit=config['pids_limit'],
+				privileged=config['privileged'],
+				cap_add=config['cap_add'] if config['cap_add'] else None,
+				cap_drop=config['cap_drop'] if config['cap_drop'] else None,
+				security_opt=config['security_opt'] if config['security_opt'] else None,
+				devices=config['devices'] if config['devices'] else None,
+				device_cgroup_rules=config['device_cgroup_rules'] if config['device_cgroup_rules'] else None,
+				blkio_weight=config['blkio_weight'],
+				blkio_weight_device=config['blkio_weight_device'] if config['blkio_weight_device'] else None,
+				device_read_bps=config['device_read_bps'] if config['device_read_bps'] else None,
+				device_read_iops=config['device_read_iops'] if config['device_read_iops'] else None,
+				device_write_bps=config['device_write_bps'] if config['device_write_bps'] else None,
+				device_write_iops=config['device_write_iops'] if config['device_write_iops'] else None,
+				storage_opt=config['storage_opt'] if config['storage_opt'] else None,
+				log_config=config['log_config'] if config['log_config'] else None,
+				shm_size=config['shm_size'],
+				ipc_mode=config['ipc_mode'],
+				pid_mode=config['pid_mode'],
+				uts_mode=config['uts_mode'],
+				userns_mode=config['userns_mode'],
+				cgroup_parent=config['cgroup_parent'],
+				cgroupns=config.get('cgroupns'),
+				init=config['init'],
+				read_only=config['read_only'],
+				sysctls=config['sysctls'] if config['sysctls'] else None,
+				ulimits=config['ulimits'] if config['ulimits'] else None,
+				group_add=config['group_add'] if config['group_add'] else None,
+				links=config['links'] if config['links'] else None,
+				volumes_from=config['volumes_from'] if config['volumes_from'] else None,
+				runtime=config['runtime'],
+				tmpfs=config['tmpfs_mounts'] if config['tmpfs_mounts'] else None,
+				ports=config['ports'] if config['ports'] else None,
+			)
+		except Exception as create_error:
+			error_func(get_text_func("error_creating_container", container_name, str(create_error)))
+			raise Exception(f"Failed to create new container: {create_error}")
 
 		# Start new container
 		debug_func(get_text_func("debug_starting_container", container_name))
 		if message:
 			edit_message_func(get_text_func("updating_starting", container_name), telegram_group, message.message_id)
-		new_container.start()
+
+		try:
+			new_container.start()
+		except Exception as start_error:
+			error_func(get_text_func("error_starting_container", container_name, str(start_error)))
+			raise Exception(f"Failed to start new container: {start_error}")
+
+		# Verify container is running
+		max_retries = 5
+		retry_count = 0
+		while retry_count < max_retries:
+			try:
+				new_container.reload()
+				if new_container.status == 'running':
+					debug_func(f"Container {container_name} is running successfully")
+					break
+				elif new_container.status in ['exited', 'dead']:
+					logs = new_container.logs().decode('utf-8', errors='ignore')[-500:]
+					raise Exception(f"Container exited immediately. Last logs: {logs}")
+				retry_count += 1
+				if retry_count < max_retries:
+					time.sleep(1)
+			except Exception as e:
+				if retry_count >= max_retries - 1:
+					raise Exception(f"Container failed to reach running state: {e}")
+				retry_count += 1
+				time.sleep(1)
 
 		# Delete old container
 		try:
@@ -296,27 +351,52 @@ def perform_update(client, container, config, container_name, message, edit_mess
 		return get_text_func("updated_container", container_name)
 
 	except Exception as e:
-		# Rollback
+		# Rollback with validation
 		debug_func(get_text_func("debug_rollback_update", container_name))
+		rollback_successful = False
+
 		try:
-			old_container_name = f'{container_name}_old'
+			# Try to restore old container
 			try:
 				old_container = client.containers.get(old_container_name)
 				old_container.rename(container_name)
+				debug_func(f"Old container renamed back to {container_name}")
+
 				if config['is_running']:
 					old_container.start()
-				debug_func(get_text_func("debug_rollback_successful", container_name))
-			except:
-				pass
+					# Verify old container started
+					time.sleep(1)
+					old_container.reload()
+					if old_container.status == 'running':
+						debug_func(get_text_func("debug_rollback_successful", container_name))
+						rollback_successful = True
+					else:
+						error_func(f"Old container failed to start after rollback. Status: {old_container.status}")
+				else:
+					rollback_successful = True
+					debug_func(f"Old container restored (was not running before)")
+			except Exception as rollback_error:
+				error_func(f"Failed to restore old container: {rollback_error}")
 
-			try:
-				new_container.stop()
-				new_container.remove()
-			except:
-				pass
-		except:
-			pass
+			# Clean up new container if it exists
+			if new_container:
+				try:
+					new_container.reload()
+					if new_container.status != 'exited':
+						new_container.stop()
+					new_container.remove()
+					debug_func(f"Failed new container {container_name} removed")
+				except Exception as cleanup_error:
+					error_func(f"Failed to clean up new container: {cleanup_error}")
+		except Exception as rollback_exception:
+			error_func(f"Critical error during rollback: {rollback_exception}")
 
-		error_func(get_text_func("error_updating_container_with_error", container_name, e))
+		# Prepare error message
+		if rollback_successful:
+			error_msg = f"Update failed but rollback successful: {str(e)}"
+		else:
+			error_msg = f"Update failed and rollback may have failed: {str(e)}"
+
+		error_func(get_text_func("error_updating_container_with_error", container_name, error_msg))
 		return get_text_func("error_updating_container", container_name)
 
