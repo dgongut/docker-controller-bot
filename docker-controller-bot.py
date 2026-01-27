@@ -18,6 +18,11 @@ from datetime import datetime, timedelta
 from telebot.types import InlineKeyboardButton
 from telebot.types import InlineKeyboardMarkup
 from docker_update import extract_container_config, perform_update
+from docker_compose_manager import (
+    ComposeDetector,
+    ComposeProjectManager,
+    ComposeProjectInfo
+)
 from schedule_manager import ScheduleManager
 from schedule_flow import (
     save_schedule_state, load_schedule_state, clear_schedule_state,
@@ -243,6 +248,7 @@ message_queue = MessageQueue(delay_between_messages=0.1, max_retries=5)
 class DockerManager:
 	def __init__(self):
 		self.client = docker.from_env()
+		self.compose_manager = ComposeProjectManager(self.client)
 
 	def list_containers(self, comando=""):
 		comando = comando.split('@', 1)[0]
@@ -263,6 +269,71 @@ class DockerManager:
 		status_order = {'running': 0, 'restarting': 1, 'paused': 2, 'exited': 3, 'created': 4, 'dead': 5}
 		sorted_containers = sorted(containers, key=lambda x: (0 if x.name == CONTAINER_NAME else 1, status_order.get(x.status, 6), x.name.lower()))
 		return sorted_containers
+
+	# ========== COMPOSE PROJECT METHODS ==========
+
+	def get_compose_projects(self):
+		"""
+		Obtiene todos los proyectos Docker Compose detectados.
+
+		Returns:
+			dict: Diccionario {project_name: ComposeProjectInfo}
+		"""
+		projects = self.compose_manager.get_all_projects()
+		debug(f"Compose detection: Found {len(projects)} project(s)")
+		for project_name, project_info in projects.items():
+			container_count = project_info.get_container_count()
+			services = ', '.join(project_info.get_service_names())
+			debug(f"  - Project '{project_name}': {container_count} container(s) [{services}]")
+		return projects
+
+	def is_compose_container(self, container):
+		"""
+		Verifica si un contenedor es parte de un proyecto Compose.
+
+		Args:
+			container: Objeto container de Docker SDK
+
+		Returns:
+			bool: True si es parte de un proyecto Compose
+		"""
+		is_compose = ComposeDetector.is_compose_container(container)
+		if is_compose:
+			project_name = ComposeDetector.get_project_name(container)
+			service_name = ComposeDetector.get_service_name(container)
+			debug(f"Container '{container.name}' is part of compose project '{project_name}' (service: {service_name})")
+		return is_compose
+
+	def get_container_project_info(self, container):
+		"""
+		Obtiene información del proyecto Compose al que pertenece un contenedor.
+
+		Args:
+			container: Objeto container de Docker SDK
+
+		Returns:
+			tuple: (project_name, service_name) o (None, None) si no es Compose
+		"""
+		if not ComposeDetector.is_compose_container(container):
+			return None, None
+
+		project_name = ComposeDetector.get_project_name(container)
+		service_name = ComposeDetector.get_service_name(container)
+		return project_name, service_name
+
+	def get_project_info(self, project_name):
+		"""
+		Obtiene información completa de un proyecto Compose.
+
+		Args:
+			project_name: Nombre del proyecto
+
+		Returns:
+			ComposeProjectInfo: Información del proyecto o None si no existe
+		"""
+		return self.compose_manager.get_project_info(project_name)
+
+	# ========== END COMPOSE PROJECT METHODS ==========
 
 	def stop_container(self, container_id, container_name, from_schedule=False):
 		try:
@@ -3532,6 +3603,15 @@ schedule_monitor = None
 
 if __name__ == '__main__':
 	debug(f"Starting bot version {VERSION}")
+
+	# Detect and log Compose projects
+	debug("Detecting Docker Compose projects...")
+	compose_projects = docker_manager.get_compose_projects()
+	if compose_projects:
+		debug(f"✅ Compose support enabled: {len(compose_projects)} project(s) detected")
+	else:
+		debug("ℹ️ No Compose projects detected (all containers are standalone)")
+
 	eventMonitor = DockerEventMonitor()
 	eventMonitor.demonio_event()
 	debug("Starting event monitor daemon")
