@@ -133,6 +133,8 @@
   "status_running": "Работает",
   "status_stopped": "Остановлено",
   "status_updates": "Обновления",
+  "status_projects": "Проекты",
+  "compose_project_containers": "$1 контейнеров",
   "stop_a_container": "🔴 Нажмите на контейнер, чтобы остановить его",
   "stopped_container": "🔴 Контейнер <b>$1</b> был <b>остановлен</b>",
   "stopping": "<i>Остановка</i> <b>$1</b>..",

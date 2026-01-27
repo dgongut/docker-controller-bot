@@ -133,6 +133,8 @@
   "status_running": "En ejecución",
   "status_stopped": "Detenido",
   "status_updates": "Actualizaciones",
+  "status_projects": "Proyectos",
+  "compose_project_containers": "$1 contenedores",
   "stop_a_container": "🔴 Pulsa en un contenedor para detenerlo",
   "stopped_container": "🔴 El contenedor <b>$1</b> se ha <b>detenido</b>",
   "stopping": "<i>Deteniendo</i> <b>$1</b>..",

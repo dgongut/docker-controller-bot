@@ -133,6 +133,8 @@
   "status_running": "En execución",
   "status_stopped": "Detido",
   "status_updates": "Actualizacións",
+  "status_projects": "Proxectos",
+  "compose_project_containers": "$1 contedores",
   "stop_a_container": "🔴 Selecciona un contedor para detelo",
   "stopped_container": "🔴 <b>detívose</b> o contedor <b>$1</b>",
   "stopping": "<i>Detendo</i> <b>$1</b>..",

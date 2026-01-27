@@ -133,6 +133,8 @@
   "status_running": "Running",
   "status_stopped": "Stopped",
   "status_updates": "Updates",
+  "status_projects": "Projects",
+  "compose_project_containers": "$1 containers",
   "stop_a_container": "🔴 Click on a container to stop it",
   "stopped_container": "🔴 Container <b>$1</b> has been <b>stopped</b>",
   "stopping": "<i>Stopping</i> <b>$1</b>..",

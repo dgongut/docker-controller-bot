@@ -30,7 +30,7 @@ from schedule_flow import (
 )
 from migrate_schedules import migrate_schedules
 
-VERSION = "3.11.1"
+VERSION = "4.0.0-FASE3"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -279,13 +279,7 @@ class DockerManager:
 		Returns:
 			dict: Diccionario {project_name: ComposeProjectInfo}
 		"""
-		projects = self.compose_manager.get_all_projects()
-		debug(f"Compose detection: Found {len(projects)} project(s)")
-		for project_name, project_info in projects.items():
-			container_count = project_info.get_container_count()
-			services = ', '.join(project_info.get_service_names())
-			debug(f"  - Project '{project_name}': {container_count} container(s) [{services}]")
-		return projects
+		return self.compose_manager.get_all_projects()
 
 	def is_compose_container(self, container):
 		"""
@@ -2962,21 +2956,88 @@ def display_containers(containers):
 	total_containers = len(containers)
 	running_containers = sum(1 for c in containers if c.status in ['running', 'restarting'])
 	stopped_containers = sum(1 for c in containers if c.status in ['exited', 'dead'])
-	pending_updates = sum(1 for c in containers if update_available(c))
 
-	# Build summary
+	# Cache update status and project info to avoid repeated calls
+	update_cache = {}  # {container.id: bool}
+	container_info_cache = {}  # {container.id: (project_name, service_name)}
+
+	# Separate containers into projects and standalone
+	project_containers = {}  # {project_name: [containers]}
+	standalone_containers = []
+	pending_updates = 0
+
+	for container in containers:
+		# Read labels directly for better performance
+		labels = container.labels or {}
+		project_name = labels.get('com.docker.compose.project')
+		service_name = labels.get('com.docker.compose.service')
+
+		# Cache the info
+		container_info_cache[container.id] = (project_name, service_name)
+
+		# Cache update status
+		has_update = update_available(container)
+		update_cache[container.id] = has_update
+		if has_update:
+			pending_updates += 1
+
+		if project_name:
+			if project_name not in project_containers:
+				project_containers[project_name] = []
+			project_containers[project_name].append(container)
+		else:
+			standalone_containers.append(container)
+
+	# Apply rule: projects with only 1 container are shown as standalone
+	single_container_projects = []
+	for project_name, project_conts in list(project_containers.items()):
+		if len(project_conts) == 1:
+			standalone_containers.extend(project_conts)
+			single_container_projects.append(project_name)
+
+	# Remove single-container projects from project_containers
+	for project_name in single_container_projects:
+		del project_containers[project_name]
+
+	# Build summary with project count
+	project_count = len(project_containers)
 	result = f"📊 <b>{get_text('containers')}:</b> {total_containers}\n"
+	if project_count > 0:
+		result += f"📦 <b>{get_text('status_projects')}:</b> {project_count}\n"
 	result += f"🟢 {get_text('status_running')}: {running_containers}\n"
 	result += f"🔴 {get_text('status_stopped')}: {stopped_containers}\n"
 	result += f"⬆️ {get_text('status_updates')}: {pending_updates}\n\n"
 
 	# Build container list
 	result += "<pre>"
-	for container in containers:
-		result += f"{get_status_emoji(container.status, container.name, container)} {container.name}"
-		if update_available(container):
-			result += " ⬆️"
-		result += "\n"
+
+	# Show multi-container projects first
+	for project_name in sorted(project_containers.keys()):
+		project_conts = project_containers[project_name]
+		container_count = len(project_conts)
+		result += f"📦 {project_name} ({get_text('compose_project_containers', container_count)})\n"
+
+		# Sort containers within project by name
+		sorted_project_conts = sorted(project_conts, key=lambda x: x.name.lower())
+		for container in sorted_project_conts:
+			# Use cached info
+			_, service_name = container_info_cache[container.id]
+			result += f"  {get_status_emoji(container.status, container.name, container)} {service_name}"
+			if update_cache[container.id]:
+				result += " ⬆️"
+			result += "\n"
+		result += "\n"  # Empty line between projects
+
+	# Show standalone containers
+	if standalone_containers:
+		# Sort standalone containers by name
+		sorted_standalone = sorted(standalone_containers, key=lambda x: x.name.lower())
+		for container in sorted_standalone:
+			result += f"🐳 {get_status_emoji(container.status, container.name, container)} {container.name}"
+			if update_cache[container.id]:
+				result += " ⬆️"
+			result += "\n"
+
 	result += "</pre>"
 	return result
 
@@ -3603,14 +3664,6 @@ schedule_monitor = None
 
 if __name__ == '__main__':
 	debug(f"Starting bot version {VERSION}")
-
-	# Detect and log Compose projects
-	debug("Detecting Docker Compose projects...")
-	compose_projects = docker_manager.get_compose_projects()
-	if compose_projects:
-		debug(f"✅ Compose support enabled: {len(compose_projects)} project(s) detected")
-	else:
-		debug("ℹ️ No Compose projects detected (all containers are standalone)")
 
 	eventMonitor = DockerEventMonitor()
 	eventMonitor.demonio_event()

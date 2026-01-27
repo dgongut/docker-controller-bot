@@ -133,6 +133,8 @@
   "status_running": "En execució",
   "status_stopped": "Aturat",
   "status_updates": "Actualitzacions",
+  "status_projects": "Projectes",
+  "compose_project_containers": "$1 contenidors",
   "stop_a_container": "🔴 Prem en un contenidor per aturar-l'ho",
   "stopped_container": "🔴 El contenidor <b>$1</b> S'ha <b>aturat</b>",
   "stopping": "<i>Aturant</i> <b>$1</b>..",
