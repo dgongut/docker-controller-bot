@@ -30,7 +30,7 @@ from schedule_flow import (
 )
 from migrate_schedules import migrate_schedules
 
-VERSION = "4.0.0-FASE9"
+VERSION = "4.0.0-FASE10"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -537,9 +537,34 @@ class DockerManager:
 					text += f"- CPU: {used_cpu}%\n\n"
 				if ("0.00 MB") not in ram:
 					text += f"- RAM: {ram}\n\n"
+
+			# Port mappings
+			port_bindings = container.attrs.get('HostConfig', {}).get('PortBindings', {})
+			if port_bindings:
+				text += f"- {get_text('ports')}:\n"
+				for container_port, host_bindings in port_bindings.items():
+					if host_bindings:
+						for host_binding in host_bindings:
+							host_ip = host_binding.get('HostIp', '0.0.0.0')
+							host_port = host_binding.get('HostPort', '')
+							# Format: 0.0.0.0:8080 -> 80/tcp
+							if host_ip == '0.0.0.0' or host_ip == '':
+								text += f"  {host_port} → {container_port}\n"
+							else:
+								text += f"  {host_ip}:{host_port} → {container_port}\n"
+				text += "\n"
+
 			text += f'- {get_text("container_id")}: {container_id}\n\n'
 			text += f'- {get_text("used_image")}:\n{image_with_tag}\n\n'
-			text += f'- {get_text("image_id")}: {container.image.id.replace("sha256:", "")[:CONTAINER_ID_LENGTH]}'
+
+			# Try to get image ID (may fail if image was deleted)
+			try:
+				image_id = container.image.id.replace("sha256:", "")[:CONTAINER_ID_LENGTH]
+				text += f'- {get_text("image_id")}: {image_id}'
+			except Exception as e:
+				debug(f"Could not get image ID for container {container_name}: [{e}]")
+				text += f'- {get_text("image_id")}: N/A'
+
 			if CHECK_UPDATES:
 				text += f"\n\n{image_status}"
 			text += "</code></pre>"
@@ -1712,7 +1737,7 @@ def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: in
 		# For exec action, go to confirmation
 		confirm_schedule_creation(user_id, state)
 
-@bot.message_handler(commands=["start", "list", "run", "stop", "restart", "delete", "exec", "checkupdate", "updateall", "changetag", "logs", "logfile", "compose", "mute", "schedule", "info", "version", "donate", "donors", "prune"])
+@bot.message_handler(commands=["start", "list", "run", "stop", "restart", "delete", "exec", "checkupdate", "updateall", "changetag", "logs", "logfile", "compose", "mute", "schedule", "info", "version", "donate", "donors", "prune", "ports"])
 def command_controller(message):
 	userId = message.from_user.id
 	comando = message.text.split(' ', 1)[0]
@@ -1836,34 +1861,48 @@ def command_controller(message):
 		if container_id:
 			log_file(container_id, container_name)
 		else:
-			markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
-			botones = []
-			containers = docker_manager.list_containers(comando=comando)
-			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name, container)} {container.name}', callback_data=f'logfile|{container.id[:CONTAINER_ID_LENGTH]}'))
+			# Get ALL containers to show projects and standalone
+			containers = docker_manager.list_containers()
+			if not containers:
+				send_message(message=get_text("no_containers_for_logs"))
+				return
 
-			markup.add(*botones)
-			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
-			# Save container cache for this message
+			# Use hierarchical keyboard (Level 1: projects + standalone containers)
+			# No project-level action for logfile (can't get logfile from whole project)
+			# Filter: show all containers (you can get logfile from any container)
+			# Don't exclude bot container for logfile (we want to see bot logfile too)
+			markup, standalone_containers = build_hierarchical_keyboard(
+				containers,
+				"Logfile",
+				None  # Don't exclude any container
+			)
 			sent_message = send_message(message=get_text("show_logsfile"), reply_markup=markup)
-			if sent_message:
-				save_container_cache(sent_message.chat.id, sent_message.message_id, containers)
+			# Save container cache for standalone containers
+			if sent_message and standalone_containers:
+				save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
 	elif comando in ('/compose', f'/compose@{bot.get_me().username}'):
 		if container_id:
 			compose(container_id, container_name)
 		else:
-			markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
-			botones = []
-			containers = docker_manager.list_containers(comando=comando)
-			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name, container)} {container.name}', callback_data=f'compose|{container.id[:CONTAINER_ID_LENGTH]}'))
+			# Get ALL containers to show projects and standalone
+			containers = docker_manager.list_containers()
+			if not containers:
+				send_message(message=get_text("error_no_containers_available"))
+				return
 
-			markup.add(*botones)
-			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
-			# Save container cache for this message
+			# Use hierarchical keyboard (Level 1: projects + standalone containers)
+			# No project-level action for compose (can't get compose file from whole project)
+			# Filter: show all containers (you can get compose file from any container)
+			# Don't exclude bot container for compose (we want to see bot compose too)
+			markup, standalone_containers = build_hierarchical_keyboard(
+				containers,
+				"Compose",
+				None  # Don't exclude any container
+			)
 			sent_message = send_message(message=get_text("show_compose"), reply_markup=markup)
-			if sent_message:
-				save_container_cache(sent_message.chat.id, sent_message.message_id, containers)
+			# Save container cache for standalone containers
+			if sent_message and standalone_containers:
+				save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
 	elif comando in ('/mute', f'/mute@{bot.get_me().username}'):
 		try:
 			minutes = int(message.text.split()[1])
@@ -1987,20 +2026,25 @@ def command_controller(message):
 		if container_id:
 			change_tag_container(container_id, container_name)
 		else:
-			markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
-			botones = []
-			containers = docker_manager.list_containers(comando=comando)
-			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name, container)} {container.name}', callback_data=f'changeTagContainer|{container.id[:CONTAINER_ID_LENGTH]}'))
+			# Get ALL containers to show projects and standalone
+			containers = docker_manager.list_containers()
+			if not containers:
+				send_message(message=get_text("error_no_containers_available"))
+				return
 
-			markup.add(*botones)
-			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
-			# Save container cache for this message
-			sent_message = send_message(message=get_text("show_change_tag"), reply_markup=markup)
-			if sent_message:
-				save_container_cache(sent_message.chat.id, sent_message.message_id, containers)
-			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
-			send_message(message=get_text("change_tag_container"), reply_markup=markup)
+			# Use hierarchical keyboard (Level 1: projects + standalone containers)
+			# No project-level action for changetag (can't change tag for whole project)
+			# Filter: show all containers (you can change tag on any container)
+			# Don't exclude bot container (we want to change bot tag too)
+			markup, standalone_containers = build_hierarchical_keyboard(
+				containers,
+				"ChangeTag",
+				None  # Don't exclude any container
+			)
+			sent_message = send_message(message=get_text("change_tag_container"), reply_markup=markup)
+			# Save container cache for standalone containers
+			if sent_message and standalone_containers:
+				save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
 	elif comando in ('/prune', f'/prune@{bot.get_me().username}'):
 			markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
 			botones = []
@@ -2025,6 +2069,9 @@ def command_controller(message):
 
 	elif comando in ('/donors', f'/donors@{bot.get_me().username}'):
 		print_donors()
+
+	elif comando in ('/ports', f'/ports@{bot.get_me().username}'):
+		show_container_ports()
 
 def parse_call_data(call_data):
 	parts = call_data.split("|")
@@ -2091,7 +2138,7 @@ def button_controller(call):
 
 	try:
 		# Don't delete message for toggle actions and hierarchical navigation
-		if comando not in ["toggleUpdate", "toggleUpdateAll", "enterRestartProject", "backToRestartLevel1", "enterRunProject", "backToRunLevel1", "enterStopProject", "backToStopLevel1", "enterDeleteProject", "backToDeleteLevel1", "confirmDeleteWholeProject", "enterExecProject", "backToExecLevel1", "enterLogsProject", "backToLogsLevel1", "enterCheckUpdateProject", "backToCheckUpdateLevel1", "enterInfoProject", "showProjectInfo", "backToInfoLevel1"]:
+		if comando not in ["toggleUpdate", "toggleUpdateAll", "enterRestartProject", "backToRestartLevel1", "enterRunProject", "backToRunLevel1", "enterStopProject", "backToStopLevel1", "enterDeleteProject", "backToDeleteLevel1", "confirmDeleteWholeProject", "enterExecProject", "backToExecLevel1", "enterLogsProject", "backToLogsLevel1", "enterCheckUpdateProject", "backToCheckUpdateLevel1", "enterInfoProject", "showProjectInfo", "backToInfoLevel1", "enterChangeTagProject", "backToChangeTagLevel1", "enterLogfileProject", "backToLogfileLevel1", "enterComposeProject", "backToComposeLevel1"]:
 			delete_message(messageId)
 
 		if call.data == "cerrar":
@@ -2189,10 +2236,16 @@ def button_controller(call):
 
 		# CHANGE_TAG_CONTAINER
 		elif comando == "confirmChangeTag":
+			# Get container name from cache or Docker
+			container = get_container_from_cache_or_docker(chatId, messageId, containerId)
+			containerName = container.name if container else "Unknown"
 			confirm_change_tag(containerId, containerName, tag)
 
 		# CHANGE_TAG
 		elif comando == "changeTag":
+			# Get container name from cache or Docker
+			container = get_container_from_cache_or_docker(chatId, messageId, containerId)
+			containerName = container.name if container else "Unknown"
 			x = send_message(message=get_text("updating", containerName))
 			result = docker_manager.update(container_id=containerId, container_name=containerName, message=x, bot=bot, tag=tag)
 			delete_message(x.message_id)
@@ -2710,6 +2763,140 @@ def button_controller(call):
 				reply_markup=markup
 			)
 
+		# ENTER LOGFILE PROJECT (Level 2: show project containers)
+		elif comando == "enterLogfileProject":
+			project_name = containerName
+			project_info = docker_manager.get_project_info(project_name)
+
+			if not project_info:
+				send_message(message=get_text("error_project_not_found", project_name))
+				return
+
+			# Build Level 2 keyboard
+			markup = InlineKeyboardMarkup(row_width=BUTTON_COLUMNS)
+			botones = []
+
+			# Add individual container buttons (sorted by service name)
+			for service_name in sorted(project_info.get_service_names()):
+				container = project_info.services[service_name]
+				status_emoji = get_status_emoji(container.status, container.name, container)
+				botones.append(
+					InlineKeyboardButton(
+						f"{status_emoji} {service_name}",
+						callback_data=f"logfile|{container.id[:CONTAINER_ID_LENGTH]}"
+					)
+				)
+
+			markup.add(*botones)
+
+			# Add back button
+			markup.add(
+				InlineKeyboardButton(
+					get_text("button_back"),
+					callback_data="backToLogfileLevel1"
+				)
+			)
+
+			# Save container cache for this project
+			save_container_cache(chatId, messageId, project_info.containers)
+
+			edit_message_text(
+				get_text("select_container_from_project", project_name),
+				chatId,
+				messageId,
+				reply_markup=markup
+			)
+
+		# BACK TO LOGFILE LEVEL 1
+		elif comando == "backToLogfileLevel1":
+			containers = docker_manager.list_containers()
+			if not containers:
+				send_message(message=get_text("no_containers_for_logs"))
+				return
+
+			# Don't exclude bot container for logfile (we want to see bot logfile too)
+			markup, standalone_containers = build_hierarchical_keyboard(
+				containers,
+				"Logfile",
+				None  # Don't exclude any container
+			)
+			# Save container cache for standalone containers
+			if standalone_containers:
+				save_container_cache(chatId, messageId, standalone_containers)
+			edit_message_text(
+				get_text("show_logsfile"),
+				chatId,
+				messageId,
+				reply_markup=markup
+			)
+
+		# ENTER COMPOSE PROJECT (Level 2: show project containers)
+		elif comando == "enterComposeProject":
+			project_name = containerName
+			project_info = docker_manager.get_project_info(project_name)
+
+			if not project_info:
+				send_message(message=get_text("error_project_not_found", project_name))
+				return
+
+			# Build Level 2 keyboard
+			markup = InlineKeyboardMarkup(row_width=BUTTON_COLUMNS)
+			botones = []
+
+			# Add individual container buttons (sorted by service name)
+			for service_name in sorted(project_info.get_service_names()):
+				container = project_info.services[service_name]
+				status_emoji = get_status_emoji(container.status, container.name, container)
+				botones.append(
+					InlineKeyboardButton(
+						f"{status_emoji} {service_name}",
+						callback_data=f"compose|{container.id[:CONTAINER_ID_LENGTH]}"
+					)
+				)
+
+			markup.add(*botones)
+
+			# Add back button
+			markup.add(
+				InlineKeyboardButton(
+					get_text("button_back"),
+					callback_data="backToComposeLevel1"
+				)
+			)
+
+			# Save container cache for this project
+			save_container_cache(chatId, messageId, project_info.containers)
+
+			edit_message_text(
+				get_text("select_container_from_project", project_name),
+				chatId,
+				messageId,
+				reply_markup=markup
+			)
+
+		# BACK TO COMPOSE LEVEL 1
+		elif comando == "backToComposeLevel1":
+			containers = docker_manager.list_containers()
+			if not containers:
+				send_message(message=get_text("error_no_containers_available"))
+				return
+
+			# Don't exclude bot container for compose (we want to see bot compose too)
+			markup, standalone_containers = build_hierarchical_keyboard(
+				containers,
+				"Compose",
+				None  # Don't exclude any container
+			)
+			# Save container cache for standalone containers
+			if standalone_containers:
+				save_container_cache(chatId, messageId, standalone_containers)
+			edit_message_text(
+				get_text("show_compose"),
+				chatId,
+				messageId,
+				reply_markup=markup
+			)
+
 		# ENTER CHECKUPDATE PROJECT (Level 2: show project containers)
 		elif comando == "enterCheckUpdateProject":
 			project_name = containerName
@@ -2871,6 +3058,73 @@ def button_controller(call):
 				reply_markup=markup
 			)
 
+		# ENTER CHANGETAG PROJECT (Level 2: show project containers)
+		elif comando == "enterChangeTagProject":
+			project_name = containerName
+			project_info = docker_manager.get_project_info(project_name)
+
+			if not project_info:
+				send_message(message=get_text("error_project_not_found", project_name))
+				return
+
+			# Build Level 2 keyboard
+			markup = InlineKeyboardMarkup(row_width=BUTTON_COLUMNS)
+			botones = []
+
+			# Add individual container buttons (sorted by service name)
+			for service_name in sorted(project_info.get_service_names()):
+				container = project_info.services[service_name]
+				status_emoji = get_status_emoji(container.status, container.name, container)
+				botones.append(
+					InlineKeyboardButton(
+						f"{status_emoji} {service_name}",
+						callback_data=f"changeTagContainer|{container.id[:CONTAINER_ID_LENGTH]}"
+					)
+				)
+
+			markup.add(*botones)
+
+			# Add back button
+			markup.add(
+				InlineKeyboardButton(
+					get_text("button_back"),
+					callback_data="backToChangeTagLevel1"
+				)
+			)
+
+			# Save container cache for project containers
+			save_container_cache(chatId, messageId, project_info.containers)
+
+			edit_message_text(
+				get_text("select_container_from_project", project_name),
+				chatId,
+				messageId,
+				reply_markup=markup
+			)
+
+		# BACK TO CHANGETAG LEVEL 1
+		elif comando == "backToChangeTagLevel1":
+			containers = docker_manager.list_containers()
+			if not containers:
+				send_message(message=get_text("error_no_containers_available"))
+				return
+
+			# Don't exclude bot container (we want to change bot tag too)
+			markup, standalone_containers = build_hierarchical_keyboard(
+				containers,
+				"ChangeTag",
+				None  # Don't exclude any container
+			)
+			# Save container cache for standalone containers
+			if standalone_containers:
+				save_container_cache(chatId, messageId, standalone_containers)
+			edit_message_text(
+				get_text("change_tag_container"),
+				chatId,
+				messageId,
+				reply_markup=markup
+			)
+
 		# CONFIRM DELETE WHOLE PROJECT (show warning)
 		elif comando == "confirmDeleteWholeProject":
 			project_name = containerName
@@ -2953,6 +3207,21 @@ def button_controller(call):
 				x = send_message(message=get_text("loading_file"))
 				send_document(document=fichero_temporal, reply_markup=markup, caption=result)
 				delete_message(x.message_id)
+
+		# PORTS CALLBACKS
+		elif comando == "generatePort":
+			# Generate a random available port
+			port = get_random_available_port()
+
+			# Build the message with the generated port
+			if port:
+				result_message = get_text("ports_generated_port", port)
+			else:
+				result_message = get_text("ports_no_available_port")
+
+			# Delete the original message and send a new one with the result
+			delete_message(messageId, chatId)
+			send_message(chat_id=chatId, message=result_message)
 
 		# SCHEDULE CALLBACKS
 		elif comando == "scheduleAdd":
@@ -3780,7 +4049,7 @@ def change_tag_container(containerId, containerName):
 
 		botones = []
 		for tag in tags:
-			callback_data = f"confirmChangeTag|{containerId}|{containerName}|{tag}"
+			callback_data = f"confirmChangeTag|{containerId}|{tag}"
 			if len(callback_data) <= 64:
 				botones.append(InlineKeyboardButton(tag, callback_data=callback_data))
 			else:
@@ -4119,6 +4388,119 @@ def get_update_emoji(containerName):
 		error(f"Could not check update: [{e}]")
 
 	return status
+
+def get_random_available_port():
+	"""
+	Generate a random available port (10000-60000) that is truly available on the system
+	Checks both Docker containers and system-level port availability
+	Returns the port number or None if no available port found
+	"""
+	import random
+	import socket
+
+	def is_port_available(port):
+		"""Check if a port is available by trying to bind to it"""
+		# Check TCP
+		try:
+			with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+				s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+				s.bind(('0.0.0.0', port))
+				return True
+		except OSError:
+			return False
+
+	# Get all ports used by containers
+	containers = docker_manager.list_containers()
+	used_ports = set()
+
+	for container in containers:
+		try:
+			# Skip containers with host network
+			network_mode = container.attrs.get('HostConfig', {}).get('NetworkMode', '')
+			if network_mode == 'host':
+				continue
+
+			# Get port bindings
+			port_bindings = container.attrs.get('HostConfig', {}).get('PortBindings', {})
+			if port_bindings:
+				for container_port, host_bindings in port_bindings.items():
+					if host_bindings:
+						for host_binding in host_bindings:
+							host_port = host_binding.get('HostPort', '')
+							if host_port:
+								try:
+									used_ports.add(int(host_port))
+								except ValueError:
+									pass
+		except Exception as e:
+			debug(f"Error getting ports from container {container.name}: {e}")
+			continue
+
+	# Try to find an available port (max 100 attempts)
+	for _ in range(100):
+		port = random.randint(10000, 60000)
+		# Check if port is not used by Docker containers AND is available on the system
+		if port not in used_ports and is_port_available(port):
+			return port
+
+	# If no port found after 100 attempts, return None
+	return None
+
+def show_container_ports():
+	"""
+	Show all ports used by containers
+	"""
+	containers = docker_manager.list_containers()
+	message_lines = []
+	host_network_containers = []
+
+	for container in containers:
+		try:
+			# Check if container uses host network
+			network_mode = container.attrs.get('HostConfig', {}).get('NetworkMode', '')
+			if network_mode == 'host':
+				host_network_containers.append(container.name)
+				continue
+
+			# Get port bindings
+			port_bindings = container.attrs.get('HostConfig', {}).get('PortBindings', {})
+			if port_bindings:
+				ports = []
+				for container_port, host_bindings in port_bindings.items():
+					if host_bindings:
+						for host_binding in host_bindings:
+							host_port = host_binding.get('HostPort', '')
+							if host_port:
+								ports.append(host_port)
+
+				if ports:
+					# Get container status
+					status = container.status
+					emoji = "🟢" if status == "running" else "🔴"
+					ports_str = ", ".join(sorted(ports, key=int))
+					message_lines.append(f"{emoji} <b>{container.name}</b>: {ports_str}")
+		except Exception as e:
+			debug(f"Error getting ports from container {container.name}: {e}")
+			continue
+
+	# Build final message
+	if message_lines:
+		message = get_text("ports_list_header") + "\n\n" + "\n".join(message_lines)
+	else:
+		message = get_text("ports_no_containers")
+
+	# Add note about host network containers
+	if host_network_containers:
+		message += "\n\n" + get_text("ports_host_network_note")
+
+	# Add inline keyboard with Generate and Close buttons
+	markup = InlineKeyboardMarkup(row_width=2)
+	markup.add(
+		InlineKeyboardButton(get_text("ports_button_generate"), callback_data="generatePort"),
+		InlineKeyboardButton(get_text("button_close"), callback_data="cerrar")
+	)
+
+	send_message(message=message, reply_markup=markup)
 
 def print_donors():
 	donors = get_array_donors_online()
@@ -4776,6 +5158,7 @@ if __name__ == '__main__':
 		telebot.types.BotCommand("/prune", get_text("menu_prune")),
 		telebot.types.BotCommand("/mute", get_text("menu_mute")),
 		telebot.types.BotCommand("/info", get_text("menu_info")),
+		telebot.types.BotCommand("/ports", get_text("menu_ports")),
 		telebot.types.BotCommand("/version", get_text("menu_version")),
 		telebot.types.BotCommand("/donate", get_text("menu_donate")),
 		telebot.types.BotCommand("/donors", get_text("menu_donors"))
