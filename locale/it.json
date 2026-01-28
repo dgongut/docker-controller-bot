@@ -20,6 +20,8 @@
   "button_restart": "🔄 - Riavvia",
   "button_restart_all": "🔄 - Riavvia tutto",
   "button_restart_project": "Riavvia progetto",
+  "button_run_project": "Avvia progetto",
+  "button_stop_project": "Ferma progetto",
   "button_back": "Indietro",
   "button_run": "🟢 - Avvia",
   "button_run_all": "🟢 - Avvia tutto",
@@ -130,7 +132,7 @@
   "show_logs": "📃 Clicca su un contenitore per vedere i suoi ultimi log",
   "show_logsfile": "📃 Clicca su un contenitore per vedere i suoi log in modalità file",
   "showing_logs": "📃 Questi sono gli ultimi log per il contenitore <b>$1</b>:\n<pre><code>$2</code></pre>",
-  "start_a_container": "🟢 Clicca su un contenitore per avviarlo",
+  "start_a_container": "🟢 Clicca su un progetto o contenitore per avviarlo",
   "started_container": "🟢 Il contenitore <b>$1</b> è stato <b>avviato</b>",
   "starting": "<i>Avvio</i> di <b>$1</b> in corso..",
   "status": "Stato",
@@ -139,7 +141,7 @@
   "status_updates": "Aggiornamenti",
   "status_projects": "Progetti",
   "compose_project_containers": "$1 contenitori",
-  "stop_a_container": "🔴 Clicca su un contenitore per arrestarlo",
+  "stop_a_container": "🔴 Clicca su un progetto o contenitore per arrestarlo",
   "stopped_container": "🔴 Il contenitore <b>$1</b> è stato <b>arrestato</b>",
   "stopping": "<i>Arresto</i> di <b>$1</b> in corso..",
   "unmuted": "🔉 Il bot invia di nuovo notifiche",
@@ -233,5 +235,9 @@
   "starting_service": "▶️ Avvio di <b>$1</b>...",
   "error_stopping_service": "❌ Errore durante l'arresto di <b>$1</b>",
   "error_starting_service": "❌ Errore durante l'avvio di <b>$1</b>",
-  "project_restarted_success": "✅ Progetto <b>$1</b> riavviato con successo"
+  "project_restarted_success": "✅ Progetto <b>$1</b> riavviato con successo",
+  "starting_project": "🔄 Avvio progetto <b>$1</b>...",
+  "project_started_success": "✅ Progetto <b>$1</b> avviato con successo",
+  "stopping_project": "🔄 Arresto progetto <b>$1</b>...",
+  "project_stopped_success": "✅ Progetto <b>$1</b> fermato con successo"
 }

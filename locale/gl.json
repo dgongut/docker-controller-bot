@@ -20,6 +20,8 @@
   "button_restart": "🔄 - Reiniciar",
   "button_restart_all": "🔄 - Reiniciar todo",
   "button_restart_project": "Reiniciar proxecto",
+  "button_run_project": "Iniciar proxecto",
+  "button_stop_project": "Parar proxecto",
   "button_back": "Volver",
   "button_run": "🟢 - Iniciar",
   "button_run_all": "🟢 - Iniciar todo",
@@ -130,7 +132,7 @@
   "show_logs": "📃 Selecciona un contedor para ver os seus últimos logs",
   "show_logsfile": "📃 Selecciona un contedor para ver os seus logs en modo ficheiro",
   "showing_logs": "📃 Istos son os últimos logs de <b>$1</b>:\n<pre><code>$2</code></pre>",
-  "start_a_container": "🟢 Selecciona un contedor para inicialo",
+  "start_a_container": "🟢 Selecciona un proxecto ou contedor para inicialo",
   "started_container": "🟢 <b>iniciouse</b> o contedor <b>$1</b>",
   "starting": "<i>Iniciando</i> <b>$1</b>..",
   "status": "Estado",
@@ -139,7 +141,7 @@
   "status_updates": "Actualizacións",
   "status_projects": "Proxectos",
   "compose_project_containers": "$1 contedores",
-  "stop_a_container": "🔴 Selecciona un contedor para detelo",
+  "stop_a_container": "🔴 Selecciona un proxecto ou contedor para detelo",
   "stopped_container": "🔴 <b>detívose</b> o contedor <b>$1</b>",
   "stopping": "<i>Detendo</i> <b>$1</b>..",
   "unmuted": "🔉 Bot volve a notificar",
@@ -233,5 +235,9 @@
   "starting_service": "▶️ Iniciando <b>$1</b>...",
   "error_stopping_service": "❌ Erro ao parar <b>$1</b>",
   "error_starting_service": "❌ Erro ao iniciar <b>$1</b>",
-  "project_restarted_success": "✅ Proxecto <b>$1</b> reiniciado correctamente"
+  "project_restarted_success": "✅ Proxecto <b>$1</b> reiniciado correctamente",
+  "starting_project": "🔄 Iniciando proxecto <b>$1</b>...",
+  "project_started_success": "✅ Proxecto <b>$1</b> iniciado correctamente",
+  "stopping_project": "🔄 Parando proxecto <b>$1</b>...",
+  "project_stopped_success": "✅ Proxecto <b>$1</b> parado correctamente"
 }

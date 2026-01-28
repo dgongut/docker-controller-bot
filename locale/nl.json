@@ -20,6 +20,8 @@
   "button_restart": "🔄 - Opnieuw starten",
   "button_restart_all": "🔄 - Alles opnieuw starten",
   "button_restart_project": "Project herstarten",
+  "button_run_project": "Project starten",
+  "button_stop_project": "Project stoppen",
   "button_back": "Terug",
   "button_run": "🟢 - Starten",
   "button_run_all": "🟢 - Alles starten",
@@ -130,7 +132,7 @@
   "show_logs": "📃 Klik op een container om de laatste logboeken te bekijken",
   "show_logsfile": "📃 Klik op een container om de logboeken in bestandsmodus te bekijken",
   "showing_logs": "📃 Dit zijn de laatste logs voor de <b>$1</b> container:\n<pre><code>$2</code></pre>",
-  "start_a_container": "🟢 Klik op een container om deze te starten",
+  "start_a_container": "🟢 Klik op een project of container om deze te starten",
   "started_container": "🟢 Container <b>$1</b> is <b>gestart</b>",
   "starting": "<b>$1</b> <i>starten</i>..",
   "status": "Status",
@@ -139,7 +141,7 @@
   "status_updates": "Updates",
   "status_projects": "Projecten",
   "compose_project_containers": "$1 containers",
-  "stop_a_container": "🔴 Klik op een container om deze te stoppen",
+  "stop_a_container": "🔴 Klik op een project of container om deze te stoppen",
   "stopped_container": "🔴 Container <b>$1</b> is <b>gestopt</b>",
   "stopping": "<b>$1</b> <i>stoppen</i>..",
   "unmuted": "🔉 Bot meldt opnieuw",
@@ -233,5 +235,9 @@
   "starting_service": "▶️ <b>$1</b> starten...",
   "error_stopping_service": "❌ Fout bij het stoppen van <b>$1</b>",
   "error_starting_service": "❌ Fout bij het starten van <b>$1</b>",
-  "project_restarted_success": "✅ Project <b>$1</b> succesvol opnieuw gestart"
+  "project_restarted_success": "✅ Project <b>$1</b> succesvol opnieuw gestart",
+  "starting_project": "🔄 Project <b>$1</b> starten...",
+  "project_started_success": "✅ Project <b>$1</b> succesvol gestart",
+  "stopping_project": "🔄 Project <b>$1</b> stoppen...",
+  "project_stopped_success": "✅ Project <b>$1</b> succesvol gestopt"
 }

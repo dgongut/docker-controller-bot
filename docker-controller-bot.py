@@ -1677,30 +1677,46 @@ def command_controller(message):
 		if container_id:
 			run(container_id, container_name)
 		else:
-			containers = docker_manager.list_containers(comando=comando)
-			container_names = [container.name for container in containers if CONTAINER_NAME != container.name]
-			if not container_names:
+			# Get ALL containers to show projects with all containers, but filter standalone to only stopped
+			containers = docker_manager.list_containers()
+			if not containers or all(c.name == CONTAINER_NAME for c in containers):
 				send_message(message=get_text("no_containers_to_start"))
 				return
 
-			markup = build_generic_keyboard(container_names, set(), 0, "Run", get_text("button_run"), get_text("button_run_all"))
-			message = send_message(message=get_text("start_a_container"), reply_markup=markup)
-			if message:
-				save_action_data(TELEGRAM_GROUP, message.message_id, "run", container_names)
+			# Use hierarchical keyboard with filters:
+			# - Standalone: only stopped/paused/exited/created
+			# - Projects: hide if ALL containers are running/restarting
+			markup, standalone_containers = build_hierarchical_keyboard(
+				containers, "Run", CONTAINER_NAME,
+				filter_standalone_status=['exited', 'stopped', 'paused', 'created'],
+				filter_projects_with_all_status=['running', 'restarting']
+			)
+			sent_message = send_message(message=get_text("start_a_container"), reply_markup=markup)
+			# Save container cache for standalone containers
+			if sent_message and standalone_containers:
+				save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
 	elif comando in ('/stop', f'/stop@{bot.get_me().username}'):
 		if container_id:
 			stop(container_id, container_name)
 		else:
-			containers = docker_manager.list_containers(comando=comando)
-			container_names = [container.name for container in containers if CONTAINER_NAME != container.name]
-			if not container_names:
+			# Get ALL containers to show projects with all containers, but filter standalone to only running
+			containers = docker_manager.list_containers()
+			if not containers or all(c.name == CONTAINER_NAME for c in containers):
 				send_message(message=get_text("no_containers_to_stop"))
 				return
 
-			markup = build_generic_keyboard(container_names, set(), 0, "Stop", get_text("button_stop"), get_text("button_stop_all"))
-			message = send_message(message=get_text("stop_a_container"), reply_markup=markup)
-			if message:
-				save_action_data(TELEGRAM_GROUP, message.message_id, "stop", container_names)
+			# Use hierarchical keyboard with filters:
+			# - Standalone: only running/restarting
+			# - Projects: hide if ALL containers are stopped/paused/exited/created
+			markup, standalone_containers = build_hierarchical_keyboard(
+				containers, "Stop", CONTAINER_NAME,
+				filter_standalone_status=['running', 'restarting'],
+				filter_projects_with_all_status=['exited', 'stopped', 'paused', 'created']
+			)
+			sent_message = send_message(message=get_text("stop_a_container"), reply_markup=markup)
+			# Save container cache for standalone containers
+			if sent_message and standalone_containers:
+				save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
 	elif comando in ('/restart', f'/restart@{bot.get_me().username}'):
 		if container_id:
 			restart(container_id, container_name)
@@ -1975,7 +1991,7 @@ def button_controller(call):
 
 	try:
 		# Don't delete message for toggle actions and hierarchical navigation
-		if comando not in ["toggleUpdate", "toggleUpdateAll", "toggleRun", "toggleRunAll", "toggleStop", "toggleStopAll", "toggleRestart", "toggleRestartAll", "enterRestartProject", "backToRestartLevel1"]:
+		if comando not in ["toggleUpdate", "toggleUpdateAll", "enterRestartProject", "backToRestartLevel1", "enterRunProject", "backToRunLevel1", "enterStopProject", "backToStopLevel1"]:
 			delete_message(messageId)
 
 		if call.data == "cerrar":
@@ -2140,143 +2156,6 @@ def button_controller(call):
 					update(container.id, container.name)
 			clear_update_data(chatId, originalMessageId)
 
-		# TOGGLE RUN
-		elif comando == "toggleRun":
-			containers, selected = load_action_data(chatId, messageId, "run")
-			if containerName in selected:
-				selected.remove(containerName)
-			else:
-				selected.add(containerName)
-			save_action_data(chatId, messageId, "run", containers, selected)
-
-			markup = build_generic_keyboard(containers, selected, messageId, "Run", get_text("button_run"), get_text("button_run_all"))
-			edit_message_reply_markup(chatId, messageId, reply_markup=markup)
-
-		# TOGGLE RUN ALL
-		elif comando == "toggleRunAll":
-			containers, selected = load_action_data(chatId, messageId, "run")
-			for container in containers:
-				if container not in selected:
-					selected.add(container)
-			save_action_data(chatId, messageId, "run", containers, selected)
-
-			markup = build_generic_keyboard(containers, selected, messageId, "Run", get_text("button_run"), get_text("button_run_all"))
-			edit_message_reply_markup(chatId, messageId, reply_markup=markup)
-
-		# CONFIRM RUN SELECTED
-		elif comando == "confirmRunSelected":
-			containers, selected = load_action_data(chatId, originalMessageId, "run")
-			containersToRun = ""
-			for container in selected:
-				containersToRun += f"· <b>{container}</b>\n"
-			markup = InlineKeyboardMarkup(row_width = 1)
-			markup.add(InlineKeyboardButton(get_text("button_run"), callback_data=f"runSelected|{originalMessageId}"))
-			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
-			send_message(message=get_text("confirm_run_selected", containersToRun), reply_markup=markup)
-
-		# RUN SELECTED
-		elif comando == "runSelected":
-			containers, selected = load_action_data(chatId, originalMessageId, "run")
-			for containerName in selected:
-				container_id = get_container_id_by_name(container_name=containerName)
-				if not container_id:
-					send_message(message=get_text("container_does_not_exist", containerName))
-					debug(f"Container {containerName} not found")
-					continue
-				run(container_id, containerName)
-			clear_action_data(chatId, originalMessageId, "run")
-
-		# TOGGLE STOP
-		elif comando == "toggleStop":
-			containers, selected = load_action_data(chatId, messageId, "stop")
-			if containerName in selected:
-				selected.remove(containerName)
-			else:
-				selected.add(containerName)
-			save_action_data(chatId, messageId, "stop", containers, selected)
-
-			markup = build_generic_keyboard(containers, selected, messageId, "Stop", get_text("button_stop"), get_text("button_stop_all"))
-			edit_message_reply_markup(chatId, messageId, reply_markup=markup)
-
-		# TOGGLE STOP ALL
-		elif comando == "toggleStopAll":
-			containers, selected = load_action_data(chatId, messageId, "stop")
-			for container in containers:
-				if container not in selected:
-					selected.add(container)
-			save_action_data(chatId, messageId, "stop", containers, selected)
-
-			markup = build_generic_keyboard(containers, selected, messageId, "Stop", get_text("button_stop"), get_text("button_stop_all"))
-			edit_message_reply_markup(chatId, messageId, reply_markup=markup)
-
-		# CONFIRM STOP SELECTED
-		elif comando == "confirmStopSelected":
-			containers, selected = load_action_data(chatId, originalMessageId, "stop")
-			containersToStop = ""
-			for container in selected:
-				containersToStop += f"· <b>{container}</b>\n"
-			markup = InlineKeyboardMarkup(row_width = 1)
-			markup.add(InlineKeyboardButton(get_text("button_stop"), callback_data=f"stopSelected|{originalMessageId}"))
-			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
-			send_message(message=get_text("confirm_stop_selected", containersToStop), reply_markup=markup)
-
-		# STOP SELECTED
-		elif comando == "stopSelected":
-			containers, selected = load_action_data(chatId, originalMessageId, "stop")
-			for containerName in selected:
-				container_id = get_container_id_by_name(container_name=containerName)
-				if not container_id:
-					send_message(message=get_text("container_does_not_exist", containerName))
-					debug(f"Container {containerName} not found")
-					continue
-				stop(container_id, containerName)
-			clear_action_data(chatId, originalMessageId, "stop")
-
-		# TOGGLE RESTART
-		elif comando == "toggleRestart":
-			containers, selected = load_action_data(chatId, messageId, "restart")
-			if containerName in selected:
-				selected.remove(containerName)
-			else:
-				selected.add(containerName)
-			save_action_data(chatId, messageId, "restart", containers, selected)
-
-			markup = build_generic_keyboard(containers, selected, messageId, "Restart", get_text("button_restart"), get_text("button_restart_all"))
-			edit_message_reply_markup(chatId, messageId, reply_markup=markup)
-
-		# TOGGLE RESTART ALL
-		elif comando == "toggleRestartAll":
-			containers, selected = load_action_data(chatId, messageId, "restart")
-			for container in containers:
-				if container not in selected:
-					selected.add(container)
-			save_action_data(chatId, messageId, "restart", containers, selected)
-
-			markup = build_generic_keyboard(containers, selected, messageId, "Restart", get_text("button_restart"), get_text("button_restart_all"))
-			edit_message_reply_markup(chatId, messageId, reply_markup=markup)
-
-		# CONFIRM RESTART SELECTED
-		elif comando == "confirmRestartSelected":
-			containers, selected = load_action_data(chatId, originalMessageId, "restart")
-			containersToRestart = ""
-			for container in selected:
-				containersToRestart += f"· <b>{container}</b>\n"
-			markup = InlineKeyboardMarkup(row_width = 1)
-			markup.add(InlineKeyboardButton(get_text("button_restart"), callback_data=f"restartSelected|{originalMessageId}"))
-			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
-			send_message(message=get_text("confirm_restart_selected", containersToRestart), reply_markup=markup)
-
-		# RESTART SELECTED
-		elif comando == "restartSelected":
-			containers, selected = load_action_data(chatId, originalMessageId, "restart")
-			for containerName in selected:
-				container_id = get_container_id_by_name(container_name=containerName)
-				if not container_id:
-					send_message(message=get_text("container_does_not_exist", containerName))
-					debug(f"Container {containerName} not found")
-					continue
-				restart(container_id, containerName)
-			clear_action_data(chatId, originalMessageId, "restart")
 
 		# ENTER RESTART PROJECT (Level 2: show project containers)
 		elif comando == "enterRestartProject":
@@ -2336,7 +2215,7 @@ def button_controller(call):
 
 		# BACK TO RESTART LEVEL 1
 		elif comando == "backToRestartLevel1":
-			containers = docker_manager.list_containers(comando="/restart")
+			containers = docker_manager.list_containers()
 			if not containers or all(c.name == CONTAINER_NAME for c in containers):
 				send_message(message=get_text("no_containers_to_restart"))
 				return
@@ -2356,6 +2235,164 @@ def button_controller(call):
 		elif comando == "restartWholeProject":
 			project_name = containerName
 			restart_compose_project(project_name)
+
+		# ENTER RUN PROJECT (Level 2: show project containers)
+		elif comando == "enterRunProject":
+			project_name = containerName
+			project_info = docker_manager.get_project_info(project_name)
+
+			if not project_info:
+				send_message(message=get_text("error_project_not_found", project_name))
+				return
+
+			# Build Level 2 keyboard
+			markup = InlineKeyboardMarkup(row_width=BUTTON_COLUMNS)
+			botones = []
+
+			# Add individual container buttons (sorted by service name)
+			for service_name in sorted(project_info.get_service_names()):
+				container = project_info.services[service_name]
+
+				# Determine status indicator
+				status_indicator = "🟢" if container.status in ['running', 'restarting'] else "🔴"
+
+				# Determine callback action based on status
+				if container.status in ['running', 'restarting']:
+					callback_action = "restart"
+				else:
+					callback_action = "run"
+
+				botones.append(
+					InlineKeyboardButton(
+						f"🐳{status_indicator} {service_name}",
+						callback_data=f"{callback_action}|{container.id[:CONTAINER_ID_LENGTH]}"
+					)
+				)
+
+			# Add container buttons to markup
+			markup.add(*botones)
+
+			# Add bottom row with "Start whole project" and "Back" buttons side by side
+			markup.add(
+				InlineKeyboardButton(
+					f"▶️ {get_text('button_run_project')}",
+					callback_data=f"runWholeProject|{project_name}"
+				),
+				InlineKeyboardButton(
+					f"⬅️ {get_text('button_back')}",
+					callback_data="backToRunLevel1"
+				)
+			)
+			# Save container cache for this message
+			save_container_cache(chatId, messageId, project_info.containers)
+			edit_message_text(
+				get_text("select_container_or_project", project_name),
+				chatId,
+				messageId,
+				reply_markup=markup
+			)
+
+		# BACK TO RUN LEVEL 1
+		elif comando == "backToRunLevel1":
+			containers = docker_manager.list_containers()
+			if not containers or all(c.name == CONTAINER_NAME for c in containers):
+				send_message(message=get_text("no_containers_to_start"))
+				return
+
+			markup, standalone_containers = build_hierarchical_keyboard(containers, "Run", CONTAINER_NAME)
+			# Save container cache for standalone containers
+			if standalone_containers:
+				save_container_cache(chatId, messageId, standalone_containers)
+			edit_message_text(
+				get_text("start_a_container"),
+				chatId,
+				messageId,
+				reply_markup=markup
+			)
+
+		# RUN WHOLE PROJECT
+		elif comando == "runWholeProject":
+			project_name = containerName
+			run_compose_project(project_name)
+
+		# ENTER STOP PROJECT (Level 2: show project containers)
+		elif comando == "enterStopProject":
+			project_name = containerName
+			project_info = docker_manager.get_project_info(project_name)
+
+			if not project_info:
+				send_message(message=get_text("error_project_not_found", project_name))
+				return
+
+			# Build Level 2 keyboard
+			markup = InlineKeyboardMarkup(row_width=BUTTON_COLUMNS)
+			botones = []
+
+			# Add individual container buttons (sorted by service name)
+			for service_name in sorted(project_info.get_service_names()):
+				container = project_info.services[service_name]
+
+				# Determine status indicator
+				status_indicator = "🟢" if container.status in ['running', 'restarting'] else "🔴"
+
+				# Determine callback action based on status
+				if container.status in ['running', 'restarting']:
+					callback_action = "stop"
+				else:
+					callback_action = "run"
+
+				botones.append(
+					InlineKeyboardButton(
+						f"🐳{status_indicator} {service_name}",
+						callback_data=f"{callback_action}|{container.id[:CONTAINER_ID_LENGTH]}"
+					)
+				)
+
+			# Add container buttons to markup
+			markup.add(*botones)
+
+			# Add bottom row with "Stop whole project" and "Back" buttons side by side
+			markup.add(
+				InlineKeyboardButton(
+					f"⏹️ {get_text('button_stop_project')}",
+					callback_data=f"stopWholeProject|{project_name}"
+				),
+				InlineKeyboardButton(
+					f"⬅️ {get_text('button_back')}",
+					callback_data="backToStopLevel1"
+				)
+			)
+			# Save container cache for this message
+			save_container_cache(chatId, messageId, project_info.containers)
+			edit_message_text(
+				get_text("select_container_or_project", project_name),
+				chatId,
+				messageId,
+				reply_markup=markup
+			)
+
+		# BACK TO STOP LEVEL 1
+		elif comando == "backToStopLevel1":
+			containers = docker_manager.list_containers()
+			if not containers or all(c.name == CONTAINER_NAME for c in containers):
+				send_message(message=get_text("no_containers_to_stop"))
+				return
+
+			markup, standalone_containers = build_hierarchical_keyboard(containers, "Stop", CONTAINER_NAME)
+			# Save container cache for standalone containers
+			if standalone_containers:
+				save_container_cache(chatId, messageId, standalone_containers)
+			edit_message_text(
+				get_text("stop_a_container"),
+				chatId,
+				messageId,
+				reply_markup=markup
+			)
+
+		# STOP WHOLE PROJECT
+		elif comando == "stopWholeProject":
+			project_name = containerName
+			stop_compose_project(project_name)
 
 		# PRUNE
 		elif comando == "prune":
@@ -2845,6 +2882,78 @@ def restart_compose_project(project_name):
 	# Mensaje final
 	send_message(message=get_text("project_restarted_success", project_name))
 
+def run_compose_project(project_name):
+	"""
+	Inicia un proyecto Docker Compose completo respetando el orden de dependencias.
+
+	Args:
+		project_name: Nombre del proyecto Compose a iniciar
+	"""
+	debug(f"Running command: run_compose_project for project {project_name}")
+
+	# Obtener información del proyecto
+	project_info = docker_manager.get_project_info(project_name)
+	if not project_info:
+		send_message(message=get_text("error_project_not_found", project_name))
+		return
+
+	# Obtener contenedores ordenados por dependencias
+	containers = project_info.containers
+	sorted_containers = docker_manager.compose_manager.sort_containers_by_dependencies(containers)
+
+	# Mensaje inicial
+	send_message(message=get_text("starting_project", project_name))
+
+	# Iniciar contenedores en orden correcto (dependencias primero)
+	for container in sorted_containers:
+		service_name = container.labels.get('com.docker.compose.service', container.name)
+		if EXTENDED_MESSAGES:
+			send_message(message=get_text("starting_service", service_name))
+		try:
+			container.start()
+		except Exception as e:
+			debug(f"Error starting {service_name}: {e}")
+			send_message(message=get_text("error_starting_service", service_name))
+
+	# Mensaje final
+	send_message(message=get_text("project_started_success", project_name))
+
+def stop_compose_project(project_name):
+	"""
+	Para un proyecto Docker Compose completo respetando el orden de dependencias.
+
+	Args:
+		project_name: Nombre del proyecto Compose a parar
+	"""
+	debug(f"Running command: stop_compose_project for project {project_name}")
+
+	# Obtener información del proyecto
+	project_info = docker_manager.get_project_info(project_name)
+	if not project_info:
+		send_message(message=get_text("error_project_not_found", project_name))
+		return
+
+	# Obtener contenedores ordenados por dependencias
+	containers = project_info.containers
+	sorted_containers = docker_manager.compose_manager.sort_containers_by_dependencies(containers)
+
+	# Mensaje inicial
+	send_message(message=get_text("stopping_project", project_name))
+
+	# Parar contenedores en orden inverso (los que dependen primero)
+	for container in reversed(sorted_containers):
+		service_name = container.labels.get('com.docker.compose.service', container.name)
+		if EXTENDED_MESSAGES:
+			send_message(message=get_text("stopping_service", service_name))
+		try:
+			container.stop(timeout=10)
+		except Exception as e:
+			debug(f"Error stopping {service_name}: {e}")
+			send_message(message=get_text("error_stopping_service", service_name))
+
+	# Mensaje final
+	send_message(message=get_text("project_stopped_success", project_name))
+
 def logs(containerId, containerName):
 	debug(f"Running command: logs for container {containerName}")
 	markup = InlineKeyboardMarkup(row_width = 1)
@@ -3113,7 +3222,7 @@ def build_generic_keyboard(container_available, selected_containers, originalMes
 	markup.add(*fixed_buttons)
 	return markup
 
-def build_hierarchical_keyboard(containers, action_type, bot_container_name):
+def build_hierarchical_keyboard(containers, action_type, bot_container_name, filter_standalone_status=None, filter_projects_with_all_status=None):
 	"""
 	Build hierarchical keyboard with Compose projects and standalone containers.
 	Level 1: Shows projects (📦) and standalone containers (🐳)
@@ -3122,6 +3231,8 @@ def build_hierarchical_keyboard(containers, action_type, bot_container_name):
 		containers: List of container objects
 		action_type: Type of action (Restart, Stop, Run)
 		bot_container_name: Name of the bot container to exclude
+		filter_standalone_status: Optional list of statuses to filter standalone containers (e.g., ['running', 'restarting'])
+		filter_projects_with_all_status: Optional list of statuses - hide projects where ALL containers have these statuses
 
 	Returns:
 		InlineKeyboardMarkup: Keyboard with projects and standalone containers
@@ -3162,6 +3273,15 @@ def build_hierarchical_keyboard(containers, action_type, bot_container_name):
 
 	# Add project buttons (sorted)
 	for project_name in sorted(project_containers.keys()):
+		# Apply project filter if specified (hide projects where ALL containers have the specified statuses)
+		if filter_projects_with_all_status:
+			project_info = docker_manager.get_project_info(project_name)
+			if project_info:
+				all_containers = project_info.containers
+				# Check if ALL containers in the project have one of the filtered statuses
+				if all_containers and all(c.status in filter_projects_with_all_status for c in all_containers):
+					continue  # Skip this project
+
 		# Get real container count from project (not filtered by status)
 		project_info = docker_manager.get_project_info(project_name)
 		container_count = project_info.get_container_count() if project_info else len(project_containers[project_name])
@@ -3174,18 +3294,22 @@ def build_hierarchical_keyboard(containers, action_type, bot_container_name):
 
 	# Add standalone container buttons (sorted) with status indicators
 	for container in sorted(standalone_containers, key=lambda x: x.name.lower()):
+		# Apply status filter if specified (only for standalone containers)
+		if filter_standalone_status and container.status not in filter_standalone_status:
+			continue
+
 		# Get status emoji
 		status_emoji = get_status_emoji(container.status, container.name, container)
 
 		# Determine callback action based on status
 		if container.status in ['running', 'restarting']:
-			callback_action = action_type.lower()  # restart
+			callback_action = action_type.lower()  # restart/stop
 		else:
 			callback_action = "run"  # start stopped containers
 
 		botones.append(
 			InlineKeyboardButton(
-				f"{status_emoji} {container.name}",
+				f"🐳 {status_emoji} {container.name}",
 				callback_data=f"{callback_action}|{container.id[:CONTAINER_ID_LENGTH]}"
 			)
 		)

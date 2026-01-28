@@ -20,6 +20,8 @@
   "button_restart": "🔄 - Neu starten",
   "button_restart_all": "🔄 - Alles neu starten",
   "button_restart_project": "Projekt neu starten",
+  "button_run_project": "Projekt starten",
+  "button_stop_project": "Projekt stoppen",
   "button_back": "Zurück",
   "button_run": "🟢 - Starten",
   "button_run_all": "🟢 - Alles starten",
@@ -130,7 +132,7 @@
   "show_logs": "📃 Klicke auf einen Container, um dessen letzte Logs anzuzeigen",
   "show_logsfile": "📃 Klicke auf einen Container, um dessen Logs im Dateiformat anzuzeigen",
   "showing_logs": "📃 Dies sind die neuesten Logs für den Container <b>$1</b>:\n<pre><code>$2</code></pre>",
-  "start_a_container": "🟢 Klicke auf einen Container, um ihn zu starten",
+  "start_a_container": "🟢 Klicke auf ein Projekt oder einen Container, um ihn zu starten",
   "started_container": "🟢 Container <b>$1</b> wurde <b>gestartet</b>",
   "starting": "<i>Starte</i> <b>$1</b>..",
   "status": "Status",
@@ -139,7 +141,7 @@
   "status_updates": "Updates",
   "status_projects": "Projekte",
   "compose_project_containers": "$1 Container",
-  "stop_a_container": "🔴 Klicke auf einen Container, um ihn zu stoppen",
+  "stop_a_container": "🔴 Klicke auf ein Projekt oder einen Container, um ihn zu stoppen",
   "stopped_container": "🔴 Container <b>$1</b> wurde <b>gestoppt</b>",
   "stopping": "<i>Stoppe</i> <b>$1</b>..",
   "unmuted": "🔉 Bot sendet wieder Benachrichtigungen",
@@ -233,5 +235,9 @@
   "starting_service": "▶️ <b>$1</b> wird gestartet...",
   "error_stopping_service": "❌ Fehler beim Stoppen von <b>$1</b>",
   "error_starting_service": "❌ Fehler beim Starten von <b>$1</b>",
-  "project_restarted_success": "✅ Projekt <b>$1</b> erfolgreich neu gestartet"
+  "project_restarted_success": "✅ Projekt <b>$1</b> erfolgreich neu gestartet",
+  "starting_project": "🔄 Projekt <b>$1</b> wird gestartet...",
+  "project_started_success": "✅ Projekt <b>$1</b> erfolgreich gestartet",
+  "stopping_project": "🔄 Projekt <b>$1</b> wird gestoppt...",
+  "project_stopped_success": "✅ Projekt <b>$1</b> erfolgreich gestoppt"
 }

@@ -20,6 +20,8 @@
   "button_restart": "🔄 - Restart",
   "button_restart_all": "🔄 - Restart all",
   "button_restart_project": "Restart project",
+  "button_run_project": "Start project",
+  "button_stop_project": "Stop project",
   "button_back": "Back",
   "button_run": "🟢 - Start",
   "button_run_all": "🟢 - Start all",
@@ -130,7 +132,7 @@
   "show_logs": "📃 Click on a container to see its latest logs",
   "show_logsfile": "📃 Click on a container to see its logs in file mode",
   "showing_logs": "📃 These are the latest logs for <b>$1</b> container:\n<pre><code>$2</code></pre>",
-  "start_a_container": "🟢 Click on a container to start it",
+  "start_a_container": "🟢 Click on a project or container to start it",
   "started_container": "🟢 Container <b>$1</b> has been <b>started</b>",
   "starting": "<i>Starting</i> <b>$1</b>..",
   "status": "Status",
@@ -139,7 +141,7 @@
   "status_updates": "Updates",
   "status_projects": "Projects",
   "compose_project_containers": "$1 containers",
-  "stop_a_container": "🔴 Click on a container to stop it",
+  "stop_a_container": "🔴 Click on a project or container to stop it",
   "stopped_container": "🔴 Container <b>$1</b> has been <b>stopped</b>",
   "stopping": "<i>Stopping</i> <b>$1</b>..",
   "unmuted": "🔉 Bot notifies again",
@@ -232,5 +234,9 @@
   "starting_service": "▶️ Starting <b>$1</b>...",
   "error_stopping_service": "❌ Error stopping <b>$1</b>",
   "error_starting_service": "❌ Error starting <b>$1</b>",
-  "project_restarted_success": "✅ Project <b>$1</b> restarted successfully"
+  "project_restarted_success": "✅ Project <b>$1</b> restarted successfully",
+  "starting_project": "🔄 Starting project <b>$1</b>...",
+  "project_started_success": "✅ Project <b>$1</b> started successfully",
+  "stopping_project": "🔄 Stopping project <b>$1</b>...",
+  "project_stopped_success": "✅ Project <b>$1</b> stopped successfully"
 }

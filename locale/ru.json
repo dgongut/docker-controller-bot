@@ -20,6 +20,8 @@
   "button_restart": "🔄 - Перезагрузить",
   "button_restart_all": "🔄 - Перезагрузить все",
   "button_restart_project": "Перезапустить проект",
+  "button_run_project": "Запустить проект",
+  "button_stop_project": "Остановить проект",
   "button_back": "Назад",
   "button_run": "🟢 - Запустить",
   "button_run_all": "🟢 - Запустить все",
@@ -130,7 +132,7 @@
   "show_logs": "📃 Нажмите на контейнер, чтобы увидеть его последние логи",
   "show_logsfile": "📃 Нажмите на контейнер, чтобы увидеть его логи в виде файла",
   "showing_logs": "📃 Это последние логи контейнера <b>$1</b>:\n<pre><code>$2</code></pre>",
-  "start_a_container": "🟢 Нажмите на контейнер, чтобы запустить его",
+  "start_a_container": "🟢 Нажмите на проект или контейнер, чтобы запустить его",
   "started_container": "🟢 Контейнер <b>$1</b> был <b>запущен</b>",
   "starting": "<i>Запуск</i> <b>$1</b>..",
   "status": "Статус",
@@ -139,7 +141,7 @@
   "status_updates": "Обновления",
   "status_projects": "Проекты",
   "compose_project_containers": "$1 контейнеров",
-  "stop_a_container": "🔴 Нажмите на контейнер, чтобы остановить его",
+  "stop_a_container": "🔴 Нажмите на проект или контейнер, чтобы остановить его",
   "stopped_container": "🔴 Контейнер <b>$1</b> был <b>остановлен</b>",
   "stopping": "<i>Остановка</i> <b>$1</b>..",
   "unmuted": "🔉 Уведомления бота снова включены",
@@ -233,5 +235,9 @@
   "starting_service": "▶️ Запуск <b>$1</b>...",
   "error_stopping_service": "❌ Ошибка при остановке <b>$1</b>",
   "error_starting_service": "❌ Ошибка при запуске <b>$1</b>",
-  "project_restarted_success": "✅ Проект <b>$1</b> успешно перезапущен"
+  "project_restarted_success": "✅ Проект <b>$1</b> успешно перезапущен",
+  "starting_project": "🔄 Запуск проекта <b>$1</b>...",
+  "project_started_success": "✅ Проект <b>$1</b> успешно запущен",
+  "stopping_project": "🔄 Остановка проекта <b>$1</b>...",
+  "project_stopped_success": "✅ Проект <b>$1</b> успешно остановлен"
 }

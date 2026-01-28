@@ -20,6 +20,8 @@
   "button_restart": "🔄 - Reiniciar",
   "button_restart_all": "🔄 - Reiniciar tot",
   "button_restart_project": "Reiniciar projecte",
+  "button_run_project": "Iniciar projecte",
+  "button_stop_project": "Parar projecte",
   "button_back": "Tornar",
   "button_run": "🟢 - Iniciar",
   "button_run_all": "🟢 - Iniciar tot",
@@ -130,7 +132,7 @@
   "show_logs": "📃 Prem en un contenidor per veure els seus últims logs",
   "show_logsfile": "📃 Prem en un contenidor per veure els seus logs en mode fitxer",
   "showing_logs": "📃 Aquests son els últims logs de <b>$1</b>:\n<pre><code>$2</code></pre>",
-  "start_a_container": "🟢 Prem en un contenidor per iniciarlo",
+  "start_a_container": "🟢 Prem en un projecte o contenidor per iniciarlo",
   "started_container": "🟢 El contenidor <b>$1</b> S'ha <b>iniciat</b>",
   "starting": "<i>Iniciant</i> <b>$1</b>..",
   "status": "Estat",
@@ -139,7 +141,7 @@
   "status_updates": "Actualitzacions",
   "status_projects": "Projectes",
   "compose_project_containers": "$1 contenidors",
-  "stop_a_container": "🔴 Prem en un contenidor per aturar-l'ho",
+  "stop_a_container": "🔴 Prem en un projecte o contenidor per aturar-l'ho",
   "stopped_container": "🔴 El contenidor <b>$1</b> S'ha <b>aturat</b>",
   "stopping": "<i>Aturant</i> <b>$1</b>..",
   "unmuted": "🔉 Bot torna a notificar",
@@ -232,5 +234,9 @@
   "starting_service": "▶️ Iniciant <b>$1</b>...",
   "error_stopping_service": "❌ Error al parar <b>$1</b>",
   "error_starting_service": "❌ Error a l'iniciar <b>$1</b>",
-  "project_restarted_success": "✅ Projecte <b>$1</b> reiniciat correctament"
+  "project_restarted_success": "✅ Projecte <b>$1</b> reiniciat correctament",
+  "starting_project": "🔄 Iniciant projecte <b>$1</b>...",
+  "project_started_success": "✅ Projecte <b>$1</b> iniciat correctament",
+  "stopping_project": "🔄 Parant projecte <b>$1</b>...",
+  "project_stopped_success": "✅ Projecte <b>$1</b> parat correctament"
 }
