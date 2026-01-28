@@ -31,6 +31,7 @@ Lleva el control de tus contenedores docker desde un único lugar.
 - ✅ Cambiar el tag (rollback o actualización)
 - ✅ Limpia el sistema, eliminado contenedores, imagenes y otros objetos no utilizados.
 - ✅ Ejecuta comandos dentro de contenedores
+- ✅ Visualiza puertos usados por contenedores y genera puertos aleatorios disponibles
 - ✅ Soporte de idiomas (Spanish, English, Dutch, German, Russian, Galician, Italian, Catalan)
 
 ¿Lo buscas en [![](https://badgen.net/badge/icon/docker?icon=docker&label)](https://hub.docker.com/r/dgongut/docker-controller-bot)?

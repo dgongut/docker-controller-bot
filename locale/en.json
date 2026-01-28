@@ -96,7 +96,7 @@
   "ports_list_header": "📊 <b>Ports Used by Containers</b>",
   "ports_no_containers": "ℹ️ No containers with mapped ports found",
   "ports_host_network_note": "ℹ️ <i>Containers configured with host network are not shown</i>",
-  "ports_button_generate": "🎲 Generate",
+  "ports_button_generate": "🎲 - Generate",
   "ports_generated_port": "🎲 <b>Random Available Port</b>\n\n<code>$1</code>\n\n✅ This port is free on the system\n📊 Range: 10000-60000",
   "ports_no_available_port": "❌ No available ports found in range 10000-60000",
   "loading_file": "<i>Loading file... Please wait</i>",

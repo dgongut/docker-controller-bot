@@ -96,7 +96,7 @@
   "ports_list_header": "📊 <b>Porte Utilizzate dai Contenitori</b>",
   "ports_no_containers": "ℹ️ Nessun contenitore con porte mappate trovato",
   "ports_host_network_note": "ℹ️ <i>I contenitori configurati con rete host non vengono mostrati</i>",
-  "ports_button_generate": "🎲 Genera",
+  "ports_button_generate": "🎲 - Genera",
   "ports_generated_port": "🎲 <b>Porta Casuale Disponibile</b>\n\n<code>$1</code>\n\n✅ Questa porta è libera nel sistema\n📊 Intervallo: 10000-60000",
   "ports_no_available_port": "❌ Nessuna porta disponibile trovata nell'intervallo 10000-60000",
   "loading_file": "<i>Caricamento file... Attendere prego</i>",

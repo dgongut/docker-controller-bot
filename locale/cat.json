@@ -96,7 +96,7 @@
   "ports_list_header": "📊 <b>Ports Utilitzats pels Contenidors</b>",
   "ports_no_containers": "ℹ️ No s'han trobat contenidors amb ports mapejats",
   "ports_host_network_note": "ℹ️ <i>Els contenidors configurats amb xarxa host no es mostren</i>",
-  "ports_button_generate": "🎲 Generar",
+  "ports_button_generate": "🎲 - Generar",
   "ports_generated_port": "🎲 <b>Port Aleatori Disponible</b>\n\n<code>$1</code>\n\n✅ Aquest port està lliure al sistema\n📊 Rang: 10000-60000",
   "ports_no_available_port": "❌ No s'han trobat ports disponibles al rang 10000-60000",
   "loading_file": "<i>Carregant arxiu... Espera si us plau</i>",

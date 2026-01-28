@@ -96,7 +96,7 @@
   "ports_list_header": "📊 <b>Portos Usados polos Contedores</b>",
   "ports_no_containers": "ℹ️ Non se atoparon contedores con portos mapeados",
   "ports_host_network_note": "ℹ️ <i>Os contedores configurados con rede host non se mostran</i>",
-  "ports_button_generate": "🎲 Xerar",
+  "ports_button_generate": "🎲 - Xerar",
   "ports_generated_port": "🎲 <b>Porto Aleatorio Dispoñible</b>\n\n<code>$1</code>\n\n✅ Este porto está libre no sistema\n📊 Rango: 10000-60000",
   "ports_no_available_port": "❌ Non se atoparon portos dispoñibles no rango 10000-60000",
   "loading_file": "<i>Cargando arquivo... Espera, por favor</i>",
