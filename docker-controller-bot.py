@@ -30,7 +30,7 @@ from schedule_flow import (
 )
 from migrate_schedules import migrate_schedules
 
-VERSION = "4.0.0"
+VERSION = "4.0.0_rc1"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
