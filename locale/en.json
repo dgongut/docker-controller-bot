@@ -22,6 +22,8 @@
   "button_restart_project": "Restart project",
   "button_run_project": "Start project",
   "button_stop_project": "Stop project",
+  "button_delete_project": "Delete project",
+  "button_yes_delete": "Yes, delete",
   "button_back": "Back",
   "button_run": "🟢 - Start",
   "button_run_all": "🟢 - Start all",
@@ -52,7 +54,7 @@
   "container_id": "Container ID",
   "containers": "Containers",
   "created_container": "🔵 Container <b>$1</b> has been <b>created</b>",
-  "delete_container": "⚠️ Click on a container to delete it.\nThis action cannot be undone.",
+  "delete_container": "⚠️ Click on a <b>project or container</b> to delete it.\nThis action cannot be undone.",
   "deleted_container": "✅ Container <b>$1</b> successfully deleted",
   "deleted_schedule": "✅ Schedule <b>$1</b> successfully deleted",
   "deleting": "<i>Deleting</i> <b>$1</b>..",
@@ -238,5 +240,12 @@
   "starting_project": "🔄 Starting project <b>$1</b>...",
   "project_started_success": "✅ Project <b>$1</b> started successfully",
   "stopping_project": "🔄 Stopping project <b>$1</b>...",
-  "project_stopped_success": "✅ Project <b>$1</b> stopped successfully"
+  "project_stopped_success": "✅ Project <b>$1</b> stopped successfully",
+  "select_container_or_project_delete": "Select a container from project <b>$1</b> or delete the whole project:",
+  "confirm_delete_project": "⚠️ You are about to delete the entire project <b>'$1'</b> (<b>$2 containers</b>).\n\nAre you sure?\n\nThis action cannot be undone.",
+  "deleting_project": "🗑️ Deleting project <b>$1</b> (<b>$2 containers</b>)...",
+  "deleting_service": "🗑️ Deleting <b>$1</b>...",
+  "error_deleting_service": "❌ Error deleting <b>$1</b>",
+  "project_deleted_success": "✅ Project <b>$1</b> deleted successfully (<b>$2 containers</b>)",
+  "no_containers_to_delete": "No containers to delete"
 }

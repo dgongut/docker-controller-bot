@@ -22,6 +22,8 @@
   "button_restart_project": "Projekt neu starten",
   "button_run_project": "Projekt starten",
   "button_stop_project": "Projekt stoppen",
+  "button_delete_project": "Projekt löschen",
+  "button_yes_delete": "Ja, löschen",
   "button_back": "Zurück",
   "button_run": "🟢 - Starten",
   "button_run_all": "🟢 - Alles starten",
@@ -52,7 +54,7 @@
   "container_id": "Container-ID",
   "containers": "Container",
   "created_container": "🔵 Container <b>$1</b> wurde <b>erstellt</b>",
-  "delete_container": "⚠️ Klicke auf einen Container, um ihn zu löschen.\nDiese Aktion kann nicht rückgängig gemacht werden.",
+  "delete_container": "⚠️ Klicke auf ein <b>Projekt oder Container</b>, um es zu löschen.\nDiese Aktion kann nicht rückgängig gemacht werden.",
   "deleted_container": "✅ Container <b>$1</b> erfolgreich gelöscht",
   "deleted_schedule": "✅ Zeitplan <b>$1</b> erfolgreich gelöscht",
   "deleting": "<i>Lösche</i> <b>$1</b>..",
@@ -239,5 +241,12 @@
   "starting_project": "🔄 Projekt <b>$1</b> wird gestartet...",
   "project_started_success": "✅ Projekt <b>$1</b> erfolgreich gestartet",
   "stopping_project": "🔄 Projekt <b>$1</b> wird gestoppt...",
-  "project_stopped_success": "✅ Projekt <b>$1</b> erfolgreich gestoppt"
+  "project_stopped_success": "✅ Projekt <b>$1</b> erfolgreich gestoppt",
+  "select_container_or_project_delete": "Wählen Sie einen Container aus Projekt <b>$1</b> oder löschen Sie das gesamte Projekt:",
+  "confirm_delete_project": "⚠️ Sie sind dabei, das gesamte Projekt <b>'$1'</b> (<b>$2 Container</b>) zu löschen.\n\nSind Sie sicher?\n\nDiese Aktion kann nicht rückgängig gemacht werden.",
+  "deleting_project": "🗑️ Projekt <b>$1</b> wird gelöscht (<b>$2 Container</b>)...",
+  "deleting_service": "🗑️ <b>$1</b> wird gelöscht...",
+  "error_deleting_service": "❌ Fehler beim Löschen von <b>$1</b>",
+  "project_deleted_success": "✅ Projekt <b>$1</b> erfolgreich gelöscht (<b>$2 Container</b>)",
+  "no_containers_to_delete": "Keine Container zum Löschen"
 }

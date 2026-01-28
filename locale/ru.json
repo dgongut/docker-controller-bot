@@ -22,6 +22,8 @@
   "button_restart_project": "Перезапустить проект",
   "button_run_project": "Запустить проект",
   "button_stop_project": "Остановить проект",
+  "button_delete_project": "Удалить проект",
+  "button_yes_delete": "Да, удалить",
   "button_back": "Назад",
   "button_run": "🟢 - Запустить",
   "button_run_all": "🟢 - Запустить все",
@@ -52,7 +54,7 @@
   "container_id": "ID контейнера",
   "containers": "Контейнеры",
   "created_container": "🔵 Контейнер <b>$1</b> был <b>создан</b>",
-  "delete_container": "⚠️ Нажмите на контейнер, чтобы удалить его.\nЭто действие необратимо.",
+  "delete_container": "⚠️ Нажмите на <b>проект или контейнер</b>, чтобы удалить его.\nЭто действие необратимо.",
   "deleted_container": "✅ Контейнер <b>$1</b> успешно удалён",
   "deleted_schedule": "✅ Расписание <b>$1</b> успешно удалено",
   "deleting": "<i>Удаление</i> <b>$1</b>..",
@@ -239,5 +241,12 @@
   "starting_project": "🔄 Запуск проекта <b>$1</b>...",
   "project_started_success": "✅ Проект <b>$1</b> успешно запущен",
   "stopping_project": "🔄 Остановка проекта <b>$1</b>...",
-  "project_stopped_success": "✅ Проект <b>$1</b> успешно остановлен"
+  "project_stopped_success": "✅ Проект <b>$1</b> успешно остановлен",
+  "select_container_or_project_delete": "Выберите контейнер из проекта <b>$1</b> или удалите весь проект:",
+  "confirm_delete_project": "⚠️ Вы собираетесь удалить весь проект <b>'$1'</b> (<b>$2 контейнеров</b>).\n\nВы уверены?\n\nЭто действие нельзя отменить.",
+  "deleting_project": "🗑️ Удаление проекта <b>$1</b> (<b>$2 контейнеров</b>)...",
+  "deleting_service": "🗑️ Удаление <b>$1</b>...",
+  "error_deleting_service": "❌ Ошибка при удалении <b>$1</b>",
+  "project_deleted_success": "✅ Проект <b>$1</b> успешно удален (<b>$2 контейнеров</b>)",
+  "no_containers_to_delete": "Нет контейнеров для удаления"
 }

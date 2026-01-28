@@ -22,6 +22,8 @@
   "button_restart_project": "Project herstarten",
   "button_run_project": "Project starten",
   "button_stop_project": "Project stoppen",
+  "button_delete_project": "Project verwijderen",
+  "button_yes_delete": "Ja, verwijderen",
   "button_back": "Terug",
   "button_run": "🟢 - Starten",
   "button_run_all": "🟢 - Alles starten",
@@ -52,7 +54,7 @@
   "container_id": "Container ID",
   "containers": "Containers",
   "created_container": "🔵 Container <b>$1</b> is <b>aangemaakt</b>",
-  "delete_container": "⚠️ Klik op een container om deze te verwijderen.\nDeze actie kan niet ongedaan worden gemaakt.",
+  "delete_container": "⚠️ Klik op een <b>project of container</b> om deze te verwijderen.\nDeze actie kan niet ongedaan worden gemaakt.",
   "deleted_container": "✅ Container <b>$1</b> succesvol verwijderd",
   "deleted_schedule": "✅ Schema <b>$1</b> succesvol verwijderd",
   "deleting": "<b>$1</b> <i>verwijderen</i>..",
@@ -239,5 +241,12 @@
   "starting_project": "🔄 Project <b>$1</b> starten...",
   "project_started_success": "✅ Project <b>$1</b> succesvol gestart",
   "stopping_project": "🔄 Project <b>$1</b> stoppen...",
-  "project_stopped_success": "✅ Project <b>$1</b> succesvol gestopt"
+  "project_stopped_success": "✅ Project <b>$1</b> succesvol gestopt",
+  "select_container_or_project_delete": "Selecteer een container uit project <b>$1</b> of verwijder het hele project:",
+  "confirm_delete_project": "⚠️ U staat op het punt het hele project <b>'$1'</b> (<b>$2 containers</b>) te verwijderen.\n\nWeet u het zeker?\n\nDeze actie kan niet ongedaan worden gemaakt.",
+  "deleting_project": "🗑️ Project <b>$1</b> wordt verwijderd (<b>$2 containers</b>)...",
+  "deleting_service": "🗑️ <b>$1</b> wordt verwijderd...",
+  "error_deleting_service": "❌ Fout bij het verwijderen van <b>$1</b>",
+  "project_deleted_success": "✅ Project <b>$1</b> succesvol verwijderd (<b>$2 containers</b>)",
+  "no_containers_to_delete": "Geen containers om te verwijderen"
 }

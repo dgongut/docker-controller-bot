@@ -22,6 +22,8 @@
   "button_restart_project": "Reiniciar projecte",
   "button_run_project": "Iniciar projecte",
   "button_stop_project": "Parar projecte",
+  "button_delete_project": "Eliminar projecte",
+  "button_yes_delete": "Sí, eliminar",
   "button_back": "Tornar",
   "button_run": "🟢 - Iniciar",
   "button_run_all": "🟢 - Iniciar tot",
@@ -52,7 +54,7 @@
   "container_id": "ID del contenidor",
   "containers": "Contenidors",
   "created_container": "🔵 El contenidor <b>$1</b> s'ha <b>creat</b>",
-  "delete_container": "⚠️ Prem un contenidor per eliminiar-l'ho.\nAquesta acció no pot desfer-se.",
+  "delete_container": "⚠️ Prem un <b>projecte o contenidor</b> per eliminiar-l'ho.\nAquesta acció no pot desfer-se.",
   "deleted_container": "✅ Contenidor <b>$1</b> eliminat amb éxit",
   "deleted_schedule": "✅ Programació <b>$1</b> eliminada exitosament",
   "deleting": "<i>Eliminant</i> <b>$1</b>..",
@@ -238,5 +240,12 @@
   "starting_project": "🔄 Iniciant projecte <b>$1</b>...",
   "project_started_success": "✅ Projecte <b>$1</b> iniciat correctament",
   "stopping_project": "🔄 Parant projecte <b>$1</b>...",
-  "project_stopped_success": "✅ Projecte <b>$1</b> parat correctament"
+  "project_stopped_success": "✅ Projecte <b>$1</b> parat correctament",
+  "select_container_or_project_delete": "Selecciona un contenidor del projecte <b>$1</b> o elimina el projecte complet:",
+  "confirm_delete_project": "⚠️ Vas a eliminar el projecte <b>'$1'</b> complet (<b>$2 contenidors</b>).\n\nEstàs segur?\n\nAquesta acció no es pot desfer.",
+  "deleting_project": "🗑️ Eliminant projecte <b>$1</b> (<b>$2 contenidors</b>)...",
+  "deleting_service": "🗑️ Eliminant <b>$1</b>...",
+  "error_deleting_service": "❌ Error en eliminar <b>$1</b>",
+  "project_deleted_success": "✅ Projecte <b>$1</b> eliminat correctament (<b>$2 contenidors</b>)",
+  "no_containers_to_delete": "No hi ha contenidors per eliminar"
 }

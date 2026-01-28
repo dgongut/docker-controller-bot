@@ -22,6 +22,8 @@
   "button_restart_project": "Reiniciar proxecto",
   "button_run_project": "Iniciar proxecto",
   "button_stop_project": "Parar proxecto",
+  "button_delete_project": "Eliminar proxecto",
+  "button_yes_delete": "Si, eliminar",
   "button_back": "Volver",
   "button_run": "🟢 - Iniciar",
   "button_run_all": "🟢 - Iniciar todo",
@@ -52,7 +54,7 @@
   "container_id": "ID do contedor",
   "containers": "Contedores",
   "created_container": "🔵 <b>creouse</b> o contedor <b>$1</b>",
-  "delete_container": "⚠️ Selecciona un contedor para eliminalo.\nEsta acción non se pode desfacer.",
+  "delete_container": "⚠️ Selecciona un <b>proxecto ou contedor</b> para eliminalo.\nEsta acción non se pode desfacer.",
   "deleted_container": "✅ contedor <b>$1</b> eliminado con éxito",
   "deleted_schedule": "✅ Programación <b>$1</b> eliminada exitosamente",
   "deleting": "<i>Eliminando</i> <b>$1</b>..",
@@ -239,5 +241,12 @@
   "starting_project": "🔄 Iniciando proxecto <b>$1</b>...",
   "project_started_success": "✅ Proxecto <b>$1</b> iniciado correctamente",
   "stopping_project": "🔄 Parando proxecto <b>$1</b>...",
-  "project_stopped_success": "✅ Proxecto <b>$1</b> parado correctamente"
+  "project_stopped_success": "✅ Proxecto <b>$1</b> parado correctamente",
+  "select_container_or_project_delete": "Selecciona un contedor do proxecto <b>$1</b> ou elimina o proxecto completo:",
+  "confirm_delete_project": "⚠️ Vas eliminar o proxecto <b>'$1'</b> completo (<b>$2 contedores</b>).\n\nEstás seguro?\n\nEsta acción non se pode desfacer.",
+  "deleting_project": "🗑️ Eliminando proxecto <b>$1</b> (<b>$2 contedores</b>)...",
+  "deleting_service": "🗑️ Eliminando <b>$1</b>...",
+  "error_deleting_service": "❌ Erro ao eliminar <b>$1</b>",
+  "project_deleted_success": "✅ Proxecto <b>$1</b> eliminado correctamente (<b>$2 contedores</b>)",
+  "no_containers_to_delete": "Non hai contedores para eliminar"
 }
