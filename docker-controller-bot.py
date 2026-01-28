@@ -30,7 +30,7 @@ from schedule_flow import (
 )
 from migrate_schedules import migrate_schedules
 
-VERSION = "4.0.0-FASE4"
+VERSION = "4.0.0-FASE5"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -2242,10 +2242,20 @@ def button_controller(call):
 			# Add individual container buttons (sorted by service name)
 			for service_name in sorted(project_info.get_service_names()):
 				container = project_info.services[service_name]
+
+				# Determine status indicator
+				status_indicator = "🟢" if container.status in ['running', 'restarting'] else "🔴"
+
+				# Determine callback action based on status
+				if container.status in ['running', 'restarting']:
+					callback_action = "restart"
+				else:
+					callback_action = "run"
+
 				botones.append(
 					InlineKeyboardButton(
-						f"🐳 {service_name}",
-						callback_data=f"restart|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}"
+						f"🐳{status_indicator} {service_name}",
+						callback_data=f"{callback_action}|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}"
 					)
 				)
 
@@ -2288,8 +2298,7 @@ def button_controller(call):
 		# RESTART WHOLE PROJECT
 		elif comando == "restartWholeProject":
 			project_name = containerName
-			# TODO: Implement in FASE 5 - For now, just show a message
-			send_message(message=get_text("feature_coming_soon", "Restart whole project"))
+			restart_compose_project(project_name)
 
 		# PRUNE
 		elif comando == "prune":
@@ -2732,6 +2741,53 @@ def restart(containerId, containerName, from_schedule=False):
 	if result:
 		send_message(message=result)
 
+def restart_compose_project(project_name):
+	"""
+	Reinicia un proyecto Docker Compose completo respetando el orden de dependencias.
+
+	Args:
+		project_name: Nombre del proyecto Compose a reiniciar
+	"""
+	debug(f"Running command: restart_compose_project for project {project_name}")
+
+	# Obtener información del proyecto
+	project_info = docker_manager.get_project_info(project_name)
+	if not project_info:
+		send_message(message=get_text("error_project_not_found", project_name))
+		return
+
+	# Obtener contenedores ordenados por dependencias
+	containers = project_info.containers
+	sorted_containers = docker_manager.compose_manager.sort_containers_by_dependencies(containers)
+
+	# Mensaje inicial
+	send_message(message=get_text("restarting_project", project_name))
+
+	# Parar contenedores en orden inverso (los que dependen primero)
+	for container in reversed(sorted_containers):
+		service_name = container.labels.get('com.docker.compose.service', container.name)
+		if EXTENDED_MESSAGES:
+			send_message(message=get_text("stopping_service", service_name))
+		try:
+			container.stop(timeout=10)
+		except Exception as e:
+			debug(f"Error stopping {service_name}: {e}")
+			send_message(message=get_text("error_stopping_service", service_name))
+
+	# Iniciar contenedores en orden correcto (dependencias primero)
+	for container in sorted_containers:
+		service_name = container.labels.get('com.docker.compose.service', container.name)
+		if EXTENDED_MESSAGES:
+			send_message(message=get_text("starting_service", service_name))
+		try:
+			container.start()
+		except Exception as e:
+			debug(f"Error starting {service_name}: {e}")
+			send_message(message=get_text("error_starting_service", service_name))
+
+	# Mensaje final
+	send_message(message=get_text("project_restarted_success", project_name))
+
 def logs(containerId, containerName):
 	debug(f"Running command: logs for container {containerName}")
 	markup = InlineKeyboardMarkup(row_width = 1)
@@ -3049,7 +3105,9 @@ def build_hierarchical_keyboard(containers, action_type, bot_container_name):
 
 	# Add project buttons (sorted)
 	for project_name in sorted(project_containers.keys()):
-		container_count = len(project_containers[project_name])
+		# Get real container count from project (not filtered by status)
+		project_info = docker_manager.get_project_info(project_name)
+		container_count = project_info.get_container_count() if project_info else len(project_containers[project_name])
 		botones.append(
 			InlineKeyboardButton(
 				f"📦 {project_name} ({container_count})",

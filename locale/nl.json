@@ -227,5 +227,11 @@
   "updating_starting": "<b>$1</b> <i>bijwerken</i>...\nContainer starten...",
   "debug_rollback_successful": "Rollback successful for $1. Old container has been restored.",
   "error_pulling_image": "❌ Failed to pull image <b>$1</b>. Verify that the image exists in the registry.",
-  "debug_rollback_update": "Performing rollback of update for $1"
+  "debug_rollback_update": "Performing rollback of update for $1",
+  "restarting_project": "🔄 Project <b>$1</b> opnieuw starten...",
+  "stopping_service": "⏹️ <b>$1</b> stoppen...",
+  "starting_service": "▶️ <b>$1</b> starten...",
+  "error_stopping_service": "❌ Fout bij het stoppen van <b>$1</b>",
+  "error_starting_service": "❌ Fout bij het starten van <b>$1</b>",
+  "project_restarted_success": "✅ Project <b>$1</b> succesvol opnieuw gestart"
 }

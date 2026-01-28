@@ -226,5 +226,11 @@
   "updating_deleting_old": "<i>Updating</i> <b>$1</b>...\nDeleting old container...",
   "updating_pulling_image": "<i>Updating</i> <b>$1</b>...\nPulling image...",
   "updating_renaming": "<i>Updating</i> <b>$1</b>...\nRenaming container...",
-  "updating_starting": "<i>Updating</i> <b>$1</b>...\nStarting container..."
+  "updating_starting": "<i>Updating</i> <b>$1</b>...\nStarting container...",
+  "restarting_project": "🔄 Restarting project <b>$1</b>...",
+  "stopping_service": "⏹️ Stopping <b>$1</b>...",
+  "starting_service": "▶️ Starting <b>$1</b>...",
+  "error_stopping_service": "❌ Error stopping <b>$1</b>",
+  "error_starting_service": "❌ Error starting <b>$1</b>",
+  "project_restarted_success": "✅ Project <b>$1</b> restarted successfully"
 }

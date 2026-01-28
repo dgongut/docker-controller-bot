@@ -226,5 +226,11 @@
   "updating_pulling_image": "<i>Actualitzant</i> <b>$1</b>...\nDescarregant imatge...",
   "updating_renaming": "<i>Actualitzant</i> <b>$1</b>...\nRenombrant contenidor...",
   "updating_starting": "<i>Actualitzant</i> <b>$1</b>...\nIniciant contenidor...",
-  "error_pulling_image": "❌ Failed to pull image <b>$1</b>. Verify that the image exists in the registry."
+  "error_pulling_image": "❌ Failed to pull image <b>$1</b>. Verify that the image exists in the registry.",
+  "restarting_project": "🔄 Reiniciant projecte <b>$1</b>...",
+  "stopping_service": "⏹️ Parant <b>$1</b>...",
+  "starting_service": "▶️ Iniciant <b>$1</b>...",
+  "error_stopping_service": "❌ Error al parar <b>$1</b>",
+  "error_starting_service": "❌ Error a l'iniciar <b>$1</b>",
+  "project_restarted_success": "✅ Projecte <b>$1</b> reiniciat correctament"
 }

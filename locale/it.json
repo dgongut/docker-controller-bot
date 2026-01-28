@@ -227,5 +227,11 @@
   "updating_starting": "<i>Aggiornamento</i> di <b>$1</b>...\nAvvio del contenitore...",
   "debug_rollback_successful": "Rollback successful for $1. Old container has been restored.",
   "error_pulling_image": "❌ Failed to pull image <b>$1</b>. Verify that the image exists in the registry.",
-  "debug_rollback_update": "Performing rollback of update for $1"
+  "debug_rollback_update": "Performing rollback of update for $1",
+  "restarting_project": "🔄 Riavvio del progetto <b>$1</b>...",
+  "stopping_service": "⏹️ Arresto di <b>$1</b>...",
+  "starting_service": "▶️ Avvio di <b>$1</b>...",
+  "error_stopping_service": "❌ Errore durante l'arresto di <b>$1</b>",
+  "error_starting_service": "❌ Errore durante l'avvio di <b>$1</b>",
+  "project_restarted_success": "✅ Progetto <b>$1</b> riavviato con successo"
 }

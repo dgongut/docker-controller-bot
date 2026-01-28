@@ -227,5 +227,11 @@
   "debug_rollback_successful": "Rollback successful for $1. Old container has been restored.",
   "error_pulling_image": "❌ Failed to pull image <b>$1</b>. Verify that the image exists in the registry.",
   "debug_rollback_update": "Performing rollback of update for $1",
-  "error_updating_container_with_error": "Could not update container $1. Error: [$2]"
+  "error_updating_container_with_error": "Could not update container $1. Error: [$2]",
+  "restarting_project": "🔄 Reiniciando proxecto <b>$1</b>...",
+  "stopping_service": "⏹️ Parando <b>$1</b>...",
+  "starting_service": "▶️ Iniciando <b>$1</b>...",
+  "error_stopping_service": "❌ Erro ao parar <b>$1</b>",
+  "error_starting_service": "❌ Erro ao iniciar <b>$1</b>",
+  "project_restarted_success": "✅ Proxecto <b>$1</b> reiniciado correctamente"
 }

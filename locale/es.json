@@ -226,5 +226,11 @@
   "updating_deleting_old": "<i>Actualizando</i> <b>$1</b>...\nEliminando contenedor antiguo...",
   "updating_pulling_image": "<i>Actualizando</i> <b>$1</b>...\nDescargando imagen...",
   "updating_renaming": "<i>Actualizando</i> <b>$1</b>...\nRenombrando contenedor...",
-  "updating_starting": "<i>Actualizando</i> <b>$1</b>...\nIniciando contenedor..."
+  "updating_starting": "<i>Actualizando</i> <b>$1</b>...\nIniciando contenedor...",
+  "restarting_project": "🔄 Reiniciando proyecto <b>$1</b>...",
+  "stopping_service": "⏹️ Parando <b>$1</b>...",
+  "starting_service": "▶️ Iniciando <b>$1</b>...",
+  "error_stopping_service": "❌ Error al parar <b>$1</b>",
+  "error_starting_service": "❌ Error al iniciar <b>$1</b>",
+  "project_restarted_success": "✅ Proyecto <b>$1</b> reiniciado correctamente"
 }
