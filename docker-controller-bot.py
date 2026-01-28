@@ -559,9 +559,12 @@ class DockerManager:
 				except:
 					pass # Si no se puede borrar es porque esta siendo usada por otro contenedor
 				markup = InlineKeyboardMarkup(row_width = 1)
-				markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}"))
+				markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{container.id[:CONTAINER_ID_LENGTH]}"))
 				image_status = get_text("NEED_UPDATE_CONTAINER_TEXT")
-				send_message(message=get_text("available_update", container.name), reply_markup=markup)
+				sent_message = send_message(message=get_text("available_update", container.name), reply_markup=markup)
+				# Save container cache for this notification
+				if sent_message:
+					save_container_cache(sent_message.chat.id, sent_message.message_id, [container])
 			else:
 				image_status = get_text("UPDATED_CONTAINER_TEXT")
 				send_message(message=get_text("already_updated", container.name))
@@ -771,9 +774,12 @@ class DockerUpdateMonitor:
 
 						if container.name == CONTAINER_NAME:
 							markup = InlineKeyboardMarkup(row_width = 1)
-							markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}"))
+							markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{container.id[:CONTAINER_ID_LENGTH]}"))
 							if not is_muted():
-								send_message(message=get_text("available_update", container.name), reply_markup=markup)
+								sent_message = send_message(message=get_text("available_update", container.name), reply_markup=markup)
+								# Save container cache for this notification
+								if sent_message:
+									save_container_cache(sent_message.chat.id, sent_message.message_id, [container])
 							else:
 								debug(f"Message [{get_text('available_update', container.name)}] omitted because muted")
 							continue
@@ -1699,14 +1705,18 @@ def command_controller(message):
 		if container_id:
 			restart(container_id, container_name)
 		else:
-			containers = docker_manager.list_containers(comando=comando)
+			# Get ALL containers (not just running) to show with status indicators
+			containers = docker_manager.list_containers()
 			if not containers or all(c.name == CONTAINER_NAME for c in containers):
 				send_message(message=get_text("no_containers_to_restart"))
 				return
 
 			# Use hierarchical keyboard (Level 1: projects + standalone containers)
-			markup = build_hierarchical_keyboard(containers, "Restart", CONTAINER_NAME)
-			send_message(message=get_text("restart_a_container"), reply_markup=markup)
+			markup, standalone_containers = build_hierarchical_keyboard(containers, "Restart", CONTAINER_NAME)
+			sent_message = send_message(message=get_text("restart_a_container"), reply_markup=markup)
+			# Save container cache for standalone containers
+			if sent_message and standalone_containers:
+				save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
 	elif comando in ('/logs', f'/logs@{bot.get_me().username}'):
 		if container_id:
 			logs(container_id, container_name)
@@ -1715,11 +1725,14 @@ def command_controller(message):
 			botones = []
 			containers = docker_manager.list_containers(comando=comando)
 			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name, container)} {container.name}', callback_data=f'logs|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name, container)} {container.name}', callback_data=f'logs|{container.id[:CONTAINER_ID_LENGTH]}'))
 
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
-			send_message(message=get_text("show_logs"), reply_markup=markup)
+			# Save container cache for this message
+			sent_message = send_message(message=get_text("show_logs"), reply_markup=markup)
+			if sent_message:
+				save_container_cache(sent_message.chat.id, sent_message.message_id, containers)
 	elif comando in ('/logfile', f'/logfile@{bot.get_me().username}'):
 		if container_id:
 			log_file(container_id, container_name)
@@ -1728,11 +1741,14 @@ def command_controller(message):
 			botones = []
 			containers = docker_manager.list_containers(comando=comando)
 			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name, container)} {container.name}', callback_data=f'logfile|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name, container)} {container.name}', callback_data=f'logfile|{container.id[:CONTAINER_ID_LENGTH]}'))
 
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
-			send_message(message=get_text("show_logsfile"), reply_markup=markup)
+			# Save container cache for this message
+			sent_message = send_message(message=get_text("show_logsfile"), reply_markup=markup)
+			if sent_message:
+				save_container_cache(sent_message.chat.id, sent_message.message_id, containers)
 	elif comando in ('/compose', f'/compose@{bot.get_me().username}'):
 		if container_id:
 			compose(container_id, container_name)
@@ -1741,11 +1757,14 @@ def command_controller(message):
 			botones = []
 			containers = docker_manager.list_containers(comando=comando)
 			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name, container)} {container.name}', callback_data=f'compose|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name, container)} {container.name}', callback_data=f'compose|{container.id[:CONTAINER_ID_LENGTH]}'))
 
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
-			send_message(message=get_text("show_compose"), reply_markup=markup)
+			# Save container cache for this message
+			sent_message = send_message(message=get_text("show_compose"), reply_markup=markup)
+			if sent_message:
+				save_container_cache(sent_message.chat.id, sent_message.message_id, containers)
 	elif comando in ('/mute', f'/mute@{bot.get_me().username}'):
 		try:
 			minutes = int(message.text.split()[1])
@@ -1763,11 +1782,14 @@ def command_controller(message):
 			botones = []
 			containers = docker_manager.list_containers(comando=comando)
 			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name, container)} {container.name}', callback_data=f'info|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name, container)} {container.name}', callback_data=f'info|{container.id[:CONTAINER_ID_LENGTH]}'))
 
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
-			send_message(message=get_text("show_info"), reply_markup=markup)
+			# Save container cache for this message
+			sent_message = send_message(message=get_text("show_info"), reply_markup=markup)
+			if sent_message:
+				save_container_cache(sent_message.chat.id, sent_message.message_id, containers)
 	elif comando in ('/exec', f'/exec@{bot.get_me().username}'):
 		if container_id:
 			ask_command(userId, container_id, container_name)
@@ -1776,9 +1798,14 @@ def command_controller(message):
 			botones = []
 			containers = docker_manager.list_containers(comando=comando)
 			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name, container)} {container.name}', callback_data=f'askCommand|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name, container)} {container.name}', callback_data=f'askCommand|{container.id[:CONTAINER_ID_LENGTH]}'))
 
 			markup.add(*botones)
+			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
+			# Save container cache for this message
+			sent_message = send_message(message=get_text("show_exec"), reply_markup=markup)
+			if sent_message:
+				save_container_cache(sent_message.chat.id, sent_message.message_id, containers)
 			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
 			send_message(message=get_text("exec_command_container"), reply_markup=markup)
 	elif comando in ('/delete', f'/delete@{bot.get_me().username}'):
@@ -1789,9 +1816,14 @@ def command_controller(message):
 			botones = []
 			containers = docker_manager.list_containers(comando=comando)
 			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name, container)} {container.name}', callback_data=f'confirmDelete|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name, container)} {container.name}', callback_data=f'confirmDelete|{container.id[:CONTAINER_ID_LENGTH]}'))
 
 			markup.add(*botones)
+			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
+			# Save container cache for this message
+			sent_message = send_message(message=get_text("show_delete"), reply_markup=markup)
+			if sent_message:
+				save_container_cache(sent_message.chat.id, sent_message.message_id, containers)
 			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
 			send_message(message=get_text("delete_container"), reply_markup=markup)
 	elif comando in ('/checkupdate', f'/checkupdate@{bot.get_me().username}'):
@@ -1802,9 +1834,14 @@ def command_controller(message):
 			botones = []
 			containers = docker_manager.list_containers(comando=comando)
 			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_update_emoji(container.name)} {container.name}', callback_data=f'checkUpdate|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+				botones.append(InlineKeyboardButton(f'{get_update_emoji(container.name)} {container.name}', callback_data=f'checkUpdate|{container.id[:CONTAINER_ID_LENGTH]}'))
 
 			markup.add(*botones)
+			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
+			# Save container cache for this message
+			sent_message = send_message(message=get_text("show_check_update"), reply_markup=markup)
+			if sent_message:
+				save_container_cache(sent_message.chat.id, sent_message.message_id, containers)
 			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
 			send_message(message=get_text("update_container"), reply_markup=markup)
 	elif comando in ('/updateall', f'/updateall@{bot.get_me().username}'):
@@ -1838,9 +1875,14 @@ def command_controller(message):
 			botones = []
 			containers = docker_manager.list_containers(comando=comando)
 			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name, container)} {container.name}', callback_data=f'changeTagContainer|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name, container)} {container.name}', callback_data=f'changeTagContainer|{container.id[:CONTAINER_ID_LENGTH]}'))
 
 			markup.add(*botones)
+			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
+			# Save container cache for this message
+			sent_message = send_message(message=get_text("show_change_tag"), reply_markup=markup)
+			if sent_message:
+				save_container_cache(sent_message.chat.id, sent_message.message_id, containers)
 			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
 			send_message(message=get_text("change_tag_container"), reply_markup=markup)
 	elif comando in ('/prune', f'/prune@{bot.get_me().username}'):
@@ -1903,7 +1945,7 @@ def button_controller(call):
 		data = parse_call_data(call.data)
 		comando = data["comando"]
 		containerId = data.get("containerId")
-		containerName = data.get("containerName")
+		containerName = data.get("containerName")  # For toggles and project names
 		tag = data.get("tag")
 		action = data.get("action")
 		containerIdx = data.get("containerIdx")
@@ -1913,6 +1955,14 @@ def button_controller(call):
 		field = data.get("field")
 		scheduleId = data.get("scheduleId")
 		value = data.get("value")
+
+		# If containerId is present but containerName is not, get it from cache/Docker
+		if containerId and not containerName:
+			containerName = get_container_name(chatId, messageId, containerId)
+			if not containerName:
+				send_message(message=get_text("container_does_not_exist", containerId))
+				debug(f"Container {containerId} not found in cache or Docker")
+				return
 
 		debug(f"BUTTON: {comando} | USER: {userId} | CHAT: {chatId}")
 	except Exception as e:
@@ -1938,6 +1988,8 @@ def button_controller(call):
 				if action_data is not None:
 					clear_action_data(chatId, messageId, action)
 					break
+			# Clean up container name cache
+			clear_container_cache(chatId, messageId)
 			return
 
 		# RUN
@@ -2255,7 +2307,7 @@ def button_controller(call):
 				botones.append(
 					InlineKeyboardButton(
 						f"🐳{status_indicator} {service_name}",
-						callback_data=f"{callback_action}|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}"
+						callback_data=f"{callback_action}|{container.id[:CONTAINER_ID_LENGTH]}"
 					)
 				)
 
@@ -2273,6 +2325,8 @@ def button_controller(call):
 					callback_data="backToRestartLevel1"
 				)
 			)
+			# Save container cache for this message
+			save_container_cache(chatId, messageId, project_info.containers)
 			edit_message_text(
 				get_text("select_container_or_project", project_name),
 				chatId,
@@ -2287,7 +2341,10 @@ def button_controller(call):
 				send_message(message=get_text("no_containers_to_restart"))
 				return
 
-			markup = build_hierarchical_keyboard(containers, "Restart", CONTAINER_NAME)
+			markup, standalone_containers = build_hierarchical_keyboard(containers, "Restart", CONTAINER_NAME)
+			# Save container cache for standalone containers
+			if standalone_containers:
+				save_container_cache(chatId, messageId, standalone_containers)
 			edit_message_text(
 				get_text("restart_a_container"),
 				chatId,
@@ -2907,7 +2964,7 @@ def info(containerId, containerName):
 	result, possible_update = docker_manager.get_info(container_id=containerId, container_name=containerName)
 	delete_message(x.message_id)
 	if possible_update:
-		markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{containerId}|{containerName}"))
+		markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{containerId}"))
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 	send_message(message=result, reply_markup=markup)
 
@@ -2942,7 +2999,7 @@ def confirm_prune_volumes():
 def confirm_delete(containerId, containerName):
 	debug(f"Running command: confirm_delete for container {containerName}")
 	markup = InlineKeyboardMarkup(row_width = 1)
-	markup.add(InlineKeyboardButton(get_text("button_confirm_delete"), callback_data=f"delete|{containerId}|{containerName}"))
+	markup.add(InlineKeyboardButton(get_text("button_confirm_delete"), callback_data=f"delete|{containerId}"))
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 	send_message(message=get_text("confirm_delete", containerName), reply_markup=markup)
 
@@ -2958,7 +3015,7 @@ def confirm_execute_command(containerId, containerName, command):
 	debug(f"Running command: confirm_exec for container {containerName} with command [{command}]")
 	markup = InlineKeyboardMarkup(row_width = 1)
 	commandId = save_command_cache(command)
-	markup.add(InlineKeyboardButton(get_text("button_confirm"), callback_data=f"exec|{containerId}|{containerName}|{commandId}"))
+	markup.add(InlineKeyboardButton(get_text("button_confirm"), callback_data=f"exec|{containerId}|{commandId}"))
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data=f"cancelExec|{commandId}"))
 	send_message(message=get_text("confirm_exec", containerName, command), reply_markup=markup)
 
@@ -2978,7 +3035,7 @@ def execute_command(containerId, containerName, command, sendMessage=True):
 
 def confirm_change_tag(containerId, containerName, tag):
 	markup = InlineKeyboardMarkup(row_width = 1)
-	markup.add(InlineKeyboardButton(get_text("button_confirm_change_tag", tag), callback_data=f"changeTag|{containerId}|{containerName}|{tag}"))
+	markup.add(InlineKeyboardButton(get_text("button_confirm_change_tag", tag), callback_data=f"changeTag|{containerId}|{tag}"))
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 	send_message(message=get_text("confirm_change_tag", containerName, tag), reply_markup=markup)
 
@@ -3018,7 +3075,7 @@ def change_tag_container(containerId, containerName):
 
 def confirm_update(containerId, containerName):
 	markup = InlineKeyboardMarkup(row_width = 1)
-	markup.add(InlineKeyboardButton(get_text("button_confirm_update"), callback_data=f"update|{containerId}|{containerName}"))
+	markup.add(InlineKeyboardButton(get_text("button_confirm_update"), callback_data=f"update|{containerId}"))
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 	send_message(message=get_text("confirm_update", containerName), reply_markup=markup)
 
@@ -3115,12 +3172,21 @@ def build_hierarchical_keyboard(containers, action_type, bot_container_name):
 			)
 		)
 
-	# Add standalone container buttons (sorted)
+	# Add standalone container buttons (sorted) with status indicators
 	for container in sorted(standalone_containers, key=lambda x: x.name.lower()):
+		# Get status emoji
+		status_emoji = get_status_emoji(container.status, container.name, container)
+
+		# Determine callback action based on status
+		if container.status in ['running', 'restarting']:
+			callback_action = action_type.lower()  # restart
+		else:
+			callback_action = "run"  # start stopped containers
+
 		botones.append(
 			InlineKeyboardButton(
-				f"🐳 {container.name}",
-				callback_data=f"{action_type.lower()}|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}"
+				f"{status_emoji} {container.name}",
+				callback_data=f"{callback_action}|{container.id[:CONTAINER_ID_LENGTH]}"
 			)
 		)
 
@@ -3129,7 +3195,7 @@ def build_hierarchical_keyboard(containers, action_type, bot_container_name):
 	# Add cancel button
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 
-	return markup
+	return markup, standalone_containers
 
 def is_admin(userId):
 	return str(userId) in str(TELEGRAM_ADMIN).split(',')
@@ -3459,6 +3525,96 @@ def load_command_request_state(user_id):
 def clear_command_request_state(user_id):
 	key = f"pending_command_{user_id}"
 	delete_cache_item(key)
+
+def save_container_cache(chat_id, message_id, containers):
+	"""
+	Guarda mapeo de container_id -> container_name para un mensaje con TTL de 24h
+
+	Args:
+		chat_id: ID del chat
+		message_id: ID del mensaje
+		containers: Lista de objetos container
+	"""
+	from datetime import datetime
+	cache_data = {
+		"_timestamp": datetime.now().isoformat(),
+		"containers": {}
+	}
+	for container in containers:
+		cache_data["containers"][container.id[:CONTAINER_ID_LENGTH]] = container.name
+
+	write_cache_item(f"containers_{chat_id}_{message_id}", cache_data)
+
+def load_container_name(chat_id, message_id, container_id):
+	"""
+	Obtiene el nombre de un contenedor desde la caché
+
+	Args:
+		chat_id: ID del chat
+		message_id: ID del mensaje
+		container_id: ID corto del contenedor
+
+	Returns:
+		str: Nombre del contenedor o None si no está en caché o expiró
+	"""
+	from datetime import datetime, timedelta
+	cache_data = read_cache_item(f"containers_{chat_id}_{message_id}")
+
+	if cache_data is None:
+		return None
+
+	# Check expiry (24 hours)
+	if "_timestamp" in cache_data:
+		try:
+			timestamp = datetime.fromisoformat(cache_data["_timestamp"])
+			if datetime.now() - timestamp > timedelta(hours=24):
+				clear_container_cache(chat_id, message_id)
+				return None
+		except:
+			pass
+
+	return cache_data.get("containers", {}).get(container_id)
+
+def clear_container_cache(chat_id, message_id):
+	"""Limpia la caché de contenedores para un mensaje"""
+	delete_cache_item(f"containers_{chat_id}_{message_id}")
+
+def get_container_name_by_id(container_id):
+	"""
+	Obtiene el nombre de un contenedor por su ID desde Docker API
+
+	Args:
+		container_id: ID del contenedor
+
+	Returns:
+		str: Nombre del contenedor o None si no existe
+	"""
+	try:
+		container = docker_manager.client.containers.get(container_id)
+		return container.name
+	except Exception as e:
+		debug(f"Container {container_id} not found: {e}")
+		return None
+
+def get_container_name(chat_id, message_id, container_id):
+	"""
+	Obtiene nombre de contenedor con caché + fallback a Docker API
+
+	Args:
+		chat_id: ID del chat
+		message_id: ID del mensaje
+		container_id: ID del contenedor
+
+	Returns:
+		str: Nombre del contenedor o None si no existe
+	"""
+	# 1. Intentar caché
+	name = load_container_name(chat_id, message_id, container_id)
+	if name:
+		return name
+
+	# 2. Fallback a Docker API
+	return get_container_name_by_id(container_id)
 
 def short_hash(text, length=30):
 	hash_obj = hashlib.sha256(text.encode())
