@@ -30,7 +30,7 @@ from schedule_flow import (
 )
 from migrate_schedules import migrate_schedules
 
-VERSION = "4.0.0-FASE3"
+VERSION = "4.0.0-FASE4"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -1700,15 +1700,13 @@ def command_controller(message):
 			restart(container_id, container_name)
 		else:
 			containers = docker_manager.list_containers(comando=comando)
-			container_names = [container.name for container in containers if CONTAINER_NAME != container.name]
-			if not container_names:
+			if not containers or all(c.name == CONTAINER_NAME for c in containers):
 				send_message(message=get_text("no_containers_to_restart"))
 				return
 
-			markup = build_generic_keyboard(container_names, set(), 0, "Restart", get_text("button_restart"), get_text("button_restart_all"))
-			message = send_message(message=get_text("restart_a_container"), reply_markup=markup)
-			if message:
-				save_action_data(TELEGRAM_GROUP, message.message_id, "restart", container_names)
+			# Use hierarchical keyboard (Level 1: projects + standalone containers)
+			markup = build_hierarchical_keyboard(containers, "Restart", CONTAINER_NAME)
+			send_message(message=get_text("restart_a_container"), reply_markup=markup)
 	elif comando in ('/logs', f'/logs@{bot.get_me().username}'):
 		if container_id:
 			logs(container_id, container_name)
@@ -1926,7 +1924,8 @@ def button_controller(call):
 		return
 
 	try:
-		if comando not in ["toggleUpdate", "toggleUpdateAll", "toggleRun", "toggleRunAll", "toggleStop", "toggleStopAll", "toggleRestart", "toggleRestartAll"]:
+		# Don't delete message for toggle actions and hierarchical navigation
+		if comando not in ["toggleUpdate", "toggleUpdateAll", "toggleRun", "toggleRunAll", "toggleStop", "toggleStopAll", "toggleRestart", "toggleRestartAll", "enterRestartProject", "backToRestartLevel1"]:
 			delete_message(messageId)
 
 		if call.data == "cerrar":
@@ -2226,6 +2225,71 @@ def button_controller(call):
 					continue
 				restart(container_id, containerName)
 			clear_action_data(chatId, originalMessageId, "restart")
+
+		# ENTER RESTART PROJECT (Level 2: show project containers)
+		elif comando == "enterRestartProject":
+			project_name = containerName
+			project_info = docker_manager.get_project_info(project_name)
+
+			if not project_info:
+				send_message(message=get_text("error_project_not_found", project_name))
+				return
+
+			# Build Level 2 keyboard
+			markup = InlineKeyboardMarkup(row_width=BUTTON_COLUMNS)
+			botones = []
+
+			# Add individual container buttons (sorted by service name)
+			for service_name in sorted(project_info.get_service_names()):
+				container = project_info.services[service_name]
+				botones.append(
+					InlineKeyboardButton(
+						f"🐳 {service_name}",
+						callback_data=f"restart|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}"
+					)
+				)
+
+			# Add container buttons to markup
+			markup.add(*botones)
+
+			# Add bottom row with "Restart whole project" and "Back" buttons side by side
+			markup.add(
+				InlineKeyboardButton(
+					f"🔄 {get_text('button_restart_project')}",
+					callback_data=f"restartWholeProject|{project_name}"
+				),
+				InlineKeyboardButton(
+					f"⬅️ {get_text('button_back')}",
+					callback_data="backToRestartLevel1"
+				)
+			)
+			edit_message_text(
+				get_text("select_container_or_project", project_name),
+				chatId,
+				messageId,
+				reply_markup=markup
+			)
+
+		# BACK TO RESTART LEVEL 1
+		elif comando == "backToRestartLevel1":
+			containers = docker_manager.list_containers(comando="/restart")
+			if not containers or all(c.name == CONTAINER_NAME for c in containers):
+				send_message(message=get_text("no_containers_to_restart"))
+				return
+
+			markup = build_hierarchical_keyboard(containers, "Restart", CONTAINER_NAME)
+			edit_message_text(
+				get_text("restart_a_container"),
+				chatId,
+				messageId,
+				reply_markup=markup
+			)
+
+		# RESTART WHOLE PROJECT
+		elif comando == "restartWholeProject":
+			project_name = containerName
+			# TODO: Implement in FASE 5 - For now, just show a message
+			send_message(message=get_text("feature_coming_soon", "Restart whole project"))
 
 		# PRUNE
 		elif comando == "prune":
@@ -2934,6 +2998,79 @@ def build_generic_keyboard(container_available, selected_containers, originalMes
 	fixed_buttons.append(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 
 	markup.add(*fixed_buttons)
+	return markup
+
+def build_hierarchical_keyboard(containers, action_type, bot_container_name):
+	"""
+	Build hierarchical keyboard with Compose projects and standalone containers.
+	Level 1: Shows projects (📦) and standalone containers (🐳)
+
+	Args:
+		containers: List of container objects
+		action_type: Type of action (Restart, Stop, Run)
+		bot_container_name: Name of the bot container to exclude
+
+	Returns:
+		InlineKeyboardMarkup: Keyboard with projects and standalone containers
+	"""
+	markup = InlineKeyboardMarkup(row_width=BUTTON_COLUMNS)
+
+	# Separate containers into projects and standalone
+	project_containers = {}  # {project_name: [containers]}
+	standalone_containers = []
+
+	for container in containers:
+		if container.name == bot_container_name:
+			continue
+
+		labels = container.labels or {}
+		project_name = labels.get('com.docker.compose.project')
+
+		if project_name:
+			if project_name not in project_containers:
+				project_containers[project_name] = []
+			project_containers[project_name].append(container)
+		else:
+			standalone_containers.append(container)
+
+	# Apply rule: projects with only 1 container are shown as standalone
+	single_container_projects = []
+	for project_name, project_conts in list(project_containers.items()):
+		if len(project_conts) == 1:
+			standalone_containers.extend(project_conts)
+			single_container_projects.append(project_name)
+
+	# Remove single-container projects from project_containers
+	for project_name in single_container_projects:
+		del project_containers[project_name]
+
+	# Build buttons
+	botones = []
+
+	# Add project buttons (sorted)
+	for project_name in sorted(project_containers.keys()):
+		container_count = len(project_containers[project_name])
+		botones.append(
+			InlineKeyboardButton(
+				f"📦 {project_name} ({container_count})",
+				callback_data=f"enter{action_type}Project|{project_name}"
+			)
+		)
+
+	# Add standalone container buttons (sorted)
+	for container in sorted(standalone_containers, key=lambda x: x.name.lower()):
+		botones.append(
+			InlineKeyboardButton(
+				f"🐳 {container.name}",
+				callback_data=f"{action_type.lower()}|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}"
+			)
+		)
+
+	markup.add(*botones)
+
+	# Add cancel button
+	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+
 	return markup
 
 def is_admin(userId):
