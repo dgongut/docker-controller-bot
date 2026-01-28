@@ -117,6 +117,8 @@ CALL_PATTERNS = {
     "scheduleSelectAction": ["action"],
     "scheduleSelectContainer": ["containerIdx"],
     "scheduleSelectShowOutput": ["action"],
+    "scheduleSelectPruneType": ["pruneType"],
+    "scheduleSelectPruneShowOutput": ["action"],
     "scheduleConfirm": [],
 }
 
@@ -144,6 +146,13 @@ SCHEDULE_PATTERNS = {
     "exec": {
         "params": ["container", "show_output", "command"],
         "validators": {
+            "show_output": lambda x: x in ("0", "1"),
+        },
+    },
+    "prune": {
+        "params": ["prune_type", "show_output"],
+        "validators": {
+            "prune_type": lambda x: x in ("containers", "images", "networks", "volumes"),
             "show_output": lambda x: x in ("0", "1"),
         },
     },

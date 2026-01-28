@@ -977,6 +977,7 @@ class DockerScheduleMonitor:
 			minutes = schedule.get("minutes")
 			command = schedule.get("command", "")
 			show_output = bool(schedule.get("show_output", False))
+			prune_type = schedule.get("prune_type", "")
 			schedule_name = schedule.get("name", "")
 
 			# Helper function to handle errors consistently
@@ -1021,6 +1022,39 @@ class DockerScheduleMonitor:
 				if not containerId:
 					return handle_error(f"Container {container} not found for action {action}")
 				execute_command(containerId, container, command, show_output)
+
+			elif action == "prune":
+				# Execute prune based on type
+				result_message = None
+				data = None
+				prune_label = ""
+
+				if prune_type == "containers":
+					result_message, data = docker_manager.prune_containers()
+					prune_label = get_text("button_containers")
+				elif prune_type == "images":
+					result_message, data = docker_manager.prune_images()
+					prune_label = get_text("button_images")
+				elif prune_type == "networks":
+					result_message, data = docker_manager.prune_networks()
+					prune_label = get_text("button_networks")
+				elif prune_type == "volumes":
+					result_message, data = docker_manager.prune_volumes()
+					prune_label = get_text("button_volumes")
+				else:
+					return handle_error(f"Unknown prune type: {prune_type}")
+
+				# Show output if requested, otherwise just log
+				if show_output and result_message:
+					# Send the same format as manual /prune command
+					markup = InlineKeyboardMarkup(row_width=1)
+					markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
+					fichero_temporal = get_temporal_file(data, prune_label)
+					x = send_message(message=get_text("loading_file"))
+					send_document(document=fichero_temporal, reply_markup=markup, caption=result_message)
+					delete_message(x.message_id)
+				else:
+					debug(f"Scheduled prune executed: {result_message}")
 
 			return True
 
@@ -1141,8 +1175,10 @@ def _build_schedule_summary(state: dict, include_step: bool = False, current_ste
 		lines.append(f"<b>{get_text('schedule_label_container')}:</b> {state.get('container')}")
 	if state.get("minutes") is not None:  # Use is not None to handle 0
 		lines.append(f"<b>{get_text('schedule_label_minutes')}:</b> {state.get('minutes')}")
-	# Only show show_output if action is exec and show_output is not None
-	if state.get("action") == "exec" and state.get("show_output") is not None:
+	if state.get("prune_type"):
+		lines.append(f"<b>{get_text('schedule_label_prune_type')}:</b> {state.get('prune_type')}")
+	# Only show show_output if action is exec or prune and show_output is not None
+	if state.get("action") in ("exec", "prune") and state.get("show_output") is not None:
 		lines.append(f"<b>{get_text('schedule_label_show_output')}:</b> {get_text('schedule_yes') if state.get('show_output') else get_text('schedule_no')}")
 	if state.get("command"):
 		lines.append(f"<b>{get_text('schedule_label_command')}:</b> {state.get('command')}")
@@ -1177,6 +1213,7 @@ def show_schedule_menu(user_id: int, chat_id: int):
 	label_container = get_text('schedule_label_container')
 	label_command = get_text('schedule_label_command')
 	label_show_output = get_text('schedule_label_show_output')
+	label_prune_type = get_text('schedule_label_prune_type')
 	yes_text = get_text('schedule_yes')
 	no_text = get_text('schedule_no')
 
@@ -1195,6 +1232,7 @@ def show_schedule_menu(user_id: int, chat_id: int):
 			minutes = sched.get('minutes', '')
 			command = sched.get('command', '')
 			show_output = sched.get('show_output', False)
+			prune_type = sched.get('prune_type', '')
 			enabled = sched.get('enabled', True)
 
 			# Build schedule entry
@@ -1212,6 +1250,10 @@ def show_schedule_menu(user_id: int, chat_id: int):
 			elif action == 'exec':
 				lines.append(f"  {label_container}: <b>{container}</b>")
 				lines.append(f"  {label_command}: <code>{command}</code>")
+				output_text = yes_text if show_output else no_text
+				lines.append(f"  {label_show_output}: <b>{output_text}</b>")
+			elif action == 'prune':
+				lines.append(f"  {label_prune_type}: <b>{prune_type}</b>")
 				output_text = yes_text if show_output else no_text
 				lines.append(f"  {label_show_output}: <b>{output_text}</b>")
 			elif action in ('run', 'stop', 'restart'):
@@ -1290,6 +1332,7 @@ def show_schedule_edit_options(user_id: int, schedule_name: str):
 	minutes = schedule.get('minutes', '')
 	command = schedule.get('command', '')
 	show_output = schedule.get('show_output', False)
+	prune_type = schedule.get('prune_type', '')
 	status_text = get_text('schedule_status_enabled') if enabled else get_text('schedule_status_disabled')
 	status_icon = "🟢" if enabled else "🔴"
 
@@ -1304,6 +1347,9 @@ def show_schedule_edit_options(user_id: int, schedule_name: str):
 	elif action == 'exec':
 		message_text += f"<b>{get_text('schedule_label_container')}:</b> <b>{container}</b>\n"
 		message_text += f"<b>{get_text('schedule_label_command')}:</b> <code>{command}</code>\n"
+		message_text += f"<b>{get_text('schedule_label_show_output')}:</b> <b>{get_text('schedule_yes') if show_output else get_text('schedule_no')}</b>\n"
+	elif action == 'prune':
+		message_text += f"<b>{get_text('schedule_label_prune_type')}:</b> <b>{prune_type}</b>\n"
 		message_text += f"<b>{get_text('schedule_label_show_output')}:</b> <b>{get_text('schedule_yes') if show_output else get_text('schedule_no')}</b>\n"
 	elif action in ('run', 'stop', 'restart'):
 		message_text += f"<b>{get_text('schedule_label_container')}:</b> <b>{container}</b>\n"
@@ -1391,14 +1437,6 @@ def is_valid_cron(cron_expr: str) -> bool:
 
 def confirm_schedule_creation(user_id: int, state: dict):
 	"""Show confirmation of schedule creation"""
-	name = state.get("name")
-	cron = state.get("cron")
-	action = state.get("action")
-	container = state.get("container")
-	minutes = state.get("minutes")
-	show_output = state.get("show_output")
-	command = state.get("command")
-
 	# Delete previous message if exists
 	if state.get("last_message_id"):
 		try:
@@ -1406,20 +1444,9 @@ def confirm_schedule_creation(user_id: int, state: dict):
 		except:
 			pass
 
+	# Use the centralized summary builder
 	message_text = get_text("schedule_confirm_title") + "\n\n"
-	message_text += f"<b>{get_text('schedule_label_name')}:</b> {name}\n"
-	message_text += f"<b>{get_text('schedule_label_cron')}:</b> {cron}\n"
-	message_text += f"<b>{get_text('schedule_label_action')}:</b> {action}\n"
-
-	if container:
-		message_text += f"<b>{get_text('schedule_label_container')}:</b> {container}\n"
-	if minutes is not None:  # Use is not None to handle 0 correctly
-		message_text += f"<b>{get_text('schedule_label_minutes')}:</b> {minutes}\n"
-	# Only show output option for exec action
-	if action == "exec" and show_output is not None:
-		message_text += f"<b>{get_text('schedule_label_show_output')}:</b> {get_text('schedule_yes') if show_output else get_text('schedule_no')}\n"
-	if command:
-		message_text += f"<b>{get_text('schedule_label_command')}:</b> {command}\n"
+	message_text += _build_schedule_summary(state)
 
 	markup = InlineKeyboardMarkup(row_width=2)
 	markup.add(
@@ -1656,7 +1683,8 @@ def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: in
 			InlineKeyboardButton("stop", callback_data="scheduleSelectAction|stop"),
 			InlineKeyboardButton("restart", callback_data="scheduleSelectAction|restart"),
 			InlineKeyboardButton("mute", callback_data="scheduleSelectAction|mute"),
-			InlineKeyboardButton("exec", callback_data="scheduleSelectAction|exec")
+			InlineKeyboardButton("exec", callback_data="scheduleSelectAction|exec"),
+			InlineKeyboardButton("prune", callback_data="scheduleSelectAction|prune")
 		)
 		markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 		msg = send_message(message=message_text, reply_markup=markup)
@@ -2118,6 +2146,7 @@ def button_controller(call):
 		field = data.get("field")
 		scheduleId = data.get("scheduleId")
 		value = data.get("value")
+		pruneType = data.get("pruneType")
 
 		# If containerId is present but containerName is not, get it from cache/Docker
 		if containerId and not containerName:
@@ -3294,6 +3323,25 @@ def button_controller(call):
 					msg = send_message(message=message_text, reply_markup=markup)
 					schedule_state["last_message_id"] = msg.message_id if msg else None
 					save_schedule_state(userId, schedule_state)
+				elif action == "prune":
+					schedule_state["step"] = "ask_prune_type"
+					schedule_state["container"] = None  # Not applicable for prune
+
+					# Build message with summary
+					message_text = _build_schedule_summary(schedule_state)
+					message_text += f"\n\n{get_text('schedule_ask_prune_type')}"
+
+					markup = InlineKeyboardMarkup(row_width=2)
+					markup.add(
+						InlineKeyboardButton(get_text("schedule_prune_containers"), callback_data="scheduleSelectPruneType|containers"),
+						InlineKeyboardButton(get_text("schedule_prune_images"), callback_data="scheduleSelectPruneType|images"),
+						InlineKeyboardButton(get_text("schedule_prune_networks"), callback_data="scheduleSelectPruneType|networks"),
+						InlineKeyboardButton(get_text("schedule_prune_volumes"), callback_data="scheduleSelectPruneType|volumes")
+					)
+					markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+					msg = send_message(message=message_text, reply_markup=markup)
+					schedule_state["last_message_id"] = msg.message_id if msg else None
+					save_schedule_state(userId, schedule_state)
 				else:
 					# For run, stop, restart, exec - ask for container
 					# show_output will remain None until after container selection for exec
@@ -3369,6 +3417,49 @@ def button_controller(call):
 				schedule_state["last_message_id"] = msg.message_id if msg else None
 				save_schedule_state(userId, schedule_state)
 
+		elif comando == "scheduleSelectPruneType":
+			schedule_state = load_schedule_state(userId)
+			if schedule_state:
+				schedule_state["prune_type"] = pruneType
+				schedule_state["step"] = "ask_show_output_prune"
+
+				# Delete previous message if exists
+				if schedule_state.get("last_message_id"):
+					try:
+						delete_message(schedule_state.get("last_message_id"))
+					except:
+						pass
+
+				# Build message with summary
+				message_text = _build_schedule_summary(schedule_state)
+				message_text += f"\n\n{get_text('schedule_ask_show_output')}"
+
+				markup = InlineKeyboardMarkup(row_width=2)
+				markup.add(
+					InlineKeyboardButton(get_text("button_yes"), callback_data="scheduleSelectPruneShowOutput|yes"),
+					InlineKeyboardButton(get_text("button_no"), callback_data="scheduleSelectPruneShowOutput|no")
+				)
+				markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+				msg = send_message(message=message_text, reply_markup=markup)
+				schedule_state["last_message_id"] = msg.message_id if msg else None
+				save_schedule_state(userId, schedule_state)
+
+		elif comando == "scheduleSelectPruneShowOutput":
+			schedule_state = load_schedule_state(userId)
+			if schedule_state:
+				schedule_state["show_output"] = (action == "yes")
+				schedule_state["step"] = "confirm"
+
+				# Delete previous message if exists
+				if schedule_state.get("last_message_id"):
+					try:
+						delete_message(schedule_state.get("last_message_id"))
+					except:
+						pass
+
+				save_schedule_state(userId, schedule_state)
+				confirm_schedule_creation(userId, schedule_state)
+
 		elif comando == "scheduleConfirm":
 			schedule_state = load_schedule_state(userId)
 			if schedule_state:
@@ -3380,7 +3471,8 @@ def button_controller(call):
 						container=schedule_state.get("container"),
 						minutes=schedule_state.get("minutes"),
 						show_output=schedule_state.get("show_output", False),
-						command=schedule_state.get("command")
+						command=schedule_state.get("command"),
+						prune_type=schedule_state.get("prune_type")
 					)
 					send_message(message=get_text("schedule_added_success", schedule_state["name"]))
 					clear_schedule_state(userId)
