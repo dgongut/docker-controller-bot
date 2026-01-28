@@ -247,5 +247,7 @@
   "deleting_service": "🗑️ Eliminant <b>$1</b>...",
   "error_deleting_service": "❌ Error en eliminar <b>$1</b>",
   "project_deleted_success": "✅ Projecte <b>$1</b> eliminat correctament (<b>$2 contenidors</b>)",
-  "no_containers_to_delete": "No hi ha contenidors per eliminar"
+  "no_containers_to_delete": "No hi ha contenidors per eliminar",
+  "restarting_project_after_update": "🔄 Reiniciant projecte <b>$1</b> (<b>$2 contenidors</b>)...",
+  "project_restarted_after_update_success": "✅ Projecte <b>$1</b> reiniciat correctament (<b>$2 contenidors</b>)"
 }

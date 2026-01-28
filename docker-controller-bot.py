@@ -30,7 +30,7 @@ from schedule_flow import (
 )
 from migrate_schedules import migrate_schedules
 
-VERSION = "4.0.0-FASE7"
+VERSION = "4.0.0-FASE8"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -1853,11 +1853,9 @@ def command_controller(message):
 			markup.add(*botones)
 			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
 			# Save container cache for this message
-			sent_message = send_message(message=get_text("show_check_update"), reply_markup=markup)
+			sent_message = send_message(message=get_text("update_container"), reply_markup=markup)
 			if sent_message:
 				save_container_cache(sent_message.chat.id, sent_message.message_id, containers)
-			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
-			send_message(message=get_text("update_container"), reply_markup=markup)
 	elif comando in ('/updateall', f'/updateall@{bot.get_me().username}'):
 		containers = docker_manager.list_containers()
 		containersToUpdate = []
@@ -2981,6 +2979,57 @@ def restart_compose_project(project_name):
 	# Mensaje final
 	send_message(message=get_text("project_restarted_success", project_name))
 
+def restart_compose_project_after_update(project_name):
+	"""
+	Reinicia un proyecto Docker Compose completo después de actualizar un contenedor.
+	Muestra mensajes informativos sobre el reinicio del proyecto.
+
+	Args:
+		project_name: Nombre del proyecto Compose a reiniciar
+	"""
+	debug(f"Restarting project {project_name} after container update")
+
+	# Obtener información del proyecto
+	project_info = docker_manager.get_project_info(project_name)
+	if not project_info:
+		send_message(message=get_text("error_project_not_found", project_name))
+		return
+
+	# Obtener contenedores ordenados por dependencias
+	containers = project_info.containers
+	sorted_containers = docker_manager.compose_manager.sort_containers_by_dependencies(containers)
+	container_count = len(sorted_containers)
+
+	# Mensaje inicial
+	send_message(message=get_text("restarting_project_after_update", project_name, container_count))
+
+	# Parar contenedores en orden inverso (los que dependen primero)
+	for container in reversed(sorted_containers):
+		service_name = container.labels.get('com.docker.compose.service', container.name)
+		if EXTENDED_MESSAGES:
+			send_message(message=get_text("stopping_service", service_name))
+		try:
+			container.stop(timeout=10)
+		except Exception as e:
+			debug(f"Error stopping {service_name}: {e}")
+			if EXTENDED_MESSAGES:
+				send_message(message=get_text("error_stopping_service", service_name))
+
+	# Iniciar contenedores en orden correcto (dependencias primero)
+	for container in sorted_containers:
+		service_name = container.labels.get('com.docker.compose.service', container.name)
+		if EXTENDED_MESSAGES:
+			send_message(message=get_text("starting_service", service_name))
+		try:
+			container.start()
+		except Exception as e:
+			debug(f"Error starting {service_name}: {e}")
+			if EXTENDED_MESSAGES:
+				send_message(message=get_text("error_starting_service", service_name))
+
+	# Mensaje final
+	send_message(message=get_text("project_restarted_after_update_success", project_name, container_count))
+
 def run_compose_project(project_name):
 	"""
 	Inicia un proyecto Docker Compose completo respetando el orden de dependencias.
@@ -3285,9 +3334,23 @@ def confirm_change_tag(containerId, containerName, tag):
 
 def update(containerId, containerName):
 	x = send_message(message=get_text("updating", containerName))
+
+	# Get container to check if it's part of a Compose project
+	client = docker.from_env()
+	container = client.containers.get(containerId)
+	project_name = ComposeDetector.get_project_name(container)
+
+	# Perform the update
 	result = docker_manager.update(container_id=containerId, container_name=containerName, message=x, bot=bot)
 	delete_message(x.message_id)
 	send_message(message=result)
+
+	# If container is part of a Compose project, restart the entire project
+	if project_name:
+		project_info = docker_manager.get_project_info(project_name)
+		if project_info and project_info.get_container_count() > 1:
+			# Only restart project if it has more than 1 container
+			restart_compose_project_after_update(project_name)
 
 def change_tag_container(containerId, containerName):
 	try:
