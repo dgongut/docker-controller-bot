@@ -290,5 +290,21 @@
   "project_deleted_success": "✅ Проект <b>$1</b> успешно удален (<b>$2 контейнеров</b>)",
   "no_containers_to_delete": "Нет контейнеров для удаления",
   "restarting_project_after_update": "🔄 Перезапуск проекта <b>$1</b> (<b>$2 контейнеров</b>)...",
-  "project_restarted_after_update_success": "✅ Проект <b>$1</b> успешно перезапущен (<b>$2 контейнеров</b>)"
+  "project_restarted_after_update_success": "✅ Проект <b>$1</b> успешно перезапущен (<b>$2 контейнеров</b>)",
+  "update_current_image": "Текущий образ",
+  "update_new_image": "Новый образ",
+  "update_tag": "Тег",
+  "update_created": "Создан",
+  "update_size": "Размер",
+  "update_digest": "Дайджест",
+  "update_changes": "Изменения",
+  "update_size_change": "Размер",
+  "update_days_newer": "дней новее",
+  "update_description": "Описание",
+  "update_more_info": "Дополнительная информация на Docker Hub",
+  "update_more_info_registry": "Дополнительная информация на $1",
+  "update_no_description": "Описание недоступно",
+  "update_date_unknown": "Неизвестно",
+  "update_no_size_change": "Без изменений",
+  "fetching_image_data": "<i>⏳ Получение данных образа...</i>"
 }

@@ -290,5 +290,21 @@
   "project_deleted_success": "✅ Projekt <b>$1</b> erfolgreich gelöscht (<b>$2 Container</b>)",
   "no_containers_to_delete": "Keine Container zum Löschen",
   "restarting_project_after_update": "🔄 Projekt <b>$1</b> wird neu gestartet (<b>$2 Container</b>)...",
-  "project_restarted_after_update_success": "✅ Projekt <b>$1</b> erfolgreich neu gestartet (<b>$2 Container</b>)"
+  "project_restarted_after_update_success": "✅ Projekt <b>$1</b> erfolgreich neu gestartet (<b>$2 Container</b>)",
+  "update_current_image": "Aktuelles Image",
+  "update_new_image": "Neues Image",
+  "update_tag": "Tag",
+  "update_created": "Erstellt",
+  "update_size": "Größe",
+  "update_digest": "Digest",
+  "update_changes": "Änderungen",
+  "update_size_change": "Größe",
+  "update_days_newer": "Tage neuer",
+  "update_description": "Beschreibung",
+  "update_more_info": "Weitere Informationen auf Docker Hub",
+  "update_more_info_registry": "Weitere Informationen auf $1",
+  "update_no_description": "Keine Beschreibung verfügbar",
+  "update_date_unknown": "Unbekannt",
+  "update_no_size_change": "Keine Änderungen",
+  "fetching_image_data": "<i>⏳ Bilddaten werden abgerufen...</i>"
 }

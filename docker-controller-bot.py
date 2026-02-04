@@ -2262,20 +2262,26 @@ def button_controller(call):
 
 		# CHANGE_TAG_CONTAINER
 		elif comando == "changeTagContainer":
+			# Get container name from cache or Docker
+			containerName = get_container_name(chatId, messageId, containerId)
+			if not containerName:
+				containerName = "Unknown"
 			change_tag_container(containerId, containerName)
 
 		# CHANGE_TAG_CONTAINER
 		elif comando == "confirmChangeTag":
 			# Get container name from cache or Docker
-			container = get_container_from_cache_or_docker(chatId, messageId, containerId)
-			containerName = container.name if container else "Unknown"
+			containerName = get_container_name(chatId, messageId, containerId)
+			if not containerName:
+				containerName = "Unknown"
 			confirm_change_tag(containerId, containerName, tag)
 
 		# CHANGE_TAG
 		elif comando == "changeTag":
 			# Get container name from cache or Docker
-			container = get_container_from_cache_or_docker(chatId, messageId, containerId)
-			containerName = container.name if container else "Unknown"
+			containerName = get_container_name(chatId, messageId, containerId)
+			if not containerName:
+				containerName = "Unknown"
 			x = send_message(message=get_text("updating", containerName))
 			result = docker_manager.update(container_id=containerId, container_name=containerName, message=x, bot=bot, tag=tag)
 			delete_message(x.message_id)
@@ -4131,10 +4137,75 @@ def execute_command(containerId, containerName, command, sendMessage=True):
 				send_message(message=f"<pre><code>{part}</code></pre>")
 
 def confirm_change_tag(containerId, containerName, tag):
-	markup = InlineKeyboardMarkup(row_width = 1)
+	debug(f"Running command: confirm_change_tag for container {containerName} to tag {tag}")
+
+	# Show loading message
+	loading_msg = send_message(message=get_text("fetching_image_data"))
+
+	# Get detailed comparison
+	comparison = get_image_comparison(containerId, containerName, new_tag=tag)
+
+	# Delete loading message
+	if loading_msg:
+		delete_message(loading_msg.message_id)
+
+	if not comparison:
+		# Fallback to simple confirmation if comparison fails
+		markup = InlineKeyboardMarkup(row_width=1)
+		markup.add(InlineKeyboardButton(get_text("button_confirm_change_tag", tag), callback_data=f"changeTag|{containerId}|{tag}"))
+		markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+		send_message(message=get_text("confirm_change_tag", containerName, tag), reply_markup=markup)
+		return
+
+	# Check if images are identical
+	if comparison['current_digest'] == comparison['new_digest']:
+		# Same image, just show info
+		message = f"""📦 <b>{containerName}</b>
+
+ℹ️ <b>Información:</b>
+   {get_text('update_tag')}: <code>{comparison['current_tag']}</code> → <code>{comparison['new_tag']}</code>
+   {get_text('update_created')}: {comparison['current_date']}
+   {get_text('update_size')}: {comparison['current_size']}
+   {get_text('update_digest')}: <code>{comparison['current_digest']}</code>
+
+⚠️ Ambos tags apuntan a la misma imagen (mismo digest)."""
+	else:
+		# Different images, show full comparison
+		message = f"""📦 <b>{containerName}</b>
+
+📌 <b>{get_text('update_current_image')}:</b>
+   {get_text('update_tag')}: <code>{comparison['current_tag']}</code>
+   {get_text('update_created')}: {comparison['current_date']}
+   {get_text('update_size')}: {comparison['current_size']}
+   {get_text('update_digest')}: <code>{comparison['current_digest']}</code>
+
+🆕 <b>{get_text('update_new_image')}:</b>
+   {get_text('update_tag')}: <code>{comparison['new_tag']}</code>
+   {get_text('update_created')}: {comparison['new_date']}
+   {get_text('update_size')}: {comparison['new_size']}
+   {get_text('update_digest')}: <code>{comparison['new_digest']}</code>
+
+📊 <b>{get_text('update_changes')}:</b>
+   • {get_text('update_size_change')}: {comparison['size_diff']}"""
+
+		if comparison['days_diff'] > 0:
+			message += f"\n   • {comparison['days_diff']} {get_text('update_days_newer')}"
+
+	if comparison['description']:
+		message += f"\n\n📝 <b>{get_text('update_description')}:</b>\n{comparison['description']}"
+
+	if comparison['registry_url']:
+		# Use dynamic text based on registry
+		if comparison['registry_name']:
+			link_text = f"{get_text('update_more_info_registry', comparison['registry_name'])}"
+		else:
+			link_text = get_text('update_more_info')
+		message += f"\n\n🔗 <a href=\"{comparison['registry_url']}\">{link_text}</a>"
+
+	markup = InlineKeyboardMarkup(row_width=1)
 	markup.add(InlineKeyboardButton(get_text("button_confirm_change_tag", tag), callback_data=f"changeTag|{containerId}|{tag}"))
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
-	send_message(message=get_text("confirm_change_tag", containerName, tag), reply_markup=markup)
+	send_message(message=message, reply_markup=markup)
 
 def update(containerId, containerName):
 	x = send_message(message=get_text("updating", containerName))
@@ -4184,11 +4255,289 @@ def change_tag_container(containerId, containerName):
 		error(f"Error changing tag for container {containerName}. Error: [{e}]")
 		send_message(message=get_text("error_changing_tag", containerName))
 
+def get_image_comparison(containerId, containerName, new_tag=None):
+	"""
+	Get detailed comparison between current and new image.
+
+	Args:
+		containerId: Container ID
+		containerName: Container name
+		new_tag: Optional new tag to compare against. If None, pulls the same tag to check for updates.
+
+	Returns:
+		dict with comparison information or None if error
+	"""
+	try:
+		client = docker.from_env()
+		container = client.containers.get(containerId)
+		current_image = container.image
+		current_tag = container.attrs['Config']['Image']
+
+		# Current image info
+		current_digest = current_image.id.replace('sha256:', '')[:12]
+		current_size = current_image.attrs.get('Size', 0)
+		current_created = current_image.attrs.get('Created', '')
+
+		# Determine what image to pull for comparison
+		if new_tag:
+			# Changing tag: use the new tag
+			repo = current_tag.split(':')[0]
+			tag_to_pull = f"{repo}:{new_tag}"
+		else:
+			# Checking for update: pull the same tag
+			tag_to_pull = current_tag
+
+		# Pull new image (without applying to container)
+		debug(f"Pulling image {tag_to_pull} for comparison")
+		new_image = client.images.pull(tag_to_pull)
+
+		# New image info
+		new_digest = new_image.id.replace('sha256:', '')[:12]
+		new_size = new_image.attrs.get('Size', 0)
+		new_created = new_image.attrs.get('Created', '')
+
+		# Calculate differences
+		has_update = current_digest != new_digest
+		size_diff = new_size - current_size
+
+		# Format dates
+		from datetime import datetime
+		try:
+			current_date = datetime.fromisoformat(current_created.replace('Z', '+00:00'))
+			new_date = datetime.fromisoformat(new_created.replace('Z', '+00:00'))
+			current_date_str = current_date.strftime('%Y-%m-%d')
+			new_date_str = new_date.strftime('%Y-%m-%d')
+			days_diff = (new_date - current_date).days
+		except:
+			current_date_str = get_text('update_date_unknown')
+			new_date_str = get_text('update_date_unknown')
+			days_diff = 0
+
+		# Format size difference
+		if size_diff > 0:
+			size_diff_str = f"+{sizeof_fmt(size_diff)}"
+		elif size_diff < 0:
+			size_diff_str = f"-{sizeof_fmt(abs(size_diff))}"
+		else:
+			size_diff_str = get_text('update_no_size_change')
+
+		# Get Docker Hub description (optional, may fail for private images)
+		description = get_dockerhub_description(tag_to_pull)
+
+		# Clean up description: remove Markdown formatting and truncate
+		if description:
+			# Remove Markdown headers (# ## ###)
+			description = re.sub(r'^#+\s+', '', description, flags=re.MULTILINE)
+			# Remove Markdown links [text](url) -> text
+			description = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', description)
+			# Remove Markdown bold/italic (**text** or *text* or __text__)
+			description = re.sub(r'[*_]{1,2}([^*_]+)[*_]{1,2}', r'\1', description)
+			# Remove extra whitespace and newlines
+			description = ' '.join(description.split())
+			# Truncate if still too long
+			if len(description) > 200:
+				description = description[:200].rsplit(' ', 1)[0] + '...'
+
+		# Build registry URL
+		registry_url, registry_name = build_registry_url(tag_to_pull)
+
+		# Clean up pulled image
+		try:
+			client.images.remove(new_image.id)
+			debug(f"Removed pulled image {new_digest} after comparison")
+		except:
+			pass  # Image might be in use by another container
+
+		return {
+			'has_update': has_update,
+			'current_tag': current_tag,
+			'new_tag': tag_to_pull,
+			'current_digest': current_digest,
+			'current_size': sizeof_fmt(current_size),
+			'new_digest': new_digest,
+			'new_size': sizeof_fmt(new_size),
+			'size_diff': size_diff_str,
+			'current_date': current_date_str,
+			'new_date': new_date_str,
+			'days_diff': days_diff,
+			'description': description,
+			'registry_url': registry_url,
+			'registry_name': registry_name
+		}
+	except Exception as e:
+		error(f"Error getting update comparison for {containerName}: {e}")
+		return None
+
+def get_dockerhub_description(image_tag):
+	"""
+	Get description from Docker Hub API.
+	Returns truncated description or None if not available.
+	"""
+	try:
+		import requests
+
+		# Parse image name
+		# Format: [registry/]repository[:tag]
+		# Examples: nginx:latest, library/nginx:latest, ghcr.io/user/image:tag
+
+		parts = image_tag.split('/')
+
+		# Check if it's a Docker Hub image (no registry or docker.io)
+		if len(parts) == 1 or (len(parts) == 2 and '.' not in parts[0]):
+			# Docker Hub image
+			if len(parts) == 1:
+				# Official image (e.g., nginx:latest)
+				namespace = 'library'
+				repo_with_tag = parts[0]
+			else:
+				# User image (e.g., user/image:latest)
+				namespace = parts[0]
+				repo_with_tag = parts[1]
+
+			# Remove tag
+			repo = repo_with_tag.split(':')[0]
+
+			# Call Docker Hub API
+			url = f"https://hub.docker.com/v2/repositories/{namespace}/{repo}/"
+			response = requests.get(url, timeout=5)
+
+			if response.status_code == 200:
+				data = response.json()
+				full_description = data.get('full_description', '')
+				if full_description:
+					# Truncate to 300 characters
+					if len(full_description) > 300:
+						return full_description[:300].rsplit(' ', 1)[0] + '...'
+					return full_description
+
+		return None
+	except Exception as e:
+		debug(f"Could not get Docker Hub description: {e}")
+		return None
+
+def build_registry_url(image_tag):
+	"""
+	Build registry URL for an image (Docker Hub, GitHub Container Registry, etc.).
+	Returns tuple (url, registry_name) or (None, None) if unknown.
+	"""
+	try:
+		parts = image_tag.split('/')
+
+		# Check if it's a Docker Hub image
+		if len(parts) == 1 or (len(parts) == 2 and '.' not in parts[0]):
+			if len(parts) == 1:
+				# Official image - use /_/ format
+				repo_with_tag = parts[0]
+				repo = repo_with_tag.split(':')[0]
+				return (f"https://hub.docker.com/_/{repo}", "Docker Hub")
+			else:
+				# User image - use /r/namespace/repo format
+				namespace = parts[0]
+				repo_with_tag = parts[1]
+				repo = repo_with_tag.split(':')[0]
+				return (f"https://hub.docker.com/r/{namespace}/{repo}", "Docker Hub")
+
+		# GitHub Container Registry (ghcr.io)
+		elif len(parts) >= 2 and parts[0] == 'ghcr.io':
+			# ghcr.io/owner/repo -> https://github.com/owner/repo/pkgs/container/repo
+			owner = parts[1]
+			repo_with_tag = parts[2] if len(parts) > 2 else parts[1]
+			repo = repo_with_tag.split(':')[0]
+			return (f"https://github.com/{owner}/{repo}/pkgs/container/{repo}", "GitHub")
+
+		# Google Container Registry (gcr.io)
+		elif len(parts) >= 2 and parts[0] in ['gcr.io', 'us.gcr.io', 'eu.gcr.io', 'asia.gcr.io']:
+			# gcr.io/project/image -> https://gcr.io/project/image
+			image_path = '/'.join(parts[1:]).split(':')[0]
+			return (f"https://{parts[0]}/{image_path}", "Google Container Registry")
+
+		# Quay.io
+		elif len(parts) >= 2 and parts[0] == 'quay.io':
+			# quay.io/namespace/repo -> https://quay.io/repository/namespace/repo
+			namespace = parts[1]
+			repo_with_tag = parts[2] if len(parts) > 2 else parts[1]
+			repo = repo_with_tag.split(':')[0]
+			return (f"https://quay.io/repository/{namespace}/{repo}", "Quay.io")
+
+		# Amazon ECR Public
+		elif len(parts) >= 2 and 'public.ecr.aws' in parts[0]:
+			# public.ecr.aws/namespace/repo -> https://gallery.ecr.aws/namespace/repo
+			namespace = parts[1]
+			repo_with_tag = parts[2] if len(parts) > 2 else parts[1]
+			repo = repo_with_tag.split(':')[0]
+			return (f"https://gallery.ecr.aws/{namespace}/{repo}", "Amazon ECR Public")
+
+		else:
+			# Unknown registry
+			return (None, None)
+	except:
+		return (None, None)
+
 def confirm_update(containerId, containerName):
-	markup = InlineKeyboardMarkup(row_width = 1)
+	debug(f"Running command: confirm_update for container {containerName}")
+
+	# Show loading message
+	loading_msg = send_message(message=get_text("fetching_image_data"))
+
+	# Get detailed comparison
+	comparison = get_image_comparison(containerId, containerName)
+
+	# Delete loading message
+	if loading_msg:
+		delete_message(loading_msg.message_id)
+
+	if not comparison:
+		# Fallback to simple confirmation if comparison fails
+		markup = InlineKeyboardMarkup(row_width=1)
+		markup.add(InlineKeyboardButton(get_text("button_confirm_update"), callback_data=f"update|{containerId}"))
+		markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+		send_message(message=get_text("confirm_update", containerName), reply_markup=markup)
+		return
+
+	# Check if images are identical (no update available)
+	if comparison['current_digest'] == comparison['new_digest']:
+		# Same image, no update needed
+		markup = InlineKeyboardMarkup(row_width=1)
+		markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
+		send_message(message=get_text("already_updated", containerName), reply_markup=markup)
+		return
+
+	# Build detailed message
+	message = f"""📦 <b>{containerName}</b>
+
+📌 <b>{get_text('update_current_image')}:</b>
+   {get_text('update_tag')}: <code>{comparison['current_tag']}</code>
+   {get_text('update_created')}: {comparison['current_date']}
+   {get_text('update_size')}: {comparison['current_size']}
+   {get_text('update_digest')}: <code>{comparison['current_digest']}</code>
+
+🆕 <b>{get_text('update_new_image')}:</b>
+   {get_text('update_tag')}: <code>{comparison['new_tag']}</code>
+   {get_text('update_created')}: {comparison['new_date']}
+   {get_text('update_size')}: {comparison['new_size']}
+   {get_text('update_digest')}: <code>{comparison['new_digest']}</code>
+
+📊 <b>{get_text('update_changes')}:</b>
+   • {get_text('update_size_change')}: {comparison['size_diff']}"""
+
+	if comparison['days_diff'] > 0:
+		message += f"\n   • {comparison['days_diff']} {get_text('update_days_newer')}"
+
+	if comparison['description']:
+		message += f"\n\n📝 <b>{get_text('update_description')}:</b>\n{comparison['description']}"
+
+	if comparison['registry_url']:
+		# Use dynamic text based on registry
+		if comparison['registry_name']:
+			link_text = f"{get_text('update_more_info_registry', comparison['registry_name'])}"
+		else:
+			link_text = get_text('update_more_info')
+		message += f"\n\n🔗 <a href=\"{comparison['registry_url']}\">{link_text}</a>"
+
+	markup = InlineKeyboardMarkup(row_width=1)
 	markup.add(InlineKeyboardButton(get_text("button_confirm_update"), callback_data=f"update|{containerId}"))
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
-	send_message(message=get_text("confirm_update", containerName), reply_markup=markup)
+	send_message(message=message, reply_markup=markup)
 
 def confirm_update_selected(chatId, messageId):
 	_, selected = load_update_data(chatId, messageId)
@@ -5245,7 +5594,16 @@ def get_docker_tags_from_DockerHub(repo_name):
 	if architecture is None:
 		return []
 
-	url = f"https://hub.docker.com/v2/repositories/{repo_name}/tags?page_size=99"
+	# Handle official Docker Hub images (e.g., redis, nginx, postgres)
+	# Official images need 'library/' prefix in the API URL
+	if '/' not in repo_name:
+		# Official image - add library/ prefix
+		full_repo_name = f"library/{repo_name}"
+	else:
+		# User image - use as-is
+		full_repo_name = repo_name
+
+	url = f"https://hub.docker.com/v2/repositories/{full_repo_name}/tags?page_size=99"
 	try:
 		response = requests.get(url, timeout=10)
 		if response.status_code == 404:

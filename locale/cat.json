@@ -289,5 +289,21 @@
   "project_deleted_success": "✅ Projecte <b>$1</b> eliminat correctament (<b>$2 contenidors</b>)",
   "no_containers_to_delete": "No hi ha contenidors per eliminar",
   "restarting_project_after_update": "🔄 Reiniciant projecte <b>$1</b> (<b>$2 contenidors</b>)...",
-  "project_restarted_after_update_success": "✅ Projecte <b>$1</b> reiniciat correctament (<b>$2 contenidors</b>)"
+  "project_restarted_after_update_success": "✅ Projecte <b>$1</b> reiniciat correctament (<b>$2 contenidors</b>)",
+  "update_current_image": "Imatge actual",
+  "update_new_image": "Imatge nova",
+  "update_tag": "Tag",
+  "update_created": "Creada",
+  "update_size": "Mida",
+  "update_digest": "Digest",
+  "update_changes": "Canvis",
+  "update_size_change": "Mida",
+  "update_days_newer": "dies més recent",
+  "update_description": "Descripció",
+  "update_more_info": "Més informació a Docker Hub",
+  "update_more_info_registry": "Més informació a $1",
+  "update_no_description": "Sense descripció disponible",
+  "update_date_unknown": "Desconeguda",
+  "update_no_size_change": "Sense canvis",
+  "fetching_image_data": "<i>⏳ Obtenint dades de la imatge...</i>"
 }

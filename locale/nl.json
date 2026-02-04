@@ -290,5 +290,21 @@
   "project_deleted_success": "✅ Project <b>$1</b> succesvol verwijderd (<b>$2 containers</b>)",
   "no_containers_to_delete": "Geen containers om te verwijderen",
   "restarting_project_after_update": "🔄 Project <b>$1</b> wordt opnieuw gestart (<b>$2 containers</b>)...",
-  "project_restarted_after_update_success": "✅ Project <b>$1</b> succesvol opnieuw gestart (<b>$2 containers</b>)"
+  "project_restarted_after_update_success": "✅ Project <b>$1</b> succesvol opnieuw gestart (<b>$2 containers</b>)",
+  "update_current_image": "Huidige image",
+  "update_new_image": "Nieuwe image",
+  "update_tag": "Tag",
+  "update_created": "Gemaakt",
+  "update_size": "Grootte",
+  "update_digest": "Digest",
+  "update_changes": "Wijzigingen",
+  "update_size_change": "Grootte",
+  "update_days_newer": "dagen nieuwer",
+  "update_description": "Beschrijving",
+  "update_more_info": "Meer informatie op Docker Hub",
+  "update_more_info_registry": "Meer informatie op $1",
+  "update_no_description": "Geen beschrijving beschikbaar",
+  "update_date_unknown": "Onbekend",
+  "update_no_size_change": "Geen wijzigingen",
+  "fetching_image_data": "<i>⏳ Afbeeldingsgegevens ophalen...</i>"
 }
