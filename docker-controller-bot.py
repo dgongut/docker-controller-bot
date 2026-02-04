@@ -28,9 +28,9 @@ from schedule_flow import (
     save_schedule_state, load_schedule_state, clear_schedule_state,
     init_add_schedule_state
 )
-from migrate_schedules import migrate_schedules
+from port_manager import PortManager
 
-VERSION = "4.0.0_rc1"
+VERSION = "4.0.0_rc2"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -133,14 +133,6 @@ bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
 # Instanciamos el ScheduleManager
 schedule_manager = ScheduleManager(SCHEDULE_PATH, SCHEDULE_JSON_FILE)
-
-# Ejecutar migración de schedules si es necesario
-try:
-	migrate_schedules()
-	# Refresh the cache after migration to ensure schedules are loaded
-	schedule_manager._load_cache()
-except Exception as e:
-	error(f"Error during schedule migration: {e}")
 
 # ============================================================================
 # SISTEMA DE COLA DE MENSAJES CON RATE LIMITING
@@ -437,7 +429,7 @@ class DockerManager:
 
 			# Lista de servicios con estado e imagen
 			text += f'📋 {get_text("project_services_list")}:\n'
-			for service_name in sorted(project_info.get_service_names()):
+			for service_name in sort_project_services(project_info):
 				container = project_info.services[service_name]
 				status_emoji = get_status_emoji(container.status, container.name, container)
 
@@ -452,7 +444,7 @@ class DockerManager:
 			# Dependencias entre servicios
 			text += f'\n🔗 {get_text("project_dependencies")}:\n'
 			has_dependencies = False
-			for service_name in sorted(project_info.get_service_names()):
+			for service_name in sort_project_services(project_info):
 				container = project_info.services[service_name]
 				depends_on = container.labels.get('com.docker.compose.depends_on', '')
 				if depends_on:
@@ -750,6 +742,9 @@ class DockerManager:
 # Instanciamos el DockerManager
 docker_manager = DockerManager()
 
+# Instanciamos el PortManager
+port_manager = PortManager(docker_manager)
+
 class DockerEventMonitor:
 	def __init__(self):
 		self.client = docker.from_env()
@@ -825,9 +820,11 @@ class DockerUpdateMonitor:
 	def detectar_actualizaciones(self):
 		while True:
 			containers = self.client.containers.list(all=True)
+			# Sort containers: bot first, then running, then stopped (all alphabetically)
+			sorted_containers = sort_containers_by_priority(containers)
 			grouped_updates_containers = []
 			should_notify = False
-			for container in containers:
+			for container in sorted_containers:
 				if (container.status == "exited" or container.status == "dead") and not CHECK_UPDATE_STOPPED_CONTAINERS:
 					debug(f"Ignoring update check for container {container.name} (stopped)")
 					continue
@@ -2029,8 +2026,10 @@ def command_controller(message):
 				save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
 	elif comando in ('/updateall', f'/updateall@{bot.get_me().username}'):
 		containers = docker_manager.list_containers()
+		# Sort containers: bot first, then running, then stopped (all alphabetically)
+		sorted_containers = sort_containers_by_priority(containers)
 		containersToUpdate = []
-		for container in containers:
+		for container in sorted_containers:
 			if update_available(container):
 				containersToUpdate.append(container.name)
 		if not containersToUpdate:
@@ -2222,7 +2221,9 @@ def button_controller(call):
 		# CONFIRM UPDATE ALL
 		elif comando == "updateAll":
 			containers = docker_manager.list_containers()
-			for container in containers:
+			# Sort containers: bot first, then running, then stopped (all alphabetically)
+			sorted_containers = sort_containers_by_priority(containers)
+			for container in sorted_containers:
 				if update_available(container):
 					update(container.id, container.name)
 
@@ -2347,8 +2348,8 @@ def button_controller(call):
 			markup = InlineKeyboardMarkup(row_width=BUTTON_COLUMNS)
 			botones = []
 
-			# Add individual container buttons (sorted by service name)
-			for service_name in sorted(project_info.get_service_names()):
+			# Add individual container buttons (sorted by status and service name)
+			for service_name in sort_project_services(project_info):
 				container = project_info.services[service_name]
 
 				# Determine status indicator
@@ -2362,7 +2363,7 @@ def button_controller(call):
 
 				botones.append(
 					InlineKeyboardButton(
-						f"🐳{status_indicator} {service_name}",
+						f"{status_indicator} {service_name}",
 						callback_data=f"{callback_action}|{container.id[:CONTAINER_ID_LENGTH]}"
 					)
 				)
@@ -2426,8 +2427,8 @@ def button_controller(call):
 			markup = InlineKeyboardMarkup(row_width=BUTTON_COLUMNS)
 			botones = []
 
-			# Add individual container buttons (sorted by service name)
-			for service_name in sorted(project_info.get_service_names()):
+			# Add individual container buttons (sorted by status and service name)
+			for service_name in sort_project_services(project_info):
 				container = project_info.services[service_name]
 
 				# Determine status indicator
@@ -2441,7 +2442,7 @@ def button_controller(call):
 
 				botones.append(
 					InlineKeyboardButton(
-						f"🐳{status_indicator} {service_name}",
+						f"{status_indicator} {service_name}",
 						callback_data=f"{callback_action}|{container.id[:CONTAINER_ID_LENGTH]}"
 					)
 				)
@@ -2511,8 +2512,8 @@ def button_controller(call):
 			markup = InlineKeyboardMarkup(row_width=BUTTON_COLUMNS)
 			botones = []
 
-			# Add individual container buttons (sorted by service name)
-			for service_name in sorted(project_info.get_service_names()):
+			# Add individual container buttons (sorted by status and service name)
+			for service_name in sort_project_services(project_info):
 				container = project_info.services[service_name]
 
 				# Determine status indicator
@@ -2526,7 +2527,7 @@ def button_controller(call):
 
 				botones.append(
 					InlineKeyboardButton(
-						f"🐳{status_indicator} {service_name}",
+						f"{status_indicator} {service_name}",
 						callback_data=f"{callback_action}|{container.id[:CONTAINER_ID_LENGTH]}"
 					)
 				)
@@ -2596,8 +2597,8 @@ def button_controller(call):
 			markup = InlineKeyboardMarkup(row_width=BUTTON_COLUMNS)
 			botones = []
 
-			# Add individual container buttons (sorted by service name)
-			for service_name in sorted(project_info.get_service_names()):
+			# Add individual container buttons (sorted by status and service name)
+			for service_name in sort_project_services(project_info):
 				container = project_info.services[service_name]
 
 				# Determine status indicator
@@ -2605,7 +2606,7 @@ def button_controller(call):
 
 				botones.append(
 					InlineKeyboardButton(
-						f"🐳{status_indicator} {service_name}",
+						f"{status_indicator} {service_name}",
 						callback_data=f"confirmDelete|{container.id[:CONTAINER_ID_LENGTH]}"
 					)
 				)
@@ -2664,9 +2665,9 @@ def button_controller(call):
 			markup = InlineKeyboardMarkup(row_width=BUTTON_COLUMNS)
 			botones = []
 
-			# Add individual container buttons (sorted by service name)
+			# Add individual container buttons (sorted by status and service name)
 			# Only show running/restarting containers
-			for service_name in sorted(project_info.get_service_names()):
+			for service_name in sort_project_services(project_info):
 				container = project_info.services[service_name]
 
 				# Filter: only show running/restarting containers
@@ -2738,8 +2739,8 @@ def button_controller(call):
 			markup = InlineKeyboardMarkup(row_width=BUTTON_COLUMNS)
 			botones = []
 
-			# Add individual container buttons (sorted by service name)
-			for service_name in sorted(project_info.get_service_names()):
+			# Add individual container buttons (sorted by status and service name)
+			for service_name in sort_project_services(project_info):
 				container = project_info.services[service_name]
 				status_emoji = get_status_emoji(container.status, container.name, container)
 				botones.append(
@@ -2805,8 +2806,8 @@ def button_controller(call):
 			markup = InlineKeyboardMarkup(row_width=BUTTON_COLUMNS)
 			botones = []
 
-			# Add individual container buttons (sorted by service name)
-			for service_name in sorted(project_info.get_service_names()):
+			# Add individual container buttons (sorted by status and service name)
+			for service_name in sort_project_services(project_info):
 				container = project_info.services[service_name]
 				status_emoji = get_status_emoji(container.status, container.name, container)
 				botones.append(
@@ -2872,8 +2873,8 @@ def button_controller(call):
 			markup = InlineKeyboardMarkup(row_width=BUTTON_COLUMNS)
 			botones = []
 
-			# Add individual container buttons (sorted by service name)
-			for service_name in sorted(project_info.get_service_names()):
+			# Add individual container buttons (sorted by status and service name)
+			for service_name in sort_project_services(project_info):
 				container = project_info.services[service_name]
 				status_emoji = get_status_emoji(container.status, container.name, container)
 				botones.append(
@@ -2939,8 +2940,8 @@ def button_controller(call):
 			markup = InlineKeyboardMarkup(row_width=BUTTON_COLUMNS)
 			botones = []
 
-			# Add individual container buttons (sorted by service name)
-			for service_name in sorted(project_info.get_service_names()):
+			# Add individual container buttons (sorted by status and service name)
+			for service_name in sort_project_services(project_info):
 				container = project_info.services[service_name]
 				update_emoji = get_update_emoji(container.name)
 				botones.append(
@@ -3006,8 +3007,8 @@ def button_controller(call):
 			markup = InlineKeyboardMarkup(row_width=BUTTON_COLUMNS)
 			botones = []
 
-			# Add individual container buttons (sorted by service name)
-			for service_name in sorted(project_info.get_service_names()):
+			# Add individual container buttons (sorted by status and service name)
+			for service_name in sort_project_services(project_info):
 				container = project_info.services[service_name]
 				status_emoji = get_status_emoji(container.status, container.name, container)
 				botones.append(
@@ -3100,8 +3101,8 @@ def button_controller(call):
 			markup = InlineKeyboardMarkup(row_width=BUTTON_COLUMNS)
 			botones = []
 
-			# Add individual container buttons (sorted by service name)
-			for service_name in sorted(project_info.get_service_names()):
+			# Add individual container buttons (sorted by status and service name)
+			for service_name in sort_project_services(project_info):
 				container = project_info.services[service_name]
 				status_emoji = get_status_emoji(container.status, container.name, container)
 				botones.append(
@@ -3251,6 +3252,15 @@ def button_controller(call):
 			# Delete the original message and send a new one with the result
 			delete_message(messageId, chatId)
 			send_message(chat_id=chatId, message=result_message)
+
+		elif comando == "checkPort":
+			# Ask user for port to check
+			ask_port_to_check(userId)
+
+		elif comando == "cancelCheckPort":
+			# Cancel port check request
+			clear_port_check_request_state(userId)
+			delete_message(messageId, chatId)
 
 		# SCHEDULE CALLBACKS
 		elif comando == "scheduleAdd":
@@ -3652,6 +3662,7 @@ def handle_text(message):
 	userId = message.from_user.id
 	username = message.from_user.username
 	pending = load_command_request_state(userId)
+	pending_port_check = load_port_check_request_state(userId)
 	schedule_state = load_schedule_state(userId)
 	message_thread_id = message.message_thread_id
 	if not message_thread_id:
@@ -3674,6 +3685,25 @@ def handle_text(message):
 		delete_message(message.message_id, message.chat.id)
 		clear_command_request_state(userId)
 		confirm_execute_command(containerId, containerName, command_text)
+	elif pending_port_check:
+		port_text = message.text.strip()
+		deleteMessage = pending_port_check.get("deleteMessage")
+		delete_message(deleteMessage)
+		delete_message(message.message_id, message.chat.id)
+		clear_port_check_request_state(userId)
+
+		# Validate port number
+		try:
+			port_number = int(port_text)
+			if port_number < 1 or port_number > 65535:
+				send_message(message=get_text("ports_invalid_range"))
+				return
+
+			# Check the port
+			is_available, result_message = check_specific_port(port_number)
+			send_message(message=result_message)
+		except ValueError:
+			send_message(message=get_text("ports_invalid_number"))
 	elif schedule_state:
 		handle_schedule_flow(userId, message.text.strip(), schedule_state, message.chat.id, message.message_id)
 	else:
@@ -4272,8 +4302,8 @@ def build_hierarchical_keyboard(containers, action_type, bot_container_name, fil
 			)
 		)
 
-	# Add standalone container buttons (sorted) with status indicators
-	for container in sorted(standalone_containers, key=lambda x: x.name.lower()):
+	# Add standalone container buttons (sorted: bot first, then running, then stopped - all alphabetically)
+	for container in sort_containers_by_priority(standalone_containers):
 		# Apply status filter if specified (only for standalone containers)
 		if filter_standalone_status and container.status not in filter_standalone_status:
 			continue
@@ -4299,7 +4329,7 @@ def build_hierarchical_keyboard(containers, action_type, bot_container_name, fil
 
 		botones.append(
 			InlineKeyboardButton(
-				f"🐳 {status_emoji} {container.name}",
+				f"{status_emoji} {container.name}",
 				callback_data=f"{callback_action}|{container.id[:CONTAINER_ID_LENGTH]}"
 			)
 		)
@@ -4386,14 +4416,34 @@ def display_containers(containers):
 	# Build container list
 	result += "<pre>"
 
-	# Show multi-container projects first
+	# Separate bot container from other standalone containers
+	bot_container = None
+	other_standalone = []
+	if standalone_containers:
+		for container in standalone_containers:
+			if container.name == CONTAINER_NAME:
+				bot_container = container
+			else:
+				other_standalone.append(container)
+
+	# Show bot container first if present
+	if bot_container:
+		result += f"🐳 {get_status_emoji(bot_container.status, bot_container.name, bot_container)} {bot_container.name}"
+		if update_cache[bot_container.id]:
+			result += " ⬆️"
+		result += "\n"
+		# Add empty line after bot if there are projects or other containers
+		if project_containers or other_standalone:
+			result += "\n"
+
+	# Show multi-container projects after bot
 	for project_name in sorted(project_containers.keys()):
 		project_conts = project_containers[project_name]
 		container_count = len(project_conts)
 		result += f"📦 {project_name} ({get_text('compose_project_containers', container_count)})\n"
 
-		# Sort containers within project by name
-		sorted_project_conts = sorted(project_conts, key=lambda x: x.name.lower())
+		# Sort containers within project: running first, then stopped (all alphabetically)
+		sorted_project_conts = sort_containers_by_priority(project_conts)
 		for container in sorted_project_conts:
 			# Use cached info
 			_, service_name = container_info_cache[container.id]
@@ -4403,10 +4453,9 @@ def display_containers(containers):
 			result += "\n"
 		result += "\n"  # Empty line between projects
 
-	# Show standalone containers
-	if standalone_containers:
-		# Sort standalone containers by name
-		sorted_standalone = sorted(standalone_containers, key=lambda x: x.name.lower())
+	# Show other standalone containers last (running first, then stopped - all alphabetically)
+	if other_standalone:
+		sorted_standalone = sort_containers_by_priority(other_standalone)
 		for container in sorted_standalone:
 			result += f"🐳 {get_status_emoji(container.status, container.name, container)} {container.name}"
 			if update_cache[container.id]:
@@ -4415,6 +4464,55 @@ def display_containers(containers):
 
 	result += "</pre>"
 	return result
+
+def sort_containers_by_priority(containers):
+	"""
+	Sort containers with consistent priority:
+	1. Bot container (CONTAINER_NAME) first
+	2. Running/restarting containers (alphabetically)
+	3. Stopped/paused/exited containers (alphabetically)
+
+	Args:
+		containers: List of container objects
+
+	Returns:
+		List of sorted containers
+	"""
+	def sort_key(container):
+		# Priority 1: Bot container first
+		is_bot = 0 if container.name == CONTAINER_NAME else 1
+
+		# Priority 2: Running containers before stopped
+		is_running = 0 if container.status in ['running', 'restarting'] else 1
+
+		# Priority 3: Alphabetical by name
+		name_lower = container.name.lower()
+
+		return (is_bot, is_running, name_lower)
+
+	return sorted(containers, key=sort_key)
+
+def sort_project_services(project_info):
+	"""
+	Sort project services with consistent priority:
+	1. Running/restarting containers (alphabetically by service name)
+	2. Stopped/paused/exited containers (alphabetically by service name)
+
+	Args:
+		project_info: ComposeProjectInfo object
+
+	Returns:
+		List of service names sorted by priority
+	"""
+	def sort_key(service_name):
+		container = project_info.services[service_name]
+		# Priority 1: Running containers before stopped
+		is_running = 0 if container.status in ['running', 'restarting'] else 1
+		# Priority 2: Alphabetical by service name
+		name_lower = service_name.lower()
+		return (is_running, name_lower)
+
+	return sorted(project_info.get_service_names(), key=sort_key)
 
 def get_container_health_status(container):
 	"""Get the health status of a container. Returns 'healthy', 'unhealthy', 'starting', or None"""
@@ -4487,112 +4585,88 @@ def get_random_available_port():
 	Checks both Docker containers and system-level port availability
 	Returns the port number or None if no available port found
 	"""
-	import random
-	import socket
-
-	def is_port_available(port):
-		"""Check if a port is available by trying to bind to it"""
-		# Check TCP
-		try:
-			with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-				s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-				s.bind(('0.0.0.0', port))
-				return True
-		except OSError:
-			return False
-
-	# Get all ports used by containers
-	containers = docker_manager.list_containers()
-	used_ports = set()
-
-	for container in containers:
-		try:
-			# Skip containers with host network
-			network_mode = container.attrs.get('HostConfig', {}).get('NetworkMode', '')
-			if network_mode == 'host':
-				continue
-
-			# Get port bindings
-			port_bindings = container.attrs.get('HostConfig', {}).get('PortBindings', {})
-			if port_bindings:
-				for container_port, host_bindings in port_bindings.items():
-					if host_bindings:
-						for host_binding in host_bindings:
-							host_port = host_binding.get('HostPort', '')
-							if host_port:
-								try:
-									used_ports.add(int(host_port))
-								except ValueError:
-									pass
-		except Exception as e:
-			debug(f"Error getting ports from container {container.name}: {e}")
-			continue
-
-	# Try to find an available port (max 100 attempts)
-	for _ in range(100):
-		port = random.randint(10000, 60000)
-		# Check if port is not used by Docker containers AND is available on the system
-		if port not in used_ports and is_port_available(port):
-			return port
-
-	# If no port found after 100 attempts, return None
-	return None
+	return port_manager.get_random_available_port()
 
 def show_container_ports():
 	"""
 	Show all ports used by containers
 	"""
 	containers = docker_manager.list_containers()
+
+	# Sort containers: bot first, then running, then stopped (all alphabetically)
+	sorted_containers = sort_containers_by_priority(containers)
+
 	message_lines = []
-	host_network_containers = []
 
-	for container in containers:
+	for container in sorted_containers:
 		try:
-			# Check if container uses host network
-			network_mode = container.attrs.get('HostConfig', {}).get('NetworkMode', '')
-			if network_mode == 'host':
-				host_network_containers.append(container.name)
-				continue
+			ports, is_host_network = port_manager.get_container_ports(container)
 
-			# Get port bindings
-			port_bindings = container.attrs.get('HostConfig', {}).get('PortBindings', {})
-			if port_bindings:
-				ports = []
-				for container_port, host_bindings in port_bindings.items():
-					if host_bindings:
-						for host_binding in host_bindings:
-							host_port = host_binding.get('HostPort', '')
-							if host_port:
-								ports.append(host_port)
+			if ports:
+				status = container.status
+				emoji = "🟢" if status == "running" else "🔴"
+				# Remove duplicates and sort
+				unique_ports = sorted(set(ports), key=lambda x: (int(x.split('/')[0]), x.split('/')[1]))
 
-				if ports:
-					# Get container status
-					status = container.status
-					emoji = "🟢" if status == "running" else "🔴"
-					ports_str = ", ".join(sorted(ports, key=int))
-					message_lines.append(f"{emoji} <b>{container.name}</b>: {ports_str}")
+				# Format container header
+				if is_host_network:
+					container_header = f"{emoji} {container.name} (host):"
+				else:
+					container_header = f"{emoji} {container.name}:"
+
+				# Add container header
+				message_lines.append(container_header)
+
+				# Add each port on a separate line with indentation
+				for port in unique_ports:
+					message_lines.append(f"  - {port}")
+			elif is_host_network and container.status in ['running', 'restarting']:
+				# Container with host network but no detectable ports
+				status = container.status
+				emoji = "🟢" if status == "running" else "🔴"
+				message_lines.append(f"{emoji} {container.name} (host): {get_text('ports_host_no_detection')}")
 		except Exception as e:
 			debug(f"Error getting ports from container {container.name}: {e}")
 			continue
 
 	# Build final message
 	if message_lines:
-		message = get_text("ports_list_header") + "\n\n" + "\n".join(message_lines)
+		message = get_text("ports_list_header") + "\n\n<pre>" + "\n".join(message_lines) + "</pre>"
 	else:
 		message = get_text("ports_no_containers")
 
-	# Add note about host network containers
-	if host_network_containers:
-		message += "\n\n" + get_text("ports_host_network_note")
-
-	# Add inline keyboard with Generate and Close buttons
+	# Add inline keyboard with Generate, Check and Close buttons
 	markup = InlineKeyboardMarkup(row_width=2)
 	markup.add(
 		InlineKeyboardButton(get_text("ports_button_generate"), callback_data="generatePort"),
+		InlineKeyboardButton(get_text("ports_button_check"), callback_data="checkPort")
+	)
+	markup.add(
 		InlineKeyboardButton(get_text("button_close"), callback_data="cerrar")
 	)
 
 	send_message(message=message, reply_markup=markup)
+
+def ask_port_to_check(userId):
+	"""Ask user for a port number to check"""
+	debug(f"Running command: ask_port_to_check for user {userId}")
+	markup = InlineKeyboardMarkup(row_width=1)
+	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cancelCheckPort"))
+	x = send_message(message=get_text("ports_ask_port"), reply_markup=markup)
+	if x:
+		save_port_check_request_state(userId, x.message_id)
+
+def check_specific_port(port_number):
+	"""
+	Check if a specific port is available
+	Returns tuple (is_available, message)
+	"""
+	is_available, message_key, container_name = port_manager.check_port_availability(port_number)
+
+	if container_name:
+		return is_available, get_text(message_key, port_number, container_name)
+	else:
+		return is_available, get_text(message_key, port_number)
 
 def print_donors():
 	donors = get_array_donors_online()
@@ -4726,6 +4800,19 @@ def load_command_request_state(user_id):
 
 def clear_command_request_state(user_id):
 	key = f"pending_command_{user_id}"
+	delete_cache_item(key)
+
+def save_port_check_request_state(user_id, deleteMessage):
+	key = f"pending_port_check_{user_id}"
+	value = {"deleteMessage": deleteMessage}
+	write_cache_item(key, value)
+
+def load_port_check_request_state(user_id):
+	key = f"pending_port_check_{user_id}"
+	return read_cache_item(key)
+
+def clear_port_check_request_state(user_id):
+	key = f"pending_port_check_{user_id}"
 	delete_cache_item(key)
 
 def save_container_cache(chat_id, message_id, containers):

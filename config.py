@@ -48,10 +48,12 @@ docker_architectures = {
 CALL_PATTERNS = {
     "askCommand": ["containerId"],
     "cancelAskCommand": [],
+    "cancelCheckPort": [],
     "cancelExec": ["commandId"],
     "changeTag": ["containerId", "tag"],
     "changeTagContainer": ["containerId"],
     "cerrar": [],
+    "checkPort": [],
     "checkUpdate": ["containerId"],
     "compose": ["containerId"],
     "confirmChangeTag": ["containerId", "tag"],
