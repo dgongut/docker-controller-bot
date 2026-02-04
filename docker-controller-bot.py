@@ -515,16 +515,11 @@ class DockerManager:
 				image_status = read_container_update_status(image_with_tag, container_name)
 				if image_status is None:
 					image_status = ""
-				# 🔴 DEBUG TEMPORAL
-				debug(f"[INFO] Container: {container_name}, Image: {image_with_tag}, Status from cache: '{image_status}'")
 			except Exception as e:
 				debug(f"Queried for update {container_name} and it is not available: [{e}]")
 
 			if image_status and get_text("NEED_UPDATE_CONTAINER_TEXT") in image_status:
 				possible_update = True
-				debug(f"[INFO] ✅ Update detected for {container_name}")
-			else:
-				debug(f"[INFO] ❌ No update for {container_name}. Looking for '{get_text('NEED_UPDATE_CONTAINER_TEXT')}' in '{image_status}'")
 
 			text = '<pre><code>\n'
 			text += f'{get_text("status")}: {get_status_emoji(container.status, container_name, container)} ({container.status})\n\n'
@@ -628,18 +623,6 @@ class DockerManager:
 			container_attrs = container.attrs.get('Config', {})
 			image_with_tag = container_attrs.get('Image', '')
 			local_image = container.image.id
-
-			# ⚠️ TEMPORAL: SIMULAR ACTUALIZACIONES DISPONIBLES - RECUERDA QUITAR ESTO ⚠️
-			debug("🔴 MODO SIMULACIÓN: Forzando actualización disponible")
-			markup = InlineKeyboardMarkup(row_width = 1)
-			markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{container.id[:CONTAINER_ID_LENGTH]}"))
-			image_status = get_text("NEED_UPDATE_CONTAINER_TEXT")
-			sent_message = send_message(message=get_text("available_update", container.name), reply_markup=markup)
-			if sent_message:
-				save_container_cache(sent_message.chat.id, sent_message.message_id, [container])
-			save_container_update_status(image_with_tag, container.name, image_status)
-			return
-			# ⚠️ FIN MODO SIMULACIÓN ⚠️
 
 			try:
 				remote_image = self.client.images.pull(image_with_tag)
