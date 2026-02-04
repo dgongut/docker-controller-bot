@@ -3707,17 +3707,22 @@ def get_image_comparison(containerId, containerName, new_tag=None):
 
 		# Clean up description: remove Markdown formatting and truncate
 		if description:
-			# Remove Markdown headers (# ## ###)
-			description = re.sub(r'^#+\s+', '', description, flags=re.MULTILINE)
+			# Remove Markdown headers (# ## ### with or without space)
+			description = re.sub(r'^#+\s*', '', description, flags=re.MULTILINE)
 			# Remove Markdown links [text](url) -> text
 			description = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', description)
 			# Remove Markdown bold/italic (**text** or *text* or __text__)
 			description = re.sub(r'[*_]{1,2}([^*_]+)[*_]{1,2}', r'\1', description)
 			# Remove extra whitespace and newlines
 			description = ' '.join(description.split())
+			# Remove any remaining # symbols
+			description = description.replace('#', '')
 			# Truncate if still too long
 			if len(description) > 200:
 				description = description[:200].rsplit(' ', 1)[0] + '...'
+			# Final cleanup: if description is just "..." or empty, set to None
+			if not description or description.strip() in ['...', '.', '']:
+				description = None
 
 		# Build registry URL
 		registry_url, registry_name = build_registry_url(tag_to_pull)
