@@ -300,6 +300,7 @@
   "update_changes": "Wijzigingen",
   "update_size_change": "Grootte",
   "update_days_newer": "dagen nieuwer",
+  "update_days_older": "dagen ouder",
   "update_description": "Beschrijving",
   "update_more_info": "Meer informatie op Docker Hub",
   "update_more_info_registry": "Meer informatie op $1",

@@ -630,16 +630,19 @@ class DockerManager:
 					error(f"Failed to pull image {image_with_tag}. Verify that the image exists in the registry.")
 					image_status = ""
 					save_container_update_status(image_with_tag, container.name, image_status)
+					send_message(message=get_text("error_pulling_image", image_with_tag))
 					return
 			except docker.errors.ImageNotFound:
 				error(f"Image {image_with_tag} not found in registry. Check the image name.")
 				image_status = ""
 				save_container_update_status(image_with_tag, container.name, image_status)
+				send_message(message=get_text("error_pulling_image", image_with_tag))
 				return
 			except docker.errors.APIError as e:
 				error(f"Error pulling image {image_with_tag}. Error: [{e}]")
 				image_status = ""
 				save_container_update_status(image_with_tag, container.name, image_status)
+				send_message(message=get_text("error_pulling_image", image_with_tag))
 				return
 
 			local_image_normalized = local_image.replace('sha256:', '')
@@ -3541,6 +3544,20 @@ def confirm_change_tag(containerId, containerName, tag):
 ⚠️ Ambos tags apuntan a la misma imagen (mismo digest)."""
 	else:
 		# Different images, show full comparison
+		# Build changes list
+		changes = []
+		changes.append(f"{get_text('update_size_change')}: {comparison['size_diff']}")
+		if comparison['days_diff'] > 0:
+			changes.append(f"{comparison['days_diff']} {get_text('update_days_newer')}")
+		elif comparison['days_diff'] < 0:
+			changes.append(f"{abs(comparison['days_diff'])} {get_text('update_days_older')}")
+
+		# Format changes (use bullet points only if multiple items)
+		if len(changes) > 1:
+			changes_text = "\n   • " + "\n   • ".join(changes)
+		else:
+			changes_text = "\n   " + changes[0]
+
 		message = f"""📦 <b>{containerName}</b>
 
 📌 <b>{get_text('update_current_image')}:</b>
@@ -3555,11 +3572,7 @@ def confirm_change_tag(containerId, containerName, tag):
    {get_text('update_size')}: {comparison['new_size']}
    {get_text('update_digest')}: <code>{comparison['new_digest']}</code>
 
-📊 <b>{get_text('update_changes')}:</b>
-   • {get_text('update_size_change')}: {comparison['size_diff']}"""
-
-		if comparison['days_diff'] > 0:
-			message += f"\n   • {comparison['days_diff']} {get_text('update_days_newer')}"
+📊 <b>{get_text('update_changes')}:</b>{changes_text}"""
 
 	if comparison['description']:
 		message += f"\n\n📝 <b>{get_text('update_description')}:</b>\n{comparison['description']}"
@@ -3572,7 +3585,10 @@ def confirm_change_tag(containerId, containerName, tag):
 			link_text = get_text('update_more_info')
 		message += f"\n\n🔗 <a href=\"{comparison['registry_url']}\">{link_text}</a>"
 
-	markup = create_confirm_cancel_keyboard(f"changeTag|{containerId}|{tag}", f"button_confirm_change_tag", "cerrar", "button_cancel")
+	# Create keyboard with tag parameter in button text
+	markup = InlineKeyboardMarkup(row_width=1)
+	markup.add(InlineKeyboardButton(get_text("button_confirm_change_tag", tag), callback_data=f"changeTag|{containerId}|{tag}"))
+	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 	send_message(message=message, reply_markup=markup)
 
 def update(containerId, containerName):
@@ -3866,6 +3882,20 @@ def confirm_update(containerId, containerName):
 		send_message(message=get_text("already_updated", containerName))
 		return
 
+	# Build changes list
+	changes = []
+	changes.append(f"{get_text('update_size_change')}: {comparison['size_diff']}")
+	if comparison['days_diff'] > 0:
+		changes.append(f"{comparison['days_diff']} {get_text('update_days_newer')}")
+	elif comparison['days_diff'] < 0:
+		changes.append(f"{abs(comparison['days_diff'])} {get_text('update_days_older')}")
+
+	# Format changes (use bullet points only if multiple items)
+	if len(changes) > 1:
+		changes_text = "\n   • " + "\n   • ".join(changes)
+	else:
+		changes_text = "\n   " + changes[0]
+
 	# Build detailed message
 	message = f"""📦 <b>{containerName}</b>
 
@@ -3881,11 +3911,7 @@ def confirm_update(containerId, containerName):
    {get_text('update_size')}: {comparison['new_size']}
    {get_text('update_digest')}: <code>{comparison['new_digest']}</code>
 
-📊 <b>{get_text('update_changes')}:</b>
-   • {get_text('update_size_change')}: {comparison['size_diff']}"""
-
-	if comparison['days_diff'] > 0:
-		message += f"\n   • {comparison['days_diff']} {get_text('update_days_newer')}"
+📊 <b>{get_text('update_changes')}:</b>{changes_text}"""
 
 	if comparison['description']:
 		message += f"\n\n📝 <b>{get_text('update_description')}:</b>\n{comparison['description']}"
@@ -4011,6 +4037,18 @@ def build_hierarchical_keyboard(containers, action_type, bot_container_name, fil
 			)
 		)
 
+	# Action configuration map for standalone containers
+	standalone_action_config = {
+		'delete': 'confirmDelete',
+		'exec': 'askCommand',
+		'logs': 'logs',
+		'logfile': 'logfile',
+		'checkupdate': 'checkUpdate',
+		'changetag': 'changeTagContainer',
+		'info': 'info',
+		'ports': 'ports'
+	}
+
 	# Add standalone container buttons (sorted: bot first, then running, then stopped - all alphabetically)
 	for container in sort_containers_by_priority(standalone_containers):
 		# Apply status filter if specified (only for standalone containers)
@@ -4021,20 +4059,16 @@ def build_hierarchical_keyboard(containers, action_type, bot_container_name, fil
 		status_emoji = get_status_emoji(container.status, container.name, container)
 
 		# Determine callback action based on action_type
-		if action_type == "Delete":
-			callback_action = "confirmDelete"  # delete requires confirmation
-		elif action_type == "Exec":
-			callback_action = "askCommand"  # exec requires command input
-		elif action_type == "Logs":
-			callback_action = "logs"  # show logs
-		elif action_type == "CheckUpdate":
-			callback_action = "checkUpdate"  # check for updates
-		elif action_type == "Info":
-			callback_action = "info"  # show info
+		action_lower = action_type.lower()
+		if action_lower in standalone_action_config:
+			# Use configured callback for special actions
+			callback_action = standalone_action_config[action_lower]
 		elif container.status in ['running', 'restarting']:
-			callback_action = action_type.lower()  # restart/stop
+			# For running containers, use the action type (restart/stop)
+			callback_action = action_lower
 		else:
-			callback_action = "run"  # start stopped containers
+			# For stopped containers, always use "run"
+			callback_action = "run"
 
 		botones.append(
 			InlineKeyboardButton(
@@ -4264,7 +4298,7 @@ def build_compose_project_level2_keyboard(project_info, project_name, action_typ
 		'logs': {'icon': '📄', 'button_key': None, 'whole_callback': None, 'use_emoji': True},
 		'logfile': {'icon': '📁', 'button_key': None, 'whole_callback': None, 'use_emoji': True},
 		'info': {'icon': 'ℹ️', 'button_key': None, 'whole_callback': None, 'use_emoji': True},
-		'changetag': {'icon': '🏷️', 'button_key': None, 'whole_callback': None, 'use_emoji': True},
+		'changetag': {'icon': '🏷️', 'button_key': None, 'whole_callback': None, 'use_emoji': True, 'callback_prefix': 'changeTagContainer'},
 		'checkupdate': {'icon': '🔄', 'button_key': None, 'whole_callback': None, 'use_emoji': True, 'callback_prefix': 'checkUpdate'},
 		'ports': {'icon': '🔌', 'button_key': None, 'whole_callback': None, 'use_emoji': True}
 	}
@@ -4290,9 +4324,9 @@ def build_compose_project_level2_keyboard(project_info, project_name, action_typ
 
 		# Determine callback action based on action_type and container status
 		if config.get('callback_prefix'):
-			# Use custom callback prefix (e.g., 'confirmDelete' instead of 'delete', 'checkUpdate' instead of 'checkupdate')
+			# Use custom callback prefix (e.g., 'confirmDelete' instead of 'delete', 'checkUpdate' instead of 'checkupdate', 'changeTag' instead of 'changetag')
 			callback_action = config['callback_prefix']
-		elif action_type.lower() in ['delete', 'info', 'changetag', 'logs', 'logfile', 'ports']:
+		elif action_type.lower() in ['delete', 'info', 'logs', 'logfile', 'ports']:
 			# These actions work regardless of status
 			callback_action = action_type.lower()
 		elif container.status in ['running', 'restarting']:

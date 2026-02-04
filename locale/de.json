@@ -300,6 +300,7 @@
   "update_changes": "Änderungen",
   "update_size_change": "Größe",
   "update_days_newer": "Tage neuer",
+  "update_days_older": "Tage älter",
   "update_description": "Beschreibung",
   "update_more_info": "Weitere Informationen auf Docker Hub",
   "update_more_info_registry": "Weitere Informationen auf $1",

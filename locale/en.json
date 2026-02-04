@@ -299,6 +299,7 @@
   "update_changes": "Changes",
   "update_size_change": "Size",
   "update_days_newer": "days newer",
+  "update_days_older": "days older",
   "update_description": "Description",
   "update_more_info": "More information on Docker Hub",
   "update_more_info_registry": "More information on $1",

@@ -299,6 +299,7 @@
   "update_changes": "Canvis",
   "update_size_change": "Mida",
   "update_days_newer": "dies més recent",
+  "update_days_older": "dies més antiga",
   "update_description": "Descripció",
   "update_more_info": "Més informació a Docker Hub",
   "update_more_info_registry": "Més informació a $1",
