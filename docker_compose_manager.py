@@ -1,11 +1,11 @@
 """
 Docker Compose Manager
-Gestiona contenedores que son parte de proyectos Docker Compose
+Manages containers that are part of Docker Compose projects
 """
 import docker
 from typing import Dict, List, Optional
 
-# Labels estándar de Docker Compose
+# Standard Docker Compose labels
 COMPOSE_PROJECT_LABEL = 'com.docker.compose.project'
 COMPOSE_SERVICE_LABEL = 'com.docker.compose.service'
 COMPOSE_WORKING_DIR_LABEL = 'com.docker.compose.project.working_dir'
@@ -14,92 +14,92 @@ COMPOSE_DEPENDS_ON_LABEL = 'com.docker.compose.depends_on'
 
 
 class ComposeProjectInfo:
-    """Información de un proyecto Docker Compose"""
-    
+    """Information about a Docker Compose project"""
+
     def __init__(self, project_name: str, containers: List):
         self.project_name = project_name
         self.containers = containers
         self.services = {}  # service_name -> container
-        
-        # Agrupar contenedores por servicio
+
+        # Group containers by service
         for container in containers:
             service_name = container.labels.get(COMPOSE_SERVICE_LABEL)
             if service_name:
                 self.services[service_name] = container
-    
+
     def get_service_names(self) -> List[str]:
-        """Obtiene lista de nombres de servicios"""
+        """Returns the list of service names"""
         return sorted(list(self.services.keys()))
-    
+
     def get_container_count(self) -> int:
-        """Número de contenedores en el proyecto"""
+        """Number of containers in the project"""
         return len(self.containers)
-    
+
     def get_working_dir(self) -> Optional[str]:
-        """Obtiene el directorio de trabajo del proyecto"""
+        """Returns the project's working directory"""
         if self.containers:
             return self.containers[0].labels.get(COMPOSE_WORKING_DIR_LABEL)
         return None
-    
+
     def get_config_files(self) -> Optional[str]:
-        """Obtiene la ruta del docker-compose.yml"""
+        """Returns the path to the docker-compose.yml"""
         if self.containers:
             return self.containers[0].labels.get(COMPOSE_CONFIG_FILES_LABEL)
         return None
 
 
 class ComposeDetector:
-    """Detecta si un contenedor es parte de un proyecto Compose"""
-    
+    """Detects whether a container is part of a Compose project"""
+
     @staticmethod
     def is_compose_container(container) -> bool:
         """
-        Verifica si un contenedor es parte de un proyecto Compose.
-        
+        Checks whether a container is part of a Compose project.
+
         Args:
-            container: Objeto container de Docker SDK
-            
+            container: Docker SDK container object
+
         Returns:
-            bool: True si es parte de un proyecto Compose
+            bool: True if it is part of a Compose project
         """
         return COMPOSE_PROJECT_LABEL in container.labels
-    
+
     @staticmethod
     def get_project_name(container) -> Optional[str]:
         """
-        Obtiene el nombre del proyecto Compose de un contenedor.
-        
+        Returns the Compose project name of a container.
+
         Args:
-            container: Objeto container de Docker SDK
-            
+            container: Docker SDK container object
+
         Returns:
-            str: Nombre del proyecto o None si no es Compose
+            str: Project name or None if not a Compose container
         """
         return container.labels.get(COMPOSE_PROJECT_LABEL)
-    
+
     @staticmethod
     def get_service_name(container) -> Optional[str]:
         """
-        Obtiene el nombre del servicio dentro del proyecto Compose.
-        
+        Returns the service name within the Compose project.
+
         Args:
-            container: Objeto container de Docker SDK
-            
+            container: Docker SDK container object
+
         Returns:
-            str: Nombre del servicio o None si no es Compose
+            str: Service name or None if not a Compose container
         """
         return container.labels.get(COMPOSE_SERVICE_LABEL)
-    
+
     @staticmethod
     def get_compose_info(container) -> Optional[Dict[str, str]]:
         """
-        Extrae toda la información de Compose de un contenedor.
-        
+        Extracts all Compose information from a container.
+
         Args:
-            container: Objeto container de Docker SDK
-            
+            container: Docker SDK container object
+
         Returns:
-            dict: Información de Compose o None si no es parte de Compose
+            dict: Compose information or None if not part of a Compose project
         """
         if not ComposeDetector.is_compose_container(container):
             return None
@@ -114,17 +114,17 @@ class ComposeDetector:
 
 
 class ComposeProjectManager:
-    """Gestiona operaciones sobre proyectos Docker Compose completos"""
+    """Manages operations on entire Docker Compose projects"""
 
     def __init__(self, client=None):
         self.client = client or docker.from_env()
 
     def get_all_projects(self) -> Dict[str, ComposeProjectInfo]:
         """
-        Obtiene todos los proyectos Compose detectados.
+        Returns all detected Compose projects.
 
         Returns:
-            dict: Diccionario {project_name: ComposeProjectInfo}
+            dict: Dictionary {project_name: ComposeProjectInfo}
         """
         all_containers = self.client.containers.list(all=True)
         projects = {}
@@ -136,7 +136,7 @@ class ComposeProjectManager:
                     projects[project_name] = []
                 projects[project_name].append(container)
 
-        # Convertir a ComposeProjectInfo
+        # Convert to ComposeProjectInfo
         result = {}
         for project_name, containers in projects.items():
             result[project_name] = ComposeProjectInfo(project_name, containers)
@@ -145,13 +145,13 @@ class ComposeProjectManager:
 
     def get_project_containers(self, project_name: str) -> List:
         """
-        Obtiene todos los contenedores de un proyecto Compose.
+        Returns all containers belonging to a Compose project.
 
         Args:
-            project_name: Nombre del proyecto Compose
+            project_name: Compose project name
 
         Returns:
-            list: Lista de contenedores del proyecto
+            list: List of containers in the project
         """
         filters = {
             'label': f'{COMPOSE_PROJECT_LABEL}={project_name}'
@@ -160,13 +160,13 @@ class ComposeProjectManager:
 
     def get_project_info(self, project_name: str) -> Optional[ComposeProjectInfo]:
         """
-        Obtiene información completa de un proyecto Compose.
+        Returns full information about a Compose project.
 
         Args:
-            project_name: Nombre del proyecto
+            project_name: Project name
 
         Returns:
-            ComposeProjectInfo: Información del proyecto o None si no existe
+            ComposeProjectInfo: Project information or None if it doesn't exist
         """
         containers = self.get_project_containers(project_name)
         if not containers:
@@ -175,27 +175,27 @@ class ComposeProjectManager:
 
     def get_service_dependencies(self, container) -> List[str]:
         """
-        Obtiene las dependencias (depends_on) de un servicio.
+        Returns the dependencies (depends_on) of a service.
 
         Args:
-            container: Contenedor del cual obtener dependencias
+            container: Container to get dependencies from
 
         Returns:
-            list: Lista de nombres de servicios de los que depende
+            list: List of service names this service depends on
         """
         depends_on = container.labels.get(COMPOSE_DEPENDS_ON_LABEL, '')
         if not depends_on:
             return []
 
-        # El formato puede ser:
+        # The format can be:
         # - "service1,service2"
         # - "service1:service_started:false,service2:service_started:false"
-        # Necesitamos extraer solo el nombre del servicio
+        # We need to extract only the service name
         dependencies = []
         for dep in depends_on.split(','):
             dep = dep.strip()
             if dep:
-                # Extraer solo el nombre del servicio (antes del primer ':')
+                # Extract only the service name (before the first ':')
                 service_name = dep.split(':')[0].strip()
                 if service_name:
                     dependencies.append(service_name)
@@ -204,59 +204,59 @@ class ComposeProjectManager:
 
     def sort_containers_by_dependencies(self, containers: List) -> List:
         """
-        Ordena contenedores según sus dependencias (topological sort).
-        Los contenedores sin dependencias van primero.
+        Sorts containers by their dependencies (topological sort).
+        Containers without dependencies come first.
 
         Args:
-            containers: Lista de contenedores a ordenar
+            containers: List of containers to sort
 
         Returns:
-            list: Contenedores ordenados según dependencias
+            list: Containers sorted according to dependencies
         """
-        # Crear mapa de servicio -> contenedor
+        # Build service -> container map
         service_to_container = {}
         for container in containers:
             service_name = ComposeDetector.get_service_name(container)
             if service_name:
                 service_to_container[service_name] = container
 
-        # Crear grafo de dependencias
+        # Build dependency graph
         # dependencies[service] = [list of services it depends on]
         dependencies = {}
         for container in containers:
             service_name = ComposeDetector.get_service_name(container)
             if service_name:
                 deps = self.get_service_dependencies(container)
-                # Filtrar solo dependencias que existen en este proyecto
+                # Keep only dependencies that exist in this project
                 deps = [d for d in deps if d in service_to_container]
                 dependencies[service_name] = deps
 
-        # Ordenamiento topológico (Kahn's algorithm)
-        # Calcular in-degree (número de servicios que dependen de cada uno)
+        # Topological sort (Kahn's algorithm)
+        # Compute in-degree (number of services each one depends on)
         in_degree = {service: len(deps) for service, deps in dependencies.items()}
 
-        # Cola con servicios sin dependencias (in-degree = 0)
+        # Queue with services without dependencies (in-degree = 0)
         queue = [service for service, degree in in_degree.items() if degree == 0]
         sorted_services = []
 
         while queue:
-            # Ordenar alfabéticamente para consistencia
+            # Sort alphabetically for consistency
             queue.sort()
             service = queue.pop(0)
             sorted_services.append(service)
 
-            # Para cada servicio que depende del actual, reducir su in-degree
+            # For each service depending on the current one, reduce its in-degree
             for other_service, deps in dependencies.items():
                 if service in deps and other_service not in sorted_services:
                     in_degree[other_service] -= 1
                     if in_degree[other_service] == 0:
                         queue.append(other_service)
 
-        # Si hay ciclos, añadir servicios restantes al final
+        # If there are cycles, append remaining services at the end
         remaining = [s for s in service_to_container.keys() if s not in sorted_services]
         sorted_services.extend(sorted(remaining))
 
-        # Convertir servicios ordenados a contenedores
+        # Convert sorted services back to containers
         sorted_containers = []
         for service in sorted_services:
             if service in service_to_container:

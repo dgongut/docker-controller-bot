@@ -95,7 +95,6 @@
   "ports": "Ports",
   "ports_list_header": "📊 <b>Ports Utilitzats pels Contenidors</b>",
   "ports_no_containers": "ℹ️ No s'han trobat contenidors amb ports mapejats",
-  "ports_host_no_detection": "no detectables",
   "ports_button_generate": "🎲 - Generar",
   "ports_button_check": "🔍 - Comprovar",
   "ports_generated_port": "🎲 <b>Port Aleatori Disponible</b>\n\n<code>$1</code>\n\n✅ Aquest port està lliure al sistema\n📊 Rang: 5000-60000",
@@ -198,7 +197,7 @@
   "schedule_ask_action": "<b>🎯 Quina acció vols realitzar?</b>",
   "schedule_ask_command": "<b>💻 Introdueix la comanda a executar</b>\n\n(ex: ls, docker ps, npm start):",
   "schedule_ask_container": "<b>🐳 Selecciona un contenidor:</b>",
-  "schedule_ask_cron": "<b>⏰ Introdueix l'expressió cron</b>\n\n(ex: '0 0 * * *' per diàriament a mitjanit, visita crontab.guru)\n\nO usa dreceres:\n@yearly - Executar una vegada l'any l'1 de gener a mitjanit\n@monthly - Executar una vegada al mes l'1 a mitjanit\n@weekly - Executar una vegada a la setmana el diumenge a mitjanit\n@daily - Executar una vegada al dia a mitjanit\n@hourly - Executar una vegada cada hora al principi de l'hora\n@reboot - Executar una vegada al reiniciar el sistema",
+  "schedule_ask_cron": "<b>⏰ Introdueix l'expressió cron</b>\n\n(ex: '0 0 * * *' per diàriament a mitjanit, visita crontab.guru)\n\nO usa dreceres:\n<code>@yearly</code> - Executar una vegada l'any l'1 de gener a mitjanit\n<code>@monthly</code> - Executar una vegada al mes l'1 a mitjanit\n<code>@weekly</code> - Executar una vegada a la setmana el diumenge a mitjanit\n<code>@daily</code> - Executar una vegada al dia a mitjanit\n<code>@hourly</code> - Executar una vegada cada hora al principi de l'hora\n<code>@reboot</code> - Executar una vegada al reiniciar el sistema",
   "schedule_ask_minutes": "<b>⏱️ Introdueix els minuts</b>\n\n(ex: 5, 30, 60):",
   "schedule_ask_name": "<b>📝 Introdueix el nom de la programació</b>\n\n(ex: backup, neteja):",
   "schedule_ask_prune_type": "<b>🧹 Selecciona el tipus de neteja (prune):</b>",
@@ -218,6 +217,7 @@
   "schedule_edit_minutes": "⏱️ - Minuts",
   "schedule_edit_name": "📝 - Nom",
   "schedule_edit_show_output": "📤 - Mostrar Sortida",
+  "schedule_edit_prune_type": "🧹 - Tipus de Neteja",
   "schedule_edit_what": "Què vols editar?",
   "schedule_enabled": "🟢 Programació habilitada",
   "schedule_invalid_cron": "❌ Expressió cron inválida",
@@ -264,6 +264,7 @@
   "debug_rollback_successful": "Rollback exitós per a $1. El contenidor antic ha estat restaurat.",
   "debug_rollback_update": "Realitzant rollback de l'actualització per a $1",
   "error_deleting_container_with_error": "No s'ha pogut eliminar el contenidor $1. Error: [$2]",
+  "error_creating_container": "No s'ha pogut crear el contenidor $1. Error: [$2]",
   "error_updating_container_with_error": "No s'ha pogut actualitzar el contenidor $1. Error: [$2]",
   "updating_creating": "<i>Actualizant</i> <b>$1</b>...\nCreant contenidor...",
   "updating_deleting_old": "<i>Actualitzant</i> <b>$1</b>...\nEliminant contenidor antic...",
@@ -306,5 +307,5 @@
   "update_no_description": "Sense descripció disponible",
   "update_date_unknown": "Desconeguda",
   "update_no_size_change": "Sense canvis",
-  "fetching_image_data": "<i>⏳ Obtenint dades de la imatge...</i>"
+  "fetching_image_data": "<i>⏳ Descarregant imatge...</i>"
 }

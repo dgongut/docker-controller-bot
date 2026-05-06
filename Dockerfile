@@ -17,6 +17,8 @@ RUN apk add --no-cache python3 py3-pip tzdata curl && \
     mv /tmp/docker-controller-bot-${VERSION}/schedule_flow.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/schedule_manager.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/port_manager.py /app && \
+    mv /tmp/docker-controller-bot-${VERSION}/logger.py /app && \
+    mv /tmp/docker-controller-bot-${VERSION}/message_queue.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/locale /app && \
     mv /tmp/docker-controller-bot-${VERSION}/requirements.txt /app && \
     rm -rf /tmp/app.tar.gz /tmp/docker-controller-bot-${VERSION}/ && \

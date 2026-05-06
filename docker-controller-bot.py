@@ -1,5 +1,6 @@
 import docker
 import hashlib
+import html
 import io
 import json
 import os
@@ -20,8 +21,7 @@ from telebot.types import InlineKeyboardMarkup
 from docker_update import extract_container_config, perform_update
 from docker_compose_manager import (
     ComposeDetector,
-    ComposeProjectManager,
-    ComposeProjectInfo
+    ComposeProjectManager
 )
 from schedule_manager import ScheduleManager
 from schedule_flow import (
@@ -29,21 +29,14 @@ from schedule_flow import (
     init_add_schedule_state
 )
 from port_manager import PortManager
+from logger import debug, error, warning
+from message_queue import MessageQueue
 
-VERSION = "4.0.0_rc2"
+VERSION = "4.0.0_rc3"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
 _cache_lock = threading.Lock()  # Lock for thread-safe cache operations
-
-def debug(message):
-	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
-
-def error(message):
-	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - ERROR: {message}')
-
-def warning(message):
-	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - WARNING: {message}')
 
 def sizeof_fmt(num, suffix="B"):
 	for unit in ("", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "Zi"):
@@ -89,7 +82,7 @@ def get_text(key, *args):
 	return translated_text
 
 
-# Comprobación inicial de variables
+# Initial variable validation
 if TELEGRAM_TOKEN is None or TELEGRAM_TOKEN == '':
 	error("You need to configure the bot token with the TELEGRAM_TOKEN variable")
 	sys.exit(1)
@@ -128,113 +121,13 @@ if not os.path.exists(FULL_MUTE_FILE_PATH):
 	with open(FULL_MUTE_FILE_PATH, 'w') as mute_file:
 		mute_file.write("0")
 
-# Instanciamos el bot
+# Instantiate the bot
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# Instanciamos el ScheduleManager
+# Instantiate the ScheduleManager
 schedule_manager = ScheduleManager(SCHEDULE_PATH, SCHEDULE_JSON_FILE)
 
-# ============================================================================
-# SISTEMA DE COLA DE MENSAJES CON RATE LIMITING
-# ============================================================================
-import queue
-from threading import Thread, Lock
-
-class MessageQueue:
-	"""
-	Sistema de cola de mensajes con rate limiting para evitar saturar Telegram.
-	Implementa:
-	- Cola de mensajes con delays configurables
-	- Reintentos con backoff exponencial
-	- Manejo de errores de rate limiting
-	"""
-	def __init__(self, delay_between_messages=0.5, max_retries=3):
-		self.queue = queue.Queue()
-		self.delay_between_messages = delay_between_messages
-		self.max_retries = max_retries
-		self.lock = Lock()
-		self.running = True
-		self.worker_thread = Thread(target=self._process_queue, daemon=True)
-		self.worker_thread.start()
-		debug("Message queue started")
-
-	def _process_queue(self):
-		"""Procesa la cola de mensajes de forma continua"""
-		while self.running:
-			try:
-				# Obtener el siguiente mensaje de la cola (timeout para permitir shutdown)
-				message_data = self.queue.get(timeout=1)
-				if message_data is None:  # Señal de parada
-					break
-
-				self._execute_message(message_data)
-				time.sleep(self.delay_between_messages)
-			except queue.Empty:
-				continue
-			except Exception as e:
-				error(f"Error processing message queue: {str(e)}")
-
-	def _execute_message(self, message_data):
-		"""Ejecuta un mensaje con reintentos y backoff exponencial"""
-		func = message_data['func']
-		args = message_data['args']
-		kwargs = message_data['kwargs']
-		result_queue = message_data.get('result_queue')
-
-		try:
-			for attempt in range(self.max_retries):
-				try:
-					result = func(*args, **kwargs)
-					if result_queue:
-						result_queue.put(result)
-					return result
-				except Exception as e:
-					error_msg = str(e)
-					# Detectar rate limiting de Telegram
-					if "Too Many Requests" in error_msg or "429" in error_msg:
-						if attempt < self.max_retries - 1:
-							wait_time = (2 ** attempt) * 2  # Backoff exponencial: 2, 4, 8 segundos
-							warning(f"Rate limit detected. Waiting {wait_time}s before retrying...")
-							time.sleep(wait_time)
-							continue
-					elif attempt < self.max_retries - 1:
-						wait_time = 1 * (attempt + 1)
-						debug(f"Error sending message (attempt {attempt + 1}/{self.max_retries}). Retrying in {wait_time}s...")
-						time.sleep(wait_time)
-						continue
-
-					error(f"Final error sending message after {self.max_retries} attempts: {str(e)}")
-					if result_queue:
-						result_queue.put(None)
-					break
-		except Exception as e:
-			error(f"Error processing message queue: {str(e)}")
-			if result_queue:
-				result_queue.put(None)
-
-	def add_message(self, func, *args, wait_for_result=False, **kwargs):
-		"""Añade un mensaje a la cola. Si wait_for_result=True, espera el resultado"""
-		result_queue = queue.Queue() if wait_for_result else None
-		self.queue.put({
-			'func': func,
-			'args': args,
-			'kwargs': kwargs,
-			'result_queue': result_queue
-		})
-		if wait_for_result:
-			try:
-				return result_queue.get(timeout=60)  # Esperar máximo 60 segundos
-			except queue.Empty:
-				error("Error processing message queue: Timeout esperando resultado del mensaje")
-				return None
-		return None
-
-	def shutdown(self):
-		"""Detiene la cola de mensajes"""
-		self.running = False
-		self.queue.put(None)
-
-# Instanciar la cola de mensajes global
+# Instantiate the global message queue
 message_queue = MessageQueue(delay_between_messages=0.1, max_retries=5)
 
 class DockerManager:
@@ -266,22 +159,22 @@ class DockerManager:
 
 	def get_compose_projects(self):
 		"""
-		Obtiene todos los proyectos Docker Compose detectados.
+		Returns all detected Docker Compose projects.
 
 		Returns:
-			dict: Diccionario {project_name: ComposeProjectInfo}
+			dict: Dictionary {project_name: ComposeProjectInfo}
 		"""
 		return self.compose_manager.get_all_projects()
 
 	def is_compose_container(self, container):
 		"""
-		Verifica si un contenedor es parte de un proyecto Compose.
+		Checks whether a container is part of a Compose project.
 
 		Args:
-			container: Objeto container de Docker SDK
+			container: Docker SDK container object
 
 		Returns:
-			bool: True si es parte de un proyecto Compose
+			bool: True if it is part of a Compose project
 		"""
 		is_compose = ComposeDetector.is_compose_container(container)
 		if is_compose:
@@ -292,13 +185,13 @@ class DockerManager:
 
 	def get_container_project_info(self, container):
 		"""
-		Obtiene información del proyecto Compose al que pertenece un contenedor.
+		Returns information about the Compose project a container belongs to.
 
 		Args:
-			container: Objeto container de Docker SDK
+			container: Docker SDK container object
 
 		Returns:
-			tuple: (project_name, service_name) o (None, None) si no es Compose
+			tuple: (project_name, service_name) or (None, None) if not Compose
 		"""
 		if not ComposeDetector.is_compose_container(container):
 			return None, None
@@ -309,13 +202,13 @@ class DockerManager:
 
 	def get_project_info(self, project_name):
 		"""
-		Obtiene información completa de un proyecto Compose.
+		Returns full information about a Compose project.
 
 		Args:
-			project_name: Nombre del proyecto
+			project_name: Project name
 
 		Returns:
-			ComposeProjectInfo: Información del proyecto o None si no existe
+			ComposeProjectInfo: Project information or None if it doesn't exist
 		"""
 		return self.compose_manager.get_project_info(project_name)
 
@@ -390,58 +283,58 @@ class DockerManager:
 
 	def get_project_info_formatted(self, project_name):
 		"""
-		Obtiene información formateada de un proyecto Compose para mostrar al usuario.
+		Returns formatted information about a Compose project for display to the user.
 
 		Args:
-			project_name: Nombre del proyecto
+			project_name: Project name
 
 		Returns:
-			str: Texto formateado con la información del proyecto
+			str: Formatted text with the project information
 		"""
 		try:
 			project_info = self.get_project_info(project_name)
 			if not project_info:
 				return get_text("error_project_not_found", project_name)
 
-			# Información básica
+			# Basic information
 			text = f'📦 <b>{get_text("project_info_title", project_name)}</b>\n\n'
 			text += '<pre><code>'
 
-			# Nombre del proyecto
+			# Project name
 			text += f'🏷️  {get_text("project_name")}: {project_name}\n\n'
 
-			# Directorio de trabajo
+			# Working directory
 			working_dir = project_info.get_working_dir()
 			if working_dir:
 				text += f'📁 {get_text("project_working_dir")}: {working_dir}\n\n'
 
-			# Archivo de configuración
+			# Configuration file
 			config_files = project_info.get_config_files()
 			if config_files:
-				# Extraer solo el nombre del archivo
+				# Extract only the file name
 				import os
 				config_file_name = os.path.basename(config_files)
 				text += f'📄 {get_text("project_config_file")}: {config_file_name}\n\n'
 
-			# Número de servicios
+			# Number of services
 			service_count = project_info.get_container_count()
 			text += f'🐳 {get_text("project_services_count")}: {service_count}\n\n'
 
-			# Lista de servicios con estado e imagen
+			# Service list with status and image
 			text += f'📋 {get_text("project_services_list")}:\n'
 			for service_name in sort_project_services(project_info):
 				container = project_info.services[service_name]
 				status_emoji = get_status_emoji(container.status, container.name, container)
 
-				# Obtener imagen (nombre corto)
+				# Get image (short name)
 				image_with_tag = container.attrs.get('Config', {}).get('Image', 'N/A')
-				# Si la imagen es muy larga, acortarla
+				# Shorten the image name if it is too long
 				if len(image_with_tag) > 30:
 					image_with_tag = image_with_tag[:27] + "..."
 
 				text += f'  {status_emoji} {service_name} ({image_with_tag})\n'
 
-			# Dependencias entre servicios
+			# Dependencies between services
 			text += f'\n🔗 {get_text("project_dependencies")}:\n'
 			has_dependencies = False
 			for service_name in sort_project_services(project_info):
@@ -449,7 +342,7 @@ class DockerManager:
 				depends_on = container.labels.get('com.docker.compose.depends_on', '')
 				if depends_on:
 					has_dependencies = True
-					# Formatear dependencias (pueden venir separadas por comas)
+					# Format dependencies (they may be comma-separated)
 					deps = depends_on.replace(',', ', ')
 					text += f'  {service_name} → {deps}\n'
 
@@ -618,11 +511,18 @@ class DockerManager:
 			return get_text("error_updating_container", container_name)
 
 	def force_check_update(self, container_id):
+		loading_msg = None
+		container = None
+		image_with_tag = ''
+		image_status = ''
 		try:
 			container = self.client.containers.get(container_id)
 			container_attrs = container.attrs.get('Config', {})
 			image_with_tag = container_attrs.get('Image', '')
 			local_image = container.image.id
+
+			# Show loading message while pulling the image (can be slow for big images)
+			loading_msg = send_message(message=get_text("fetching_image_data"))
 
 			try:
 				remote_image = self.client.images.pull(image_with_tag)
@@ -630,18 +530,27 @@ class DockerManager:
 					error(f"Failed to pull image {image_with_tag}. Verify that the image exists in the registry.")
 					image_status = ""
 					save_container_update_status(image_with_tag, container.name, image_status)
+					if loading_msg:
+						delete_message(loading_msg.message_id)
+						loading_msg = None
 					send_message(message=get_text("error_pulling_image", image_with_tag))
 					return
 			except docker.errors.ImageNotFound:
 				error(f"Image {image_with_tag} not found in registry. Check the image name.")
 				image_status = ""
 				save_container_update_status(image_with_tag, container.name, image_status)
+				if loading_msg:
+					delete_message(loading_msg.message_id)
+					loading_msg = None
 				send_message(message=get_text("error_pulling_image", image_with_tag))
 				return
 			except docker.errors.APIError as e:
 				error(f"Error pulling image {image_with_tag}. Error: [{e}]")
 				image_status = ""
 				save_container_update_status(image_with_tag, container.name, image_status)
+				if loading_msg:
+					delete_message(loading_msg.message_id)
+					loading_msg = None
 				send_message(message=get_text("error_pulling_image", image_with_tag))
 				return
 
@@ -650,12 +559,14 @@ class DockerManager:
 
 			debug(f"Checking update: {container.name} ({image_with_tag}): LOCAL IMAGE [{local_image_normalized[:CONTAINER_ID_LENGTH]}] - REMOTE IMAGE [{remote_image_normalized[:CONTAINER_ID_LENGTH]}]")
 
+			if loading_msg:
+				delete_message(loading_msg.message_id)
+				loading_msg = None
+
 			if local_image_normalized != remote_image_normalized:
-				debug(f"{container.name} update detected! Deleting downloaded image [{remote_image_normalized[:CONTAINER_ID_LENGTH]}]")
-				try:
-					self.client.images.remove(remote_image.id)
-				except:
-					pass # Si no se puede borrar es porque esta siendo usada por otro contenedor
+				# Keep the pulled image cached locally so the subsequent update
+				# operation does not need to re-download it.
+				debug(f"{container.name} update detected! Keeping downloaded image [{remote_image_normalized[:CONTAINER_ID_LENGTH]}] for upcoming update")
 				markup = InlineKeyboardMarkup(row_width = 1)
 				markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{container.id[:CONTAINER_ID_LENGTH]}"))
 				image_status = get_text("NEED_UPDATE_CONTAINER_TEXT")
@@ -669,8 +580,13 @@ class DockerManager:
 		except Exception as e:
 			error(f"Could not check update: [{e}]")
 			image_status = ""
+			if loading_msg:
+				try:
+					delete_message(loading_msg.message_id)
+				except:
+					pass
 
-		if image_with_tag and container and container.name:
+		if image_with_tag and container is not None and getattr(container, 'name', None):
 			save_container_update_status(image_with_tag, container.name, image_status)
 
 	def delete(self, container_id, container_name):
@@ -744,10 +660,10 @@ class DockerManager:
 			error(f"Error executing command [{command}] in container {container_name}. Error: [{e}]")
 			return get_text("error_executing_command_container", command, container_name)
 
-# Instanciamos el DockerManager
+# Instantiate the DockerManager
 docker_manager = DockerManager()
 
-# Instanciamos el PortManager
+# Instantiate the PortManager
 port_manager = PortManager(docker_manager)
 
 class DockerEventMonitor:
@@ -784,7 +700,7 @@ class DockerEventMonitor:
 					send_message_to_notification_channel(message=message)
 				except Exception as e:
 					error(f"Could not send notification [{message}]. Error: [{e}]")
-					time.sleep(20) # Posible saturación de Telegram y el send_message lanza excepción
+					time.sleep(20) # Possible Telegram saturation causing send_message to raise an exception
 
 	def _event_loop_with_retry(self):
 		"""Event loop wrapper with automatic retry on failure."""
@@ -827,7 +743,7 @@ class DockerUpdateMonitor:
 			containers = self.client.containers.list(all=True)
 			# Sort containers: bot first, then running, then stopped (all alphabetically)
 			sorted_containers = sort_containers_by_priority(containers)
-			grouped_updates_containers = []
+			grouped_updates_containers = []  # list of [id, name] pairs
 			should_notify = False
 			for container in sorted_containers:
 				if (container.status == "exited" or container.status == "dead") and not CHECK_UPDATE_STOPPED_CONTAINERS:
@@ -866,10 +782,10 @@ class DockerUpdateMonitor:
 						try:
 							self.client.images.remove(remote_image.id)
 						except:
-							pass # Si no se puede borrar es porque esta siendo usada por otro contenedor
+							pass # If it can't be removed it's because another container is using it
 
 						if container.name != CONTAINER_NAME:
-							grouped_updates_containers.append(container.name)
+							grouped_updates_containers.append([container.id[:CONTAINER_ID_LENGTH], container.name])
 
 						if image_status == old_image_status:
 							debug("Update already notified")
@@ -898,8 +814,8 @@ class DockerUpdateMonitor:
 			if grouped_updates_containers and should_notify:
 				markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
 				markup.add(*[
-					InlineKeyboardButton(f'{ICON_CONTAINER_MARK_FOR_UPDATE} {name}', callback_data=f'toggleUpdate|{name}')
-					for name in grouped_updates_containers
+					InlineKeyboardButton(f'{ICON_CONTAINER_MARK_FOR_UPDATE} {cname}', callback_data=f'toggleUpdate|{cid}')
+					for cid, cname in grouped_updates_containers
 				])
 				markup.add(
 					InlineKeyboardButton(get_text("button_update_all"), callback_data="toggleUpdateAll"),
@@ -909,6 +825,19 @@ class DockerUpdateMonitor:
 					message = send_message(message=get_text("available_updates", len(grouped_updates_containers)), reply_markup=markup)
 					if message:
 						save_update_data(TELEGRAM_GROUP, message.message_id, grouped_updates_containers)
+						# Also populate the container name cache so the callback parser
+						# can resolve names from IDs without an extra Docker lookup.
+						_objs = []
+						for cid, _ in grouped_updates_containers:
+							try:
+								_objs.append(self.client.containers.get(cid))
+							except Exception as e:
+								debug(f"Could not fetch container {cid} for cache: {e}")
+						if _objs:
+							try:
+								save_container_cache(message.chat.id, message.message_id, _objs)
+							except Exception as e:
+								debug(f"Could not pre-populate container name cache: {e}")
 				else:
 					debug(f"Message [{get_text('available_updates', len(grouped_updates_containers))}] omitted because muted")
 			debug(f"Waiting {CHECK_UPDATE_EVERY_HOURS} hours for the next update check...")
@@ -1158,13 +1087,9 @@ def _validate_schedule_index(index_str: str, schedules: list) -> int:
 	except (ValueError, TypeError):
 		return -1
 
-def _build_schedule_summary(state: dict, include_step: bool = False, current_step: int = None, total_steps: int = None) -> str:
+def _build_schedule_summary(state: dict) -> str:
 	"""Build a consistent schedule summary message from state dict"""
 	lines = []
-
-	# Add step indicator if requested
-	if include_step and current_step and total_steps:
-		lines.append(f"<i>Paso {current_step}/{total_steps}</i>\n")
 
 	# Add schedule details
 	if state.get("name"):
@@ -1372,6 +1297,11 @@ def show_schedule_edit_options(user_id: int, schedule_name: str):
 
 	if action == 'exec':
 		markup.add(InlineKeyboardButton(get_text("schedule_edit_command"), callback_data=f"scheduleEditField|command|{schedule_id}"))
+
+	if action == 'prune':
+		markup.add(InlineKeyboardButton(get_text("schedule_edit_prune_type"), callback_data=f"scheduleEditField|prune_type|{schedule_id}"))
+
+	if action in ('exec', 'prune'):
 		markup.add(InlineKeyboardButton(get_text("schedule_edit_show_output"), callback_data=f"scheduleEditField|show_output|{schedule_id}"))
 
 	# Add status toggle button
@@ -1790,7 +1720,7 @@ def command_controller(message):
 	if comando not in ('/start', f'/start@{bot.get_me().username}'):
 		delete_message(messageId)
 
-	# Listar contenedores
+	# List containers
 	if comando in ('/start', f'/start@{bot.get_me().username}'):
 		texto_inicial = get_text("menu")
 		send_message(message=texto_inicial)
@@ -2026,18 +1956,20 @@ def command_controller(message):
 		containers = docker_manager.list_containers()
 		# Sort containers: bot first, then running, then stopped (all alphabetically)
 		sorted_containers = sort_containers_by_priority(containers)
-		containersToUpdate = []
+		containersToUpdate = []  # list of [id, name] pairs
+		containersToUpdateObjs = []
 		for container in sorted_containers:
 			if update_available(container):
-				containersToUpdate.append(container.name)
+				containersToUpdate.append([container.id[:CONTAINER_ID_LENGTH], container.name])
+				containersToUpdateObjs.append(container)
 		if not containersToUpdate:
 			send_message(message=get_text("already_updated_all"))
 			return
 
 		markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
 		markup.add(*[
-			InlineKeyboardButton(f'{ICON_CONTAINER_MARK_FOR_UPDATE} {name}', callback_data=f'toggleUpdate|{name}')
-			for name in containersToUpdate
+			InlineKeyboardButton(f'{ICON_CONTAINER_MARK_FOR_UPDATE} {cname}', callback_data=f'toggleUpdate|{cid}')
+			for cid, cname in containersToUpdate
 		])
 		markup.add(
 			InlineKeyboardButton(get_text("button_update_all"), callback_data="toggleUpdateAll"),
@@ -2046,6 +1978,8 @@ def command_controller(message):
 		message = send_message(message=get_text("available_updates", len(containersToUpdate)), reply_markup=markup)
 		if message:
 			save_update_data(TELEGRAM_GROUP, message.message_id, containersToUpdate)
+			# Pre-populate name cache so callback parser can resolve names from IDs
+			save_container_cache(message.chat.id, message.message_id, containersToUpdateObjs)
 
 	elif comando in ('/changetag', f'/changetag@{bot.get_me().username}'):
 		if container_id:
@@ -2155,6 +2089,17 @@ def button_controller(call):
 				send_message(message=get_text("container_does_not_exist", containerId))
 				debug(f"Container {containerId} not found in cache or Docker")
 				return
+
+		# For project-scoped commands the "containerName" arg actually carries
+		# a short hash of the project name (to stay under Telegram's 64-byte
+		# callback_data limit). Resolve it back to the real project name here.
+		if comando in PROJECT_COMMANDS and containerName:
+			resolved = resolve_project_name(containerName)
+			if not resolved:
+				send_message(message=get_text("error_project_not_found", containerName))
+				debug(f"Unknown project hash: {containerName}")
+				return
+			containerName = resolved
 
 		debug(f"BUTTON: {comando} | USER: {userId} | CHAT: {chatId}")
 	except Exception as e:
@@ -2302,12 +2247,12 @@ def button_controller(call):
 		# MARCAR COMO UPDATE
 		elif comando == "toggleUpdate":
 			containers, selected = load_update_data(chatId, messageId)
-			was_selected = containerName in selected
+			was_selected = containerId in selected
 
 			if was_selected:
-				selected.remove(containerName)
+				selected.remove(containerId)
 			else:
-				selected.add(containerName)
+				selected.add(containerId)
 			save_update_data(chatId, messageId, containers, selected)
 
 			markup = build_generic_keyboard(containers, selected, messageId, "Update", get_text("button_update"), get_text("button_update_all"))
@@ -2325,9 +2270,9 @@ def button_controller(call):
 		elif comando == "toggleUpdateAll":
 			containers, selected = load_update_data(chatId, messageId)
 			newly_selected_count = 0
-			for container in containers:
-				if container not in selected:
-					selected.add(container)
+			for cid, _cname in containers:
+				if cid not in selected:
+					selected.add(cid)
 					newly_selected_count += 1
 			save_update_data(chatId, messageId, containers, selected)
 
@@ -2349,14 +2294,13 @@ def button_controller(call):
 		# UPDATE SELECTED
 		elif comando == "updateSelected":
 			containers, selected = load_update_data(chatId, originalMessageId)
-			for containerName in selected:
-				container_id = get_container_id_by_name(container_name=containerName)
-				if not container_id:
-					send_message(message=get_text("container_does_not_exist", containerName))
-					debug(f"Container {containerName} not found")
+			for cid in selected:
+				try:
+					container = docker_manager.client.containers.get(cid)
+				except Exception:
+					send_message(message=get_text("container_does_not_exist", cid))
+					debug(f"Container {cid} not found")
 					continue
-				# Use docker_manager instead of creating new client
-				container = docker_manager.client.containers.get(container_id)
 				if update_available(container):
 					update(container.id, container.name)
 			clear_update_data(chatId, originalMessageId)
@@ -2575,7 +2519,7 @@ def button_controller(call):
 			markup.add(
 				InlineKeyboardButton(
 					f"✅ {get_text('button_yes_delete')}",
-					callback_data=f"deleteWholeProject|{project_name}"
+					callback_data=f"deleteWholeProject|{register_project_hash(project_name)}"
 				),
 				InlineKeyboardButton(
 					get_text('button_cancel'),
@@ -3001,6 +2945,24 @@ def button_controller(call):
 					edit_state["last_message_id"] = msg.message_id if msg else None
 					save_schedule_state(userId, edit_state)
 
+				elif field == "prune_type":
+					current_prune_type = schedule.get('prune_type', '')
+					message_text = f"<b>{get_text('schedule_edit_prune_type')}</b>\n\n"
+					message_text += f"{get_text('schedule_ask_prune_type')}\n"
+					message_text += f"<i>{get_text('current_value')}: {current_prune_type}</i>"
+
+					markup = InlineKeyboardMarkup(row_width=2)
+					markup.add(
+						InlineKeyboardButton(get_text("schedule_prune_containers"), callback_data=f"scheduleEditValue|prune_type|{scheduleId}|containers"),
+						InlineKeyboardButton(get_text("schedule_prune_images"), callback_data=f"scheduleEditValue|prune_type|{scheduleId}|images"),
+						InlineKeyboardButton(get_text("schedule_prune_networks"), callback_data=f"scheduleEditValue|prune_type|{scheduleId}|networks"),
+						InlineKeyboardButton(get_text("schedule_prune_volumes"), callback_data=f"scheduleEditValue|prune_type|{scheduleId}|volumes")
+					)
+					markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+					msg = send_message(message=message_text, reply_markup=markup)
+					edit_state["last_message_id"] = msg.message_id if msg else None
+					save_schedule_state(userId, edit_state)
+
 		elif comando == "scheduleEditValue":
 			if field and scheduleId and value:
 				schedule = schedule_manager.get_schedule_by_id(int(scheduleId))
@@ -3013,6 +2975,9 @@ def button_controller(call):
 				# Update the schedule based on field type
 				if field == "show_output":
 					schedule_manager.update_schedule(schedule_name, show_output=(value == "yes"))
+					send_message(message=get_text("schedule_updated_success", schedule_name))
+				elif field == "prune_type":
+					schedule_manager.update_schedule(schedule_name, prune_type=value)
 					send_message(message=get_text("schedule_updated_success", schedule_name))
 				elif field == "container":
 					# value is now the container index, retrieve name from edit state
@@ -3172,20 +3137,20 @@ def _execute_compose_project_action(action, project_name, show_extended=True):
 	"""
 	debug(f"Running command: {action}_compose_project for project {project_name}")
 
-	# Obtener información del proyecto
+	# Get project information
 	project_info = docker_manager.get_project_info(project_name)
 	if not project_info:
 		send_message(message=get_text("error_project_not_found", project_name))
 		return
 
-	# Obtener contenedores ordenados por dependencias
+	# Get containers sorted by dependencies
 	containers = project_info.containers
 	sorted_containers = docker_manager.compose_manager.sort_containers_by_dependencies(containers)
 
-	# Configuración por acción
+	# Per-action configuration
 	if action == 'restart':
 		send_message(message=get_text("restarting_project", project_name))
-		# Parar contenedores en orden inverso
+		# Stop containers in reverse order
 		for container in reversed(sorted_containers):
 			service_name = container.labels.get('com.docker.compose.service', container.name)
 			if EXTENDED_MESSAGES and show_extended:
@@ -3196,7 +3161,7 @@ def _execute_compose_project_action(action, project_name, show_extended=True):
 				debug(f"Error stopping {service_name}: {e}")
 				if show_extended:
 					send_message(message=get_text("error_stopping_service", service_name))
-		# Iniciar contenedores en orden correcto
+		# Start containers in the correct order
 		for container in sorted_containers:
 			service_name = container.labels.get('com.docker.compose.service', container.name)
 			if EXTENDED_MESSAGES and show_extended:
@@ -3211,7 +3176,7 @@ def _execute_compose_project_action(action, project_name, show_extended=True):
 
 	elif action == 'run':
 		send_message(message=get_text("starting_project", project_name))
-		# Iniciar contenedores en orden correcto
+		# Start containers in the correct order
 		for container in sorted_containers:
 			service_name = container.labels.get('com.docker.compose.service', container.name)
 			if EXTENDED_MESSAGES and show_extended:
@@ -3226,7 +3191,7 @@ def _execute_compose_project_action(action, project_name, show_extended=True):
 
 	elif action == 'stop':
 		send_message(message=get_text("stopping_project", project_name))
-		# Parar contenedores en orden inverso
+		# Stop containers in reverse order
 		for container in reversed(sorted_containers):
 			service_name = container.labels.get('com.docker.compose.service', container.name)
 			if EXTENDED_MESSAGES and show_extended:
@@ -3240,34 +3205,34 @@ def _execute_compose_project_action(action, project_name, show_extended=True):
 		send_message(message=get_text("project_stopped_success", project_name))
 
 def restart_compose_project(project_name):
-	"""Reinicia un proyecto Docker Compose completo respetando el orden de dependencias."""
+	"""Restarts a complete Docker Compose project respecting dependency order."""
 	_execute_compose_project_action('restart', project_name)
 
 def restart_compose_project_after_update(project_name):
 	"""
-	Reinicia un proyecto Docker Compose completo después de actualizar un contenedor.
-	Muestra mensajes informativos sobre el reinicio del proyecto.
+	Restarts a complete Docker Compose project after updating a container.
+	Shows informational messages about the project restart.
 
 	Args:
-		project_name: Nombre del proyecto Compose a reiniciar
+		project_name: Compose project name to restart
 	"""
 	debug(f"Restarting project {project_name} after container update")
 
-	# Obtener información del proyecto
+	# Get project information
 	project_info = docker_manager.get_project_info(project_name)
 	if not project_info:
 		send_message(message=get_text("error_project_not_found", project_name))
 		return
 
-	# Obtener contenedores ordenados por dependencias
+	# Get containers sorted by dependencies
 	containers = project_info.containers
 	sorted_containers = docker_manager.compose_manager.sort_containers_by_dependencies(containers)
 	container_count = len(sorted_containers)
 
-	# Mensaje inicial
+	# Initial message
 	send_message(message=get_text("restarting_project_after_update", project_name, container_count))
 
-	# Parar contenedores en orden inverso (los que dependen primero)
+	# Stop containers in reverse order (dependents first)
 	for container in reversed(sorted_containers):
 		service_name = container.labels.get('com.docker.compose.service', container.name)
 		if EXTENDED_MESSAGES:
@@ -3279,7 +3244,7 @@ def restart_compose_project_after_update(project_name):
 			if EXTENDED_MESSAGES:
 				send_message(message=get_text("error_stopping_service", service_name))
 
-	# Iniciar contenedores en orden correcto (dependencias primero)
+	# Start containers in the correct order (dependencies first)
 	for container in sorted_containers:
 		service_name = container.labels.get('com.docker.compose.service', container.name)
 		if EXTENDED_MESSAGES:
@@ -3291,40 +3256,40 @@ def restart_compose_project_after_update(project_name):
 			if EXTENDED_MESSAGES:
 				send_message(message=get_text("error_starting_service", service_name))
 
-	# Mensaje final
+	# Final message
 	send_message(message=get_text("project_restarted_after_update_success", project_name, container_count))
 
 def run_compose_project(project_name):
-	"""Inicia un proyecto Docker Compose completo respetando el orden de dependencias."""
+	"""Starts a complete Docker Compose project respecting dependency order."""
 	_execute_compose_project_action('run', project_name)
 
 def stop_compose_project(project_name):
-	"""Para un proyecto Docker Compose completo respetando el orden de dependencias."""
+	"""Stops a complete Docker Compose project respecting dependency order."""
 	_execute_compose_project_action('stop', project_name)
 
 def delete_compose_project(project_name):
 	"""
-	Elimina un proyecto Docker Compose completo.
+	Deletes a complete Docker Compose project.
 
 	Args:
-		project_name: Nombre del proyecto Compose a eliminar
+		project_name: Compose project name to delete
 	"""
 	debug(f"Running command: delete_compose_project for project {project_name}")
 
-	# Obtener información del proyecto
+	# Get project information
 	project_info = docker_manager.get_project_info(project_name)
 	if not project_info:
 		send_message(message=get_text("error_project_not_found", project_name))
 		return
 
-	# Obtener contenedores del proyecto
+	# Get the project's containers
 	containers = project_info.containers
 	container_count = len(containers)
 
-	# Mensaje inicial
+	# Initial message
 	send_message(message=get_text("deleting_project", project_name, container_count))
 
-	# Eliminar cada contenedor
+	# Delete each container
 	for container in containers:
 		service_name = container.labels.get('com.docker.compose.service', container.name)
 		if EXTENDED_MESSAGES:
@@ -3335,7 +3300,7 @@ def delete_compose_project(project_name):
 			debug(f"Error deleting {service_name}: {e}")
 			send_message(message=get_text("error_deleting_service", service_name))
 
-	# Mensaje final
+	# Final message
 	send_message(message=get_text("project_deleted_success", project_name, container_count))
 
 def logs(containerId, containerName):
@@ -3727,12 +3692,8 @@ def get_image_comparison(containerId, containerName, new_tag=None):
 		# Build registry URL
 		registry_url, registry_name = build_registry_url(tag_to_pull)
 
-		# Clean up pulled image
-		try:
-			docker_manager.client.images.remove(new_image.id)
-			debug(f"Removed pulled image {new_digest} after comparison")
-		except:
-			pass  # Image might be in use by another container
+		# Keep the pulled image cached locally so that the subsequent update
+		# (or change-tag) operation does not need to re-download it.
 
 		return {
 			'has_update': has_update,
@@ -3753,6 +3714,39 @@ def get_image_comparison(containerId, containerName, new_tag=None):
 	except Exception as e:
 		error(f"Error getting update comparison for {containerName}: {e}")
 		return None
+
+def sanitize_dockerhub_description(text):
+	"""
+	Sanitize a Docker Hub description so it renders cleanly inside a
+	Telegram HTML message:
+	- Convert <br> and common block-level closing tags to line breaks.
+	- Strip all remaining HTML tags.
+	- Decode HTML entities (e.g. &amp; -> &).
+	- Escape characters that are special in Telegram HTML (& < >).
+	- Collapse runs of whitespace and blank lines.
+	"""
+	if not text:
+		return text
+
+	# Line breaks for <br> variants and common block-level closers
+	text = re.sub(r'<\s*br\s*/?\s*>', '\n', text, flags=re.IGNORECASE)
+	text = re.sub(r'</\s*(p|div|li|tr|h[1-6])\s*>', '\n', text, flags=re.IGNORECASE)
+
+	# Strip any remaining HTML tags
+	text = re.sub(r'<[^>]+>', '', text)
+
+	# Decode HTML entities before re-escaping for Telegram
+	text = html.unescape(text)
+
+	# Escape Telegram HTML special chars (interpolated into an HTML message)
+	text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+	# Collapse whitespace: tabs/spaces -> single space, max one blank line
+	text = re.sub(r'[ \t]+', ' ', text)
+	text = re.sub(r' *\n *', '\n', text)
+	text = re.sub(r'\n{3,}', '\n\n', text)
+
+	return text.strip()
 
 def get_dockerhub_description(image_tag):
 	"""
@@ -3791,10 +3785,11 @@ def get_dockerhub_description(image_tag):
 				data = response.json()
 				full_description = data.get('full_description', '')
 				if full_description:
-					# Truncate to 300 characters
-					if len(full_description) > 300:
-						return full_description[:300].rsplit(' ', 1)[0] + '...'
-					return full_description
+					# Sanitize before truncating so we don't break HTML/entities
+					sanitized = sanitize_dockerhub_description(full_description)
+					if sanitized and len(sanitized) > 300:
+						return sanitized[:300].rsplit(' ', 1)[0] + '...'
+					return sanitized or None
 
 		return None
 	except Exception as e:
@@ -3933,21 +3928,35 @@ def confirm_update(containerId, containerName):
 	send_message(message=message, reply_markup=markup)
 
 def confirm_update_selected(chatId, messageId):
-	_, selected = load_update_data(chatId, messageId)
+	containers, selected = load_update_data(chatId, messageId)
+	# Build id -> name map from cached containers (list of [id, name] pairs)
+	id_to_name = {cid: cname for cid, cname in containers}
+	# If only one container is selected, show the detailed comparison view
+	if len(selected) == 1:
+		container_id = next(iter(selected))
+		container_name = id_to_name.get(container_id)
+		if container_id and container_name:
+			clear_update_data(chatId, messageId)
+			confirm_update(container_id, container_name)
+			return
 	containersToUpdate = ""
-	for container in selected:
-		containersToUpdate += f"· <b>{container}</b>\n"
+	for cid in selected:
+		containersToUpdate += f"· <b>{id_to_name.get(cid, cid)}</b>\n"
 	markup = create_confirm_cancel_keyboard(f"updateSelected|{messageId}", "button_confirm_update")
 	send_message(message=get_text("confirm_update_all", containersToUpdate), reply_markup=markup)
 
 def build_generic_keyboard(container_available, selected_containers, originalMessageId, action_type, button_text, button_text_all=None):
-	"""Generic keyboard builder for run/stop/restart actions"""
+	"""Generic keyboard builder for the multi-select update flow.
+
+	container_available: list of [id, name] pairs.
+	selected_containers: set of container IDs.
+	"""
 	markup = InlineKeyboardMarkup(row_width=BUTTON_COLUMNS)
 	botones = []
-	for container in container_available:
-		icono = ICON_CONTAINER_MARKED_FOR_UPDATE if container in selected_containers else ICON_CONTAINER_MARK_FOR_UPDATE
+	for cid, cname in container_available:
+		icono = ICON_CONTAINER_MARKED_FOR_UPDATE if cid in selected_containers else ICON_CONTAINER_MARK_FOR_UPDATE
 		botones.append(
-			InlineKeyboardButton(f"{icono} {container}", callback_data=f"toggle{action_type}|{container}")
+			InlineKeyboardButton(f"{icono} {cname}", callback_data=f"toggle{action_type}|{cid}")
 		)
 	markup.add(*botones)
 
@@ -4038,7 +4047,7 @@ def build_hierarchical_keyboard(containers, action_type, bot_container_name, fil
 		botones.append(
 			InlineKeyboardButton(
 				f"📦 {project_name} ({container_count})",
-				callback_data=f"enter{action_type}Project|{project_name}"
+				callback_data=f"enter{action_type}Project|{register_project_hash(project_name)}"
 			)
 		)
 
@@ -4359,14 +4368,14 @@ def build_compose_project_level2_keyboard(project_info, project_name, action_typ
 		bottom_buttons.append(
 			InlineKeyboardButton(
 				get_text("button_view_project_info"),
-				callback_data=f"showProjectInfo|{project_name}"
+				callback_data=f"showProjectInfo|{register_project_hash(project_name)}"
 			)
 		)
 	elif config.get('whole_callback'):
 		bottom_buttons.append(
 			InlineKeyboardButton(
 				f"{config['icon']} {get_text(config['button_key'])}",
-				callback_data=f"{config['whole_callback']}|{project_name}"
+				callback_data=f"{config['whole_callback']}|{register_project_hash(project_name)}"
 			)
 		)
 
@@ -4635,44 +4644,34 @@ def show_container_ports():
 	# Sort containers: bot first, then running, then stopped (all alphabetically)
 	sorted_containers = sort_containers_by_priority(containers)
 
-	message_lines = []
+	container_blocks = []
 
 	for container in sorted_containers:
 		try:
 			ports, is_host_network = port_manager.get_container_ports(container)
+			block = []
 
-			if ports:
+			if is_host_network:
+				# Host network shares the host's network namespace: we don't
+				# list ports here, just indicate the container uses host mode.
+				if container.status in ['running', 'restarting']:
+					emoji = "🟢"
+					block.append(f"{emoji} {container.name} (host)")
+			elif ports:
 				status = container.status
 				emoji = "🟢" if status == "running" else "🔴"
 				# Remove duplicates and sort
 				unique_ports = sorted(set(ports), key=lambda x: (int(x.split('/')[0]), x.split('/')[1]))
-
-				# Format container header
-				if is_host_network:
-					container_header = f"{emoji} {container.name} (host):"
-				else:
-					container_header = f"{emoji} {container.name}:"
-
-				# Add container header
-				message_lines.append(container_header)
-
+				block.append(f"{emoji} {container.name}:")
 				# Add each port on a separate line with indentation
 				for port in unique_ports:
-					message_lines.append(f"  - {port}")
-			elif is_host_network and container.status in ['running', 'restarting']:
-				# Container with host network but no detectable ports
-				status = container.status
-				emoji = "🟢" if status == "running" else "🔴"
-				message_lines.append(f"{emoji} {container.name} (host): {get_text('ports_host_no_detection')}")
+					block.append(f"  - {port}")
+
+			if block:
+				container_blocks.append(block)
 		except Exception as e:
 			debug(f"Error getting ports from container {container.name}: {e}")
 			continue
-
-	# Build final message
-	if message_lines:
-		message = get_text("ports_list_header") + "\n\n<pre>" + "\n".join(message_lines) + "</pre>"
-	else:
-		message = get_text("ports_no_containers")
 
 	# Add inline keyboard with Generate, Check and Close buttons
 	markup = InlineKeyboardMarkup(row_width=2)
@@ -4684,7 +4683,57 @@ def show_container_ports():
 		InlineKeyboardButton(get_text("button_close"), callback_data="cerrar")
 	)
 
-	send_message(message=message, reply_markup=markup)
+	if not container_blocks:
+		send_message(message=get_text("ports_no_containers"), reply_markup=markup)
+		return
+
+	# Pack blocks into chunks below Telegram's message size limit
+	max_length = 3500
+	header = get_text("ports_list_header") + "\n\n"
+	pre_open, pre_close = "<pre>", "</pre>"
+
+	def overhead(is_first_chunk):
+		return len(pre_open) + len(pre_close) + (len(header) if is_first_chunk else 0)
+
+	chunks = []
+	current_lines = []
+	current_len = 0
+
+	for block in container_blocks:
+		block_len = sum(len(line) + 1 for line in block)
+		is_first = (len(chunks) == 0)
+
+		# If adding this block would overflow the current chunk, flush it first
+		if current_lines and current_len + block_len + overhead(is_first) > max_length:
+			chunks.append(current_lines)
+			current_lines = []
+			current_len = 0
+			is_first = False
+
+		# If a single block is larger than the limit, split it line by line
+		if not current_lines and block_len + overhead(is_first) > max_length:
+			for line in block:
+				line_len = len(line) + 1
+				if current_lines and current_len + line_len + overhead(is_first) > max_length:
+					chunks.append(current_lines)
+					current_lines = []
+					current_len = 0
+					is_first = False
+				current_lines.append(line)
+				current_len += line_len
+		else:
+			current_lines.extend(block)
+			current_len += block_len
+
+	if current_lines:
+		chunks.append(current_lines)
+
+	# Send each chunk: header only on the first, keyboard only on the last
+	for i, chunk_lines in enumerate(chunks):
+		prefix = header if i == 0 else ""
+		message = f"{prefix}{pre_open}" + "\n".join(chunk_lines) + pre_close
+		is_last = (i == len(chunks) - 1)
+		send_message(message=message, reply_markup=markup if is_last else None)
 
 def ask_port_to_check(userId):
 	"""Ask user for a port number to check"""
@@ -4809,6 +4858,9 @@ def load_update_data(chat_id, message_id):
 	selected = data.get("selected", set())
 	if not isinstance(selected, set):
 		selected = set(selected)
+	# Reject pre-upgrade format (list of plain names instead of [id, name] pairs)
+	if containers and not all(isinstance(e, (list, tuple)) and len(e) >= 2 for e in containers):
+		return [], set()
 	return containers, selected
 
 def clear_update_data(chat_id, message_id):
@@ -4928,18 +4980,18 @@ def load_container_name(chat_id, message_id, container_id):
 	return cache_data.get("containers", {}).get(container_id)
 
 def clear_container_cache(chat_id, message_id):
-	"""Limpia la caché de contenedores para un mensaje"""
+	"""Clears the container cache for a message"""
 	delete_cache_item(f"containers_{chat_id}_{message_id}")
 
 def get_container_name_by_id(container_id):
 	"""
-	Obtiene el nombre de un contenedor por su ID desde Docker API
+	Returns the name of a container by its ID from the Docker API
 
 	Args:
-		container_id: ID del contenedor
+		container_id: Container ID
 
 	Returns:
-		str: Nombre del contenedor o None si no existe
+		str: Container name or None if it doesn't exist
 	"""
 	try:
 		container = docker_manager.client.containers.get(container_id)
@@ -4950,27 +5002,51 @@ def get_container_name_by_id(container_id):
 
 def get_container_name(chat_id, message_id, container_id):
 	"""
-	Obtiene nombre de contenedor con caché + fallback a Docker API
+	Returns the container name from cache with fallback to the Docker API
 
 	Args:
-		chat_id: ID del chat
-		message_id: ID del mensaje
-		container_id: ID del contenedor
+		chat_id: Chat ID
+		message_id: Message ID
+		container_id: Container ID
 
 	Returns:
-		str: Nombre del contenedor o None si no existe
+		str: Container name or None if it doesn't exist
 	"""
-	# 1. Intentar caché
+	# 1. Try the cache
 	name = load_container_name(chat_id, message_id, container_id)
 	if name:
 		return name
 
-	# 2. Fallback a Docker API
+	# 2. Fallback to the Docker API
 	return get_container_name_by_id(container_id)
 
 def short_hash(text, length=30):
 	hash_obj = hashlib.sha256(text.encode())
 	return hash_obj.hexdigest()[:length]
+
+# --- Project-name hashing for callback_data (avoid 64-byte Telegram limit) ---
+PROJECT_HASH_CACHE_KEY = "project_hash_map"
+PROJECT_HASH_LENGTH = 8
+_project_hash_lock = threading.Lock()  # Atomic read-modify-write for the mapping
+
+def register_project_hash(project_name):
+	"""Return a short hash for project_name, persisting the mapping in cache."""
+	if not project_name:
+		return project_name
+	h = short_hash(project_name, PROJECT_HASH_LENGTH)
+	with _project_hash_lock:
+		mapping = read_cache_item(PROJECT_HASH_CACHE_KEY) or {}
+		if mapping.get(h) != project_name:
+			mapping[h] = project_name
+			write_cache_item(PROJECT_HASH_CACHE_KEY, mapping)
+	return h
+
+def resolve_project_name(value):
+	"""Resolve a hash back to a project name, or None if unknown."""
+	if not value:
+		return None
+	mapping = read_cache_item(PROJECT_HASH_CACHE_KEY) or {}
+	return mapping.get(value)
 
 def generate_docker_compose(container):
 	container_attrs = container.attrs['Config']
@@ -5018,10 +5094,10 @@ def add_if_present(dictionary, key, value):
 		dictionary[key] = value
 
 # ============================================================================
-# FUNCIONES INTERNAS DE TELEGRAM (sin cola)
+# INTERNAL TELEGRAM FUNCTIONS (without queue)
 # ============================================================================
 def _send_message_direct(chat_id, message, reply_markup, parse_mode, disable_web_page_preview):
-	"""Envía un mensaje directamente sin usar la cola"""
+	"""Sends a message directly without using the queue"""
 	try:
 		if message is None:
 			message = ""
@@ -5034,7 +5110,7 @@ def _send_message_direct(chat_id, message, reply_markup, parse_mode, disable_web
 		raise
 
 def _send_document_direct(chat_id, document, reply_markup, caption, parse_mode):
-	"""Envía un documento directamente sin usar la cola"""
+	"""Sends a document directly without using the queue"""
 	try:
 		if TELEGRAM_THREAD == 1:
 			return bot.send_document(chat_id, document=document, reply_markup=reply_markup, caption=caption, parse_mode=parse_mode)
@@ -5045,7 +5121,7 @@ def _send_document_direct(chat_id, document, reply_markup, caption, parse_mode):
 		raise
 
 def _delete_message_direct(chat_id, message_id):
-	"""Elimina un mensaje directamente sin usar la cola"""
+	"""Deletes a message directly without using the queue"""
 	try:
 		if chat_id and message_id:
 			bot.delete_message(chat_id, message_id)
@@ -5054,54 +5130,54 @@ def _delete_message_direct(chat_id, message_id):
 		pass
 
 def _edit_message_text_direct(chat_id, message_id, text, parse_mode, reply_markup):
-	"""Edita el texto de un mensaje directamente sin usar la cola"""
+	"""Edits the text of a message directly without using the queue"""
 	try:
 		return bot.edit_message_text(text, chat_id, message_id, parse_mode=parse_mode, reply_markup=reply_markup)
 	except Exception as e:
-		debug(f"No se pudo editar mensaje {message_id}: {e}")
+		debug(f"Could not edit message {message_id}: {e}")
 		raise
 
 def _edit_message_reply_markup_direct(chat_id, message_id, reply_markup):
-	"""Edita el markup de un mensaje directamente sin usar la cola"""
+	"""Edits the markup of a message directly without using the queue"""
 	try:
 		return bot.edit_message_reply_markup(chat_id, message_id, reply_markup=reply_markup)
 	except Exception as e:
-		debug(f"No se pudo editar markup del mensaje {message_id}: {e}")
+		debug(f"Could not edit markup of message {message_id}: {e}")
 		raise
 
 # ============================================================================
-# FUNCIONES PÚBLICAS CON COLA DE MENSAJES
+# PUBLIC FUNCTIONS USING THE MESSAGE QUEUE
 # ============================================================================
 def delete_message(message_id, chat_id=None):
-	"""Elimina un mensaje usando la cola (asíncrono)"""
+	"""Deletes a message using the queue (async)"""
 	if chat_id is None:
 		chat_id = TELEGRAM_GROUP
 	message_queue.add_message(_delete_message_direct, chat_id, message_id, wait_for_result=False)
 
 def send_message(chat_id=TELEGRAM_GROUP, message=None, reply_markup=None, parse_mode="html", disable_web_page_preview=True):
-	"""Envía un mensaje usando la cola (espera resultado para obtener message_id)"""
+	"""Sends a message using the queue (waits for result to get the message_id)"""
 	return message_queue.add_message(_send_message_direct, chat_id, message, reply_markup, parse_mode, disable_web_page_preview, wait_for_result=True)
 
 def send_message_to_notification_channel(chat_id=TELEGRAM_NOTIFICATION_CHANNEL, message=None, reply_markup=None, parse_mode="html", disable_web_page_preview=True):
-	"""Envía un mensaje al canal de notificaciones usando la cola"""
+	"""Sends a message to the notification channel using the queue"""
 	if TELEGRAM_NOTIFICATION_CHANNEL is None or TELEGRAM_NOTIFICATION_CHANNEL == '':
 		return send_message(chat_id=TELEGRAM_GROUP, message=message, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
 	return send_message(chat_id=chat_id, message=message, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
 
 def send_document(chat_id=TELEGRAM_GROUP, document=None, reply_markup=None, caption=None, parse_mode="html"):
-	"""Envía un documento usando la cola (espera resultado para obtener message_id)"""
+	"""Sends a document using the queue (waits for result to get the message_id)"""
 	return message_queue.add_message(_send_document_direct, chat_id, document, reply_markup, caption, parse_mode, wait_for_result=True)
 
 def edit_message_text(text, chat_id, message_id, parse_mode="html", reply_markup=None):
-	"""Edita el texto de un mensaje usando la cola (asíncrono, no bloquea si falla)"""
+	"""Edits the text of a message using the queue (async, does not block on failure)"""
 	message_queue.add_message(_edit_message_text_direct, chat_id, message_id, text, parse_mode, reply_markup, wait_for_result=False)
 
 def edit_message_reply_markup(chat_id, message_id, reply_markup):
-	"""Edita el markup de un mensaje usando la cola (asíncrono)"""
+	"""Edits the markup of a message using the queue (async)"""
 	message_queue.add_message(_edit_message_reply_markup_direct, chat_id, message_id, reply_markup, wait_for_result=False)
 
 def edit_message_reply_markup_sync(chat_id, message_id, reply_markup):
-	"""Edita el markup de un mensaje usando la cola (síncrono, espera confirmación)"""
+	"""Edits the markup of a message using the queue (sync, waits for confirmation)"""
 	return message_queue.add_message(_edit_message_reply_markup_direct, chat_id, message_id, reply_markup, wait_for_result=True)
 
 def delete_updater():
@@ -5179,7 +5255,7 @@ def parse_cron_line(line):
 
 	# Validate action and parameters using SCHEDULE_PATTERNS
 	if action not in SCHEDULE_PATTERNS:
-		return None  # Acción no reconocida
+		return None  # Unknown action
 
 	pattern = SCHEDULE_PATTERNS[action]
 	required_params = pattern.get("params", [])

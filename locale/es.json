@@ -95,7 +95,6 @@
   "ports": "Puertos",
   "ports_list_header": "📊 <b>Puertos Usados por Contenedores</b>",
   "ports_no_containers": "ℹ️ No se encontraron contenedores con puertos mapeados",
-  "ports_host_no_detection": "no detectables",
   "ports_button_generate": "🎲 - Generar",
   "ports_button_check": "🔍 - Comprobar",
   "ports_generated_port": "🎲 <b>Puerto Aleatorio Disponible</b>\n\n<code>$1</code>\n\n✅ Este puerto está libre en el sistema\n📊 Rango: 5000-60000",
@@ -198,7 +197,7 @@
   "schedule_ask_action": "<b>🎯 ¿Qué acción deseas realizar?</b>",
   "schedule_ask_command": "<b>💻 Introduce el comando a ejecutar</b>\n\n(ej: ls, docker ps, npm start):",
   "schedule_ask_container": "<b>🐳 Selecciona un contenedor:</b>",
-  "schedule_ask_cron": "<b>⏰ Introduce la expresión cron</b>\n\n(ej: '0 0 * * *' para diariamente a medianoche, visita crontab.guru)\n\nO usa atajos:\n@yearly - Ejecutar una vez al año el 1 de enero a medianoche\n@monthly - Ejecutar una vez al mes el 1 a medianoche\n@weekly - Ejecutar una vez a la semana el domingo a medianoche\n@daily - Ejecutar una vez al día a medianoche\n@hourly - Ejecutar una vez cada hora al inicio de la hora\n@reboot - Ejecutar una vez al reiniciar el sistema",
+  "schedule_ask_cron": "<b>⏰ Introduce la expresión cron</b>\n\n(ej: '0 0 * * *' para diariamente a medianoche, visita crontab.guru)\n\nO usa atajos:\n<code>@yearly</code> - Ejecutar una vez al año el 1 de enero a medianoche\n<code>@monthly</code> - Ejecutar una vez al mes el 1 a medianoche\n<code>@weekly</code> - Ejecutar una vez a la semana el domingo a medianoche\n<code>@daily</code> - Ejecutar una vez al día a medianoche\n<code>@hourly</code> - Ejecutar una vez cada hora al inicio de la hora\n<code>@reboot</code> - Ejecutar una vez al reiniciar el sistema",
   "schedule_ask_minutes": "<b>⏱️ Introduce los minutos</b>\n\n(ej: 5, 30, 60):",
   "schedule_ask_name": "<b>📝 Introduce el nombre de la programación</b>\n\n(ej: backup, limpieza):",
   "schedule_ask_prune_type": "<b>🧹 Selecciona el tipo de limpieza (prune):</b>",
@@ -218,6 +217,7 @@
   "schedule_edit_minutes": "⏱️ - Minutos",
   "schedule_edit_name": "📝 - Nombre",
   "schedule_edit_show_output": "📤 - Mostrar Salida",
+  "schedule_edit_prune_type": "🧹 - Tipo de Limpieza",
   "schedule_edit_what": "¿Qué deseas editar?",
   "schedule_enabled": "🟢 Programación habilitada",
   "schedule_invalid_cron": "❌ Expresión cron inválida",
@@ -264,6 +264,7 @@
   "debug_rollback_successful": "Rollback exitoso para $1. El contenedor antiguo ha sido restaurado.",
   "debug_rollback_update": "Realizando rollback de la actualización para $1",
   "error_deleting_container_with_error": "No se ha podido eliminar el contenedor $1. Error: [$2]",
+  "error_creating_container": "No se ha podido crear el contenedor $1. Error: [$2]",
   "error_pulling_image": "❌ No se pudo descargar la imagen <b>$1</b>. Verifica que la imagen existe en el registro.",
   "error_updating_container_with_error": "No se ha podido actualizar el contenedor $1. Error: [$2]",
   "updating_creating": "<i>Actualizando</i> <b>$1</b>...\nCreando contenedor...",
@@ -306,5 +307,5 @@
   "update_no_description": "Sin descripción disponible",
   "update_date_unknown": "Desconocida",
   "update_no_size_change": "Sin cambios",
-  "fetching_image_data": "<i>⏳ Obteniendo datos de la imagen...</i>"
+  "fetching_image_data": "<i>⏳ Descargando imagen...</i>"
 }

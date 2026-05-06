@@ -95,7 +95,6 @@
   "ports": "Порты",
   "ports_list_header": "📊 <b>Порты, используемые контейнерами</b>",
   "ports_no_containers": "ℹ️ Контейнеры с сопоставленными портами не найдены",
-  "ports_host_no_detection": "не обнаруживаются",
   "ports_button_generate": "🎲 - Генерировать",
   "ports_button_check": "🔍 - Проверить",
   "ports_generated_port": "🎲 <b>Случайный доступный порт</b>\n\n<code>$1</code>\n\n✅ Этот порт свободен в системе\n📊 Диапазон: 5000-60000",
@@ -198,7 +197,7 @@
   "schedule_ask_action": "<b>🎯 Какое действие вы хотите выполнить?</b>",
   "schedule_ask_command": "<b>💻 Введите команду для выполнения</b>\n\n(например, ls, docker ps, npm start):",
   "schedule_ask_container": "<b>🐳 Выберите контейнер:</b>",
-  "schedule_ask_cron": "<b>⏰ Введите выражение cron</b>\n\n(например, '0 0 * * *' для ежедневно в полночь, посетите crontab.guru)\n\nИли используйте ярлыки:\n@yearly - Запускать один раз в год 1 января в полночь\n@monthly - Запускать один раз в месяц 1-го числа в полночь\n@weekly - Запускать один раз в неделю в воскресенье в полночь\n@daily - Запускать один раз в день в полночь\n@hourly - Запускать один раз в час в начале часа\n@reboot - Запускать один раз при загрузке системы",
+  "schedule_ask_cron": "<b>⏰ Введите выражение cron</b>\n\n(например, '0 0 * * *' для ежедневно в полночь, посетите crontab.guru)\n\nИли используйте ярлыки:\n<code>@yearly</code> - Запускать один раз в год 1 января в полночь\n<code>@monthly</code> - Запускать один раз в месяц 1-го числа в полночь\n<code>@weekly</code> - Запускать один раз в неделю в воскресенье в полночь\n<code>@daily</code> - Запускать один раз в день в полночь\n<code>@hourly</code> - Запускать один раз в час в начале часа\n<code>@reboot</code> - Запускать один раз при загрузке системы",
   "schedule_ask_minutes": "<b>⏱️ Введите минуты</b>\n\n(например, 5, 30, 60):",
   "schedule_ask_name": "<b>📝 Введите имя расписания</b>\n\n(например, резервная копия, очистка):",
   "schedule_ask_prune_type": "<b>🧹 Выберите тип очистки (prune):</b>",
@@ -218,6 +217,7 @@
   "schedule_edit_minutes": "⏱️ - Минуты",
   "schedule_edit_name": "📝 - Имя",
   "schedule_edit_show_output": "📤 - Показать вывод",
+  "schedule_edit_prune_type": "🧹 - Тип Очистки",
   "schedule_edit_what": "Что вы хотите отредактировать?",
   "schedule_enabled": "🟢 Расписание включено",
   "schedule_invalid_cron": "❌ Неверное выражение cron",
@@ -263,6 +263,7 @@
   "error_bot_container_name": "Имя контейнера должно быть установлено в переменной CONTAINER_NAME",
 
   "error_deleting_container_with_error": "Не удалось удалить контейнер $1. Ошибка: [$2]",
+  "error_creating_container": "Не удалось создать контейнер $1. Ошибка: [$2]",
   "error_updating_container_with_error": "Не удалось обновить контейнер $1. Ошибка: [$2]",
   "updating_creating": "<i>Обновление</i> <b>$1</b>...\nСоздание контейнера...",
   "updating_deleting_old": "<i>Обновление</i> <b>$1</b>...\nУдаление старого контейнера...",
@@ -307,5 +308,5 @@
   "update_no_description": "Описание недоступно",
   "update_date_unknown": "Неизвестно",
   "update_no_size_change": "Без изменений",
-  "fetching_image_data": "<i>⏳ Получение данных образа...</i>"
+  "fetching_image_data": "<i>⏳ Загрузка образа...</i>"
 }

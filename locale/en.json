@@ -95,7 +95,6 @@
   "ports": "Ports",
   "ports_list_header": "📊 <b>Ports Used by Containers</b>",
   "ports_no_containers": "ℹ️ No containers with mapped ports found",
-  "ports_host_no_detection": "not detectable",
   "ports_button_generate": "🎲 - Generate",
   "ports_button_check": "🔍 - Check",
   "ports_generated_port": "🎲 <b>Random Available Port</b>\n\n<code>$1</code>\n\n✅ This port is free on the system\n📊 Range: 5000-60000",
@@ -198,7 +197,7 @@
   "schedule_ask_action": "<b>🎯 What action do you want to perform?</b>",
   "schedule_ask_command": "<b>💻 Enter the command to execute</b>\n\n(e.g., ls, docker ps, npm start):",
   "schedule_ask_container": "<b>🐳 Select a container:</b>",
-  "schedule_ask_cron": "<b>⏰ Enter the cron expression</b>\n\n(e.g., '0 0 * * *' for daily at midnight, visit crontab.guru)\n\nOr use shortcuts:\n@yearly - Run once a year on January 1st at midnight\n@monthly - Run once a month on the 1st at midnight\n@weekly - Run once a week on Sunday at midnight\n@daily - Run once a day at midnight\n@hourly - Run once an hour at the start of the hour\n@reboot - Run once at system startup",
+  "schedule_ask_cron": "<b>⏰ Enter the cron expression</b>\n\n(e.g., '0 0 * * *' for daily at midnight, visit crontab.guru)\n\nOr use shortcuts:\n<code>@yearly</code> - Run once a year on January 1st at midnight\n<code>@monthly</code> - Run once a month on the 1st at midnight\n<code>@weekly</code> - Run once a week on Sunday at midnight\n<code>@daily</code> - Run once a day at midnight\n<code>@hourly</code> - Run once an hour at the start of the hour\n<code>@reboot</code> - Run once at system startup",
   "schedule_ask_minutes": "<b>⏱️ Enter the minutes</b>\n\n(e.g., 5, 30, 60):",
   "schedule_ask_name": "<b>📝 Enter the schedule name</b>\n\n(e.g., backup, cleanup):",
   "schedule_ask_prune_type": "<b>🧹 Select the type of prune operation:</b>",
@@ -218,6 +217,7 @@
   "schedule_edit_minutes": "⏱️ - Minutes",
   "schedule_edit_name": "📝 - Name",
   "schedule_edit_show_output": "📤 - Show Output",
+  "schedule_edit_prune_type": "🧹 - Prune Type",
   "schedule_edit_what": "What do you want to edit?",
   "schedule_enabled": "🟢 Schedule enabled",
   "schedule_invalid_cron": "❌ Invalid cron expression",
@@ -264,6 +264,7 @@
   "debug_rollback_successful": "Rollback successful for $1. Old container has been restored.",
   "debug_rollback_update": "Performing rollback of update for $1",
   "error_deleting_container_with_error": "Could not delete container $1. Error: [$2]",
+  "error_creating_container": "Could not create container $1. Error: [$2]",
   "error_pulling_image": "❌ Failed to pull image <b>$1</b>. Verify that the image exists in the registry.",
   "error_updating_container_with_error": "Could not update container $1. Error: [$2]",
   "updating_creating": "<i>Updating</i> <b>$1</b>...\nCreating container...",
@@ -306,5 +307,5 @@
   "update_no_description": "No description available",
   "update_date_unknown": "Unknown",
   "update_no_size_change": "No changes",
-  "fetching_image_data": "<i>⏳ Fetching image data...</i>"
+  "fetching_image_data": "<i>⏳ Downloading image...</i>"
 }

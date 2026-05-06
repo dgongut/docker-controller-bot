@@ -6,7 +6,6 @@ Port Manager Module
 Handles all port-related operations for Docker Controller Bot
 """
 
-import re
 import socket
 import random
 from typing import Tuple, List, Dict, Set, Optional
@@ -52,55 +51,6 @@ class PortManager:
         
         return True
     
-    def _get_host_network_ports(self, container) -> List[str]:
-        """
-        Get listening ports from a container with host network
-        
-        Args:
-            container: Docker container object
-            
-        Returns:
-            List of ports with protocol (e.g., ["53/tcp", "53/udp", "8080/tcp"])
-        """
-        ports_with_proto = []
-        
-        try:
-            # Try ss command first (modern and fast)
-            result = container.exec_run("sh -c 'ss -tuln'", demux=False)
-            if result.exit_code == 0 and result.output:
-                output = result.output.decode('utf-8', errors='ignore')
-                for line in output.split('\n'):
-                    if line.startswith('tcp'):
-                        match = re.search(r'(?:\*|:::?):(\d+)\s', line)
-                        if match:
-                            ports_with_proto.append(f"{match.group(1)}/tcp")
-                    elif line.startswith('udp'):
-                        match = re.search(r'(?:\*|:::?):(\d+)\s', line)
-                        if match:
-                            ports_with_proto.append(f"{match.group(1)}/udp")
-        except:
-            pass
-        
-        if not ports_with_proto:
-            try:
-                # Try netstat as fallback
-                result = container.exec_run("sh -c 'netstat -tuln'", demux=False)
-                if result.exit_code == 0 and result.output:
-                    output = result.output.decode('utf-8', errors='ignore')
-                    for line in output.split('\n'):
-                        if line.startswith('tcp'):
-                            match = re.search(r'(?:\*|:::?):(\d+)\s', line)
-                            if match:
-                                ports_with_proto.append(f"{match.group(1)}/tcp")
-                        elif line.startswith('udp'):
-                            match = re.search(r'(?:\*|:::?):(\d+)\s', line)
-                            if match:
-                                ports_with_proto.append(f"{match.group(1)}/udp")
-            except:
-                pass
-        
-        return ports_with_proto
-    
     def _get_bridge_network_ports(self, container) -> List[str]:
         """
         Get port bindings from a container with bridge/default network
@@ -139,9 +89,9 @@ class PortManager:
         network_mode = container.attrs.get('HostConfig', {}).get('NetworkMode', '')
 
         if network_mode == 'host':
-            if container.status in ['running', 'restarting']:
-                ports = self._get_host_network_ports(container)
-                return (ports, True)
+            # Host network shares the host's network namespace, so listing
+            # listening ports inside the container would expose every port
+            # bound on the host. Skip enumeration and just signal host mode.
             return ([], True)
         else:
             ports = self._get_bridge_network_ports(container)

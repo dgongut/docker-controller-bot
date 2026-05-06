@@ -69,7 +69,7 @@ CALL_PATTERNS = {
     "info": ["containerId"],
     "logfile": ["containerId"],
     "logs": ["containerId"],
-    "toggleUpdate": ["containerName"],
+    "toggleUpdate": ["containerId"],
     "toggleUpdateAll": [],
     "prune": ["action"],
     "restart": ["containerId"],
@@ -122,6 +122,22 @@ CALL_PATTERNS = {
     "scheduleSelectPruneType": ["pruneType"],
     "scheduleSelectPruneShowOutput": ["action"],
     "scheduleConfirm": [],
+}
+
+# Commands whose `containerName` arg actually carries a short hash of the
+# project name (to keep callback_data under Telegram's 64-byte limit).
+PROJECT_COMMANDS = {
+    "enterRestartProject", "restartWholeProject",
+    "enterRunProject", "runWholeProject",
+    "enterStopProject", "stopWholeProject",
+    "enterDeleteProject", "confirmDeleteWholeProject", "deleteWholeProject",
+    "enterExecProject",
+    "enterLogsProject",
+    "enterCheckUpdateProject",
+    "enterInfoProject", "showProjectInfo",
+    "enterChangeTagProject",
+    "enterLogfileProject",
+    "enterComposeProject",
 }
 
 # SCHEDULE COMMAND PATTERNS - Define required parameters for each schedule action

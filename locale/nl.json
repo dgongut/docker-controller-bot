@@ -95,7 +95,6 @@
   "ports": "Poorten",
   "ports_list_header": "📊 <b>Poorten Gebruikt door Containers</b>",
   "ports_no_containers": "ℹ️ Geen containers met toegewezen poorten gevonden",
-  "ports_host_no_detection": "niet detecteerbaar",
   "ports_button_generate": "🎲 - Genereren",
   "ports_button_check": "🔍 - Controleren",
   "ports_generated_port": "🎲 <b>Willekeurige Beschikbare Poort</b>\n\n<code>$1</code>\n\n✅ Deze poort is vrij op het systeem\n📊 Bereik: 5000-60000",
@@ -198,7 +197,7 @@
   "schedule_ask_action": "<b>🎯 Welke actie wil je uitvoeren?</b>",
   "schedule_ask_command": "<b>💻 Voer de uit te voeren opdracht in</b>\n\n(bijv. ls, docker ps, npm start):",
   "schedule_ask_container": "<b>🐳 Selecteer een container:</b>",
-  "schedule_ask_cron": "<b>⏰ Voer de cron-expressie in</b>\n\n(bijv. '0 0 * * *' voor dagelijks om middernacht, bezoek crontab.guru)\n\nOf gebruik snelkoppelingen:\n@yearly - Eenmaal per jaar op 1 januari om middernacht uitvoeren\n@monthly - Eenmaal per maand op de 1e om middernacht uitvoeren\n@weekly - Eenmaal per week op zondag om middernacht uitvoeren\n@daily - Eenmaal per dag om middernacht uitvoeren\n@hourly - Eenmaal per uur aan het begin van het uur uitvoeren\n@reboot - Eenmaal bij het opstarten van het systeem uitvoeren",
+  "schedule_ask_cron": "<b>⏰ Voer de cron-expressie in</b>\n\n(bijv. '0 0 * * *' voor dagelijks om middernacht, bezoek crontab.guru)\n\nOf gebruik snelkoppelingen:\n<code>@yearly</code> - Eenmaal per jaar op 1 januari om middernacht uitvoeren\n<code>@monthly</code> - Eenmaal per maand op de 1e om middernacht uitvoeren\n<code>@weekly</code> - Eenmaal per week op zondag om middernacht uitvoeren\n<code>@daily</code> - Eenmaal per dag om middernacht uitvoeren\n<code>@hourly</code> - Eenmaal per uur aan het begin van het uur uitvoeren\n<code>@reboot</code> - Eenmaal bij het opstarten van het systeem uitvoeren",
   "schedule_ask_minutes": "<b>⏱️ Voer de minuten in</b>\n\n(bijv. 5, 30, 60):",
   "schedule_ask_name": "<b>📝 Voer de naam van het schema in</b>\n\n(bijv. backup, opschoning):",
   "schedule_ask_prune_type": "<b>🧹 Selecteer het type opruiming (prune):</b>",
@@ -218,6 +217,7 @@
   "schedule_edit_minutes": "⏱️ - Minuten",
   "schedule_edit_name": "📝 - Naam",
   "schedule_edit_show_output": "📤 - Uitvoer weergeven",
+  "schedule_edit_prune_type": "🧹 - Opruimtype",
   "schedule_edit_what": "Wat wil je bewerken?",
   "schedule_enabled": "🟢 Schema ingeschakeld",
   "schedule_invalid_cron": "❌ Ongeldige cron-expressie",
@@ -263,6 +263,7 @@
   "error_bot_container_name": "De naam van de container moet worden ingesteld in de CONTAINER_NAME variabele",
 
   "error_deleting_container_with_error": "Kon container $1 niet verwijderen. Fout: [$2]",
+  "error_creating_container": "Kon container $1 niet aanmaken. Fout: [$2]",
   "error_updating_container_with_error": "Kon container $1 niet bijwerken. Fout: [$2]",
   "updating_creating": "<b>$1</b> <i>bijwerken</i>...\nContainer aanmaken...",
   "updating_deleting_old": "<b>$1</b> <i>bijwerken</i>...\nOude container verwijderen...",
@@ -307,5 +308,5 @@
   "update_no_description": "Geen beschrijving beschikbaar",
   "update_date_unknown": "Onbekend",
   "update_no_size_change": "Geen wijzigingen",
-  "fetching_image_data": "<i>⏳ Afbeeldingsgegevens ophalen...</i>"
+  "fetching_image_data": "<i>⏳ Image downloaden...</i>"
 }

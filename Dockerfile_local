@@ -8,7 +8,7 @@ WORKDIR /app
 # Install runtime dependencies and development tools
 RUN apk add --no-cache python3 py3-pip tzdata
 
-COPY requirements.txt docker-controller-bot.py config.py docker_update.py /app/
+COPY requirements.txt docker-controller-bot.py config.py docker_update.py logger.py message_queue.py /app/
 
 # Install application and development dependencies
 RUN export PIP_BREAK_SYSTEM_PACKAGES=1 && \

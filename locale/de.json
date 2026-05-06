@@ -95,7 +95,6 @@
   "ports": "Ports",
   "ports_list_header": "📊 <b>Von Containern verwendete Ports</b>",
   "ports_no_containers": "ℹ️ Keine Container mit zugeordneten Ports gefunden",
-  "ports_host_no_detection": "nicht erkennbar",
   "ports_button_generate": "🎲 - Generieren",
   "ports_button_check": "🔍 - Prüfen",
   "ports_generated_port": "🎲 <b>Zufälliger verfügbarer Port</b>\n\n<code>$1</code>\n\n✅ Dieser Port ist im System frei\n📊 Bereich: 5000-60000",
@@ -198,7 +197,7 @@
   "schedule_ask_action": "<b>🎯 Welche Aktion möchtest du ausführen?</b>",
   "schedule_ask_command": "<b>💻 Gib den auszuführenden Befehl ein</b>\n\n(z.B. ls, docker ps, npm start):",
   "schedule_ask_container": "<b>🐳 Wähle einen Container:</b>",
-  "schedule_ask_cron": "<b>⏰ Gib den Cron-Ausdruck ein</b>\n\n(z.B. '0 0 * * *' für täglich um Mitternacht, besuche crontab.guru)\n\nOder verwende Verknüpfungen:\n@yearly - Einmal pro Jahr am 1. Januar um Mitternacht ausführen\n@monthly - Einmal pro Monat am 1. um Mitternacht ausführen\n@weekly - Einmal pro Woche am Sonntag um Mitternacht ausführen\n@daily - Einmal pro Tag um Mitternacht ausführen\n@hourly - Einmal pro Stunde zu Beginn der Stunde ausführen\n@reboot - Einmal beim Systemstart ausführen",
+  "schedule_ask_cron": "<b>⏰ Gib den Cron-Ausdruck ein</b>\n\n(z.B. '0 0 * * *' für täglich um Mitternacht, besuche crontab.guru)\n\nOder verwende Verknüpfungen:\n<code>@yearly</code> - Einmal pro Jahr am 1. Januar um Mitternacht ausführen\n<code>@monthly</code> - Einmal pro Monat am 1. um Mitternacht ausführen\n<code>@weekly</code> - Einmal pro Woche am Sonntag um Mitternacht ausführen\n<code>@daily</code> - Einmal pro Tag um Mitternacht ausführen\n<code>@hourly</code> - Einmal pro Stunde zu Beginn der Stunde ausführen\n<code>@reboot</code> - Einmal beim Systemstart ausführen",
   "schedule_ask_minutes": "<b>⏱️ Gib die Minuten ein</b>\n\n(z.B. 5, 30, 60):",
   "schedule_ask_name": "<b>📝 Gib den Namen des Zeitplans ein</b>\n\n(z.B. backup, bereinigung):",
   "schedule_ask_prune_type": "<b>🧹 Wählen Sie den Typ der Bereinigung (prune):</b>",
@@ -218,6 +217,7 @@
   "schedule_edit_minutes": "⏱️ - Minuten",
   "schedule_edit_name": "📝 - Name",
   "schedule_edit_show_output": "📤 - Ausgabe anzeigen",
+  "schedule_edit_prune_type": "🧹 - Bereinigungstyp",
   "schedule_edit_what": "Was möchtest du bearbeiten?",
   "schedule_enabled": "🟢 Zeitplan aktiviert",
   "schedule_invalid_cron": "❌ Ungültiger Cron-Ausdruck",
@@ -263,6 +263,7 @@
   "error_bot_container_name": "Der Containername muss in der Variable CONTAINER_NAME gesetzt werden",
 
   "error_deleting_container_with_error": "Konnte Container $1 nicht löschen. Fehler: [$2]",
+  "error_creating_container": "Konnte Container $1 nicht erstellen. Fehler: [$2]",
   "error_updating_container_with_error": "Konnte Container $1 nicht aktualisieren. Fehler: [$2]",
   "updating_creating": "<i>Aktualisiere</i> <b>$1</b>...\nErstelle Container...",
   "updating_deleting_old": "<i>Aktualisiere</i> <b>$1</b>...\nLösche alten Container...",
@@ -307,5 +308,5 @@
   "update_no_description": "Keine Beschreibung verfügbar",
   "update_date_unknown": "Unbekannt",
   "update_no_size_change": "Keine Änderungen",
-  "fetching_image_data": "<i>⏳ Bilddaten werden abgerufen...</i>"
+  "fetching_image_data": "<i>⏳ Image wird heruntergeladen...</i>"
 }

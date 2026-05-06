@@ -1,46 +1,46 @@
 #!/usr/bin/env python3
 """
-Test de integración para FASE 2
-Verifica que DockerManager puede usar los métodos de Compose sin errores
+Integration test for PHASE 2
+Verifies that DockerManager can use the Compose methods without errors
 """
 
 import sys
 import docker
 
-# Simular el entorno del bot
+# Simulate the bot environment
 class MockConfig:
     CONTAINER_NAME = "docker-controller-bot"
 
 sys.modules['config'] = MockConfig()
 
-# Ahora importar DockerManager
+# Now import DockerManager
 from docker_compose_manager import ComposeDetector, ComposeProjectManager
 
 def test_docker_manager_integration():
-    """Prueba que DockerManager puede usar los métodos de Compose"""
-    
+    """Tests that DockerManager can use the Compose methods"""
+
     print("=" * 60)
-    print("TEST: Integración de Compose en DockerManager")
+    print("TEST: Compose integration in DockerManager")
     print("=" * 60)
-    
+
     try:
-        # Simular DockerManager
+        # Simulate DockerManager
         client = docker.from_env()
         compose_manager = ComposeProjectManager(client)
-        
-        print("\n✅ ComposeProjectManager inicializado correctamente")
-        
+
+        print("\n✅ ComposeProjectManager initialized correctly")
+
         # Test 1: get_all_projects
-        print("\n1. Probando get_all_projects()...")
+        print("\n1. Testing get_all_projects()...")
         projects = compose_manager.get_all_projects()
-        print(f"   ✅ Detectados {len(projects)} proyectos")
-        
-        # Test 2: Verificar contenedores
-        print("\n2. Probando detección de contenedores...")
+        print(f"   ✅ Detected {len(projects)} projects")
+
+        # Test 2: Verify containers
+        print("\n2. Testing container detection...")
         containers = client.containers.list(all=True)
         compose_count = 0
         standalone_count = 0
-        
+
         for container in containers:
             if ComposeDetector.is_compose_container(container):
                 compose_count += 1
@@ -50,19 +50,19 @@ def test_docker_manager_integration():
             else:
                 standalone_count += 1
                 print(f"   🐳 {container.name}: standalone")
-        
+
         print(f"\n   ✅ Compose containers: {compose_count}")
         print(f"   ✅ Standalone containers: {standalone_count}")
-        
+
         # Test 3: get_project_info
-        print("\n3. Probando get_project_info()...")
+        print("\n3. Testing get_project_info()...")
         for project_name in projects.keys():
             project_info = compose_manager.get_project_info(project_name)
             if project_info:
-                print(f"   ✅ Proyecto '{project_name}': {project_info.get_container_count()} contenedores")
-        
+                print(f"   ✅ Project '{project_name}': {project_info.get_container_count()} containers")
+
         print("\n" + "=" * 60)
-        print("✅ TODOS LOS TESTS PASARON")
+        print("✅ ALL TESTS PASSED")
         print("=" * 60)
         
         return True
