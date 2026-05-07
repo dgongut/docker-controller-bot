@@ -23,21 +23,72 @@ Have controll of your docker containers from one single place.
 
 - ✅ List containers
 - ✅ Start, stop and remove containers
+- ✅ Docker Compose project support with hierarchical navigation (project → containers)
 - ✅ Get logs directly on the chat or on a file
 - ✅ Extract the container's docker-compose
 - ✅ Notifications when a container starts or stops
 - ✅ Notifications when a container has a new image update
 - ✅ Updating of containers
 - ✅ Change tags (rollback or update)
-- ✅ Prune of containers, images, and other unused objects
+- ✅ Prune of containers, images, networks and other unused objects
 - ✅ Execute commands inside of the container
+- ✅ List ports used by containers, check whether a specific port is free and generate random available ports
+- ✅ Show detailed information for a container or a whole Compose project
+- ✅ Schedule tasks with cron expressions: run, stop, restart, exec, prune and mute
+- ✅ Mute notifications temporarily
+- ✅ Multi-architecture image (amd64, arm64, armv7…) compatible with Raspberry Pi, NAS and standard servers
 - ✅ Multilanguage support (Spanish, English, Dutch, German, Russian, Galician, Italian, Catalan)
 
 Are you searching for [![](https://badgen.net/badge/icon/docker?icon=docker&label)](https://hub.docker.com/r/dgongut/docker-controller-bot)?
 
 **NEW** News and updates channel (in Spanish) [![](https://badgen.net/badge/icon/telegram?icon=telegram&label)](https://t.me/dockercontrollerbotnews)
 
-🖼️ If you want to use the icon on your bot you have it [here](https://raw.githubusercontent.com/dgongut/pictures/main/Docker-Controller-Bot/Docker-Controller-Bot.png) in high resolution. Download it and send it to [BotFather](https://t.me/BotFather) on the BotPic option.
+## Create your Telegram bot
+
+Before bringing the container up you need your own Telegram bot and your user ID.
+
+1. Open [@BotFather](https://t.me/BotFather) on Telegram and send `/newbot`. Follow the instructions (a name and a username ending in `bot`).
+2. BotFather will reply with the bot token. Save it: it goes into the `TELEGRAM_TOKEN` variable.
+3. To know your own chat ID (needed for `TELEGRAM_ADMIN`), talk to [@MissRose_bot](https://t.me/MissRose_bot) and send `/id`. It will reply with a number — that's your ID.
+4. *(Optional)* If you plan to use the bot inside a group, add it, make it admin and obtain the group chat ID the same way; that value goes into `TELEGRAM_GROUP`.
+5. *(Optional)* If you want to set the official bot icon, download the high-resolution image [here](https://raw.githubusercontent.com/dgongut/pictures/main/Docker-Controller-Bot/Docker-Controller-Bot.png) and send it to [@BotFather](https://t.me/BotFather) using the `/setuserpic` option.
+
+## Available commands
+
+Most commands can be used in two ways: typing the command alone (`/run`) to let the bot show an interactive button menu, or passing the container name directly (`/run nginx`) to act without menus.
+
+| Command | Description |
+|---|---|
+| `/start` | Main menu with the command list |
+| `/list` | Full list of containers |
+| `/run` `/stop` `/restart` | Start / stop / restart a container or a whole Compose project |
+| `/delete` | Remove a container or a whole Compose project |
+| `/exec` | Run a command inside a container |
+| `/logs` `/logfile` | Logs in the chat or as a file |
+| `/checkupdate` | Check whether a container has an update available |
+| `/updateall` | Update every container |
+| `/changetag` | Change the image tag (rollback or jump to another version) |
+| `/compose` | Extract the `docker-compose` of a container or a project |
+| `/info` | Show detailed information of a container or a project |
+| `/ports` | List used ports, check a specific one or generate a free one |
+| `/prune` | Clean up unused containers, images, networks or volumes |
+| `/mute <minutes>` | Mute notifications for a number of minutes |
+| `/schedule` | Menu to create, edit and delete scheduled tasks |
+| `/version` `/donate` `/donors` | Current version / donate / list of donors |
+
+## Docker Compose support
+
+If your containers were created with `docker compose`, the bot recognizes them automatically as a **project** and shows them grouped.
+
+Commands like `/run`, `/stop`, `/restart`, `/delete`, `/info` or `/compose` will show the project list first, and the containers when you pick a project. Start, stop, restart and delete actions can be applied to the **whole project** or to an individual container.
+
+## Scheduled tasks (`/schedule`)
+
+From `/schedule` you can create tasks that run on a cron schedule.
+
+- Supported actions: `run`, `stop`, `restart`, `exec`, `prune` and `mute`.
+- Accepts standard cron expressions (`0 */4 * * *`) and shortcuts: `@yearly`, `@monthly`, `@weekly`, `@daily`, `@hourly` and `@reboot`.
+- Schedules are persisted under `/app/schedule` (don't forget to map that volume).
 
 ## Docker Compose variables
 
@@ -52,9 +103,8 @@ Are you searching for [![](https://badgen.net/badge/icon/docker?icon=docker&labe
 |TZ |✅| Timezone (Example: Europe/Madrid) |
 |CHECK_UPDATES |❌| The bot will check for image updates. 0 no - 1 yes. Default is 1|
 |CHECK_UPDATE_EVERY_HOURS |❌| How long would it wait before check for image updates, in hours. Default is 4 |
-|CHECK_UPDATE_STOPPED_CONTAINERS |❌| Check for image updates on stopped containers. 0 no - 1 yes. Default is 1 | 
-|GROUPED_UPDATES |❌| Group image update notifications in one single message. 0 no - 1 yes. Default is 1 | 
-|BUTTON_COLUMNS |❌| Number of column buttons on the list of containers. Default is 2 | 
+|CHECK_UPDATE_STOPPED_CONTAINERS |❌| Check for image updates on stopped containers. 0 no - 1 yes. Default is 1 |
+|BUTTON_COLUMNS |❌| Number of column buttons on the list of containers. Default is 2 |
 |LANGUAGE |❌| Bot's language, it can be ES / EN / NL / DE / RU / GL / IT / CAT. Default is ES (Spanish) | 
 |EXTENDED_MESSAGES |❌| The bot will show more information messages. 0 no - 1 yes. Default is 0 |
 
@@ -81,7 +131,6 @@ services:
             #- CHECK_UPDATES=1
             #- CHECK_UPDATE_EVERY_HOURS=4
             #- CHECK_UPDATE_STOPPED_CONTAINERS=1
-            #- GROUPED_UPDATES=1
             #- BUTTON_COLUMNS=2
             #- LANGUAGE=ES
             #- EXTENDED_MESSAGES=0
@@ -178,6 +227,32 @@ services:
       - "DCB-Auto-Update"
     restart: unless-stopped
 ```
+</details>
+
+<details>
+<summary>🧩 My containers were created with docker-compose and appear grouped, can I still manage just one?</summary>
+
+Yes. When you enter a project you'll see each container separately with its status, and you can act on it individually, just like with standalone containers.
+
+The global actions (start, stop, restart or delete the whole project) are available as an extra button inside the project menu.
+</details>
+
+<details>
+<summary>📢 If I set <code>TELEGRAM_NOTIFICATION_CHANNEL</code>, will notifications be duplicated?</summary>
+
+No. When that channel is set, container status notifications (start, stop, crash, update available…) are sent **only** to that channel and stop appearing in the main chat.
+
+Every other message (command results, interactive menus, etc.) keeps arriving in the regular chat where you talk to the bot.
+</details>
+
+<details>
+<summary>🔄 How do I update the bot itself?</summary>
+
+The same as any other container: from `/checkupdate docker-controller-bot` or from `/updateall`.
+
+Under the hood the bot spawns an auxiliary container (`UPDATER-Docker-Controler-Bot`) that pulls the new image, replaces it and brings the bot back up, so the bot is never left without a running process during the update.
+
+If you add the `DCB-Auto-Update` label to its `docker-compose.yml`, it will update itself as soon as a new version is detected.
 </details>
 
 ---

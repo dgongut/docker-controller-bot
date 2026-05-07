@@ -102,14 +102,23 @@ def extract_container_config(container, tag=None):
 
 	# Network configuration
 	config['network_mode'] = _get_val(host_config, 'NetworkMode')
-	config['hostname'] = _get_val(container_attrs, 'Hostname')
-	config['domainname'] = _get_val(container_attrs, 'Domainname')
+	# Docker rejects hostname/domainname/mac_address when network_mode is host,
+	# container:<id> or none ("conflicting options: hostname and the network mode").
+	_nm = (config['network_mode'] or '').lower()
+	_nm_conflicts_with_hostname = _nm == 'host' or _nm == 'none' or _nm.startswith('container:')
+	config['hostname'] = None if _nm_conflicts_with_hostname else _get_val(container_attrs, 'Hostname')
+	config['domainname'] = None if _nm_conflicts_with_hostname else _get_val(container_attrs, 'Domainname')
 	config['dns'] = _get_list(host_config, 'Dns')
 	config['dns_opt'] = _get_list(host_config, 'DnsOptions')
 	config['dns_search'] = _get_list(host_config, 'DnsSearch')
 	config['extra_hosts'] = _get_list(host_config, 'ExtraHosts')
-	config['mac_address'] = _get_val(host_config, 'MacAddress')
+	# mac_address also conflicts with host/container:/none network modes
+	config['mac_address'] = None if _nm_conflicts_with_hostname else _get_val(host_config, 'MacAddress')
 	config['network_disabled'] = _get_val(host_config, 'NetworkDisabled', False)
+	# In host/container:/none network modes port bindings are meaningless
+	# (Docker ignores them and may emit warnings). Drop them.
+	if _nm_conflicts_with_hostname:
+		config['ports'] = {}
 
 	# Network endpoint configuration - extract static IP, MAC, aliases, etc.
 	ipv4_address = None

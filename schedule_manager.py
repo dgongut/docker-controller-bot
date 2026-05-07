@@ -64,7 +64,8 @@ class ScheduleManager:
             print(f"Error writing schedules: {e}")
     
     def add_schedule(self, name: str, cron: str, action: str, container: str = None,
-                     minutes: int = None, show_output: bool = False, command: str = None) -> bool:
+                     minutes: int = None, show_output: bool = False, command: str = None,
+                     prune_type: str = None) -> bool:
         """Add a new schedule. Returns True if successful, False if name already exists"""
         schedules = self._read_schedules()
 
@@ -81,6 +82,7 @@ class ScheduleManager:
             "minutes": minutes,
             "show_output": show_output,
             "command": command,
+            "prune_type": prune_type,
             "created_at": datetime.now().isoformat(),
             "enabled": True
         }

@@ -1,6 +1,6 @@
-FROM alpine:3.22.2
+FROM alpine:3.23.4
 
-ARG VERSION=3.11.1
+ARG VERSION=4.0.0
 
 ENV TZ=UTC
 
@@ -13,9 +13,12 @@ RUN apk add --no-cache python3 py3-pip tzdata curl && \
     mv /tmp/docker-controller-bot-${VERSION}/docker-controller-bot.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/config.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/docker_update.py /app && \
-    mv /tmp/docker-controller-bot-${VERSION}/migrate_schedules.py /app && \
+    mv /tmp/docker-controller-bot-${VERSION}/docker_compose_manager.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/schedule_flow.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/schedule_manager.py /app && \
+    mv /tmp/docker-controller-bot-${VERSION}/port_manager.py /app && \
+    mv /tmp/docker-controller-bot-${VERSION}/logger.py /app && \
+    mv /tmp/docker-controller-bot-${VERSION}/message_queue.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/locale /app && \
     mv /tmp/docker-controller-bot-${VERSION}/requirements.txt /app && \
     rm -rf /tmp/app.tar.gz /tmp/docker-controller-bot-${VERSION}/ && \

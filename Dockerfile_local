@@ -1,4 +1,4 @@
-FROM alpine:3.22.2
+FROM alpine:3.23.4
 
 ENV TZ=UTC \
     PYTHONUNBUFFERED=1
@@ -8,7 +8,8 @@ WORKDIR /app
 # Install runtime dependencies and development tools
 RUN apk add --no-cache python3 py3-pip tzdata
 
-COPY requirements.txt docker-controller-bot.py config.py docker_update.py /app/
+COPY requirements.txt docker-controller-bot.py config.py docker_update.py docker_compose_manager.py schedule_flow.py schedule_manager.py port_manager.py logger.py message_queue.py /app/
+COPY locale /app/locale
 
 # Install application and development dependencies
 RUN export PIP_BREAK_SYSTEM_PACKAGES=1 && \

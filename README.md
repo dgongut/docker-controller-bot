@@ -23,21 +23,72 @@ Lleva el control de tus contenedores docker desde un único lugar.
 
 - ✅ Listar contenedores
 - ✅ Arrancar, parar y eliminar contenedores
+- ✅ Soporte para proyectos Docker Compose con navegación jerárquica (proyecto → contenedores)
 - ✅ Obtener los logs tanto de manera directa como a través de fichero
 - ✅ Extraer el docker-compose de tus contenedores
 - ✅ Notificaciones cuando un contenedor se cae o se inicia
 - ✅ Notificaciones cuando un contenedor tiene una actualización pendiente
 - ✅ Actualizaciones de los contenedores
 - ✅ Cambiar el tag (rollback o actualización)
-- ✅ Limpia el sistema, eliminado contenedores, imagenes y otros objetos no utilizados.
+- ✅ Limpia el sistema, eliminando contenedores, imágenes y otros objetos no utilizados
 - ✅ Ejecuta comandos dentro de contenedores
+- ✅ Visualiza puertos usados por contenedores, comprueba si un puerto concreto está libre y genera puertos aleatorios disponibles
+- ✅ Muestra información detallada de un contenedor o de un proyecto Compose completo
+- ✅ Programación de tareas con expresiones cron: run, stop, restart, exec, prune y mute
+- ✅ Silencia las notificaciones de forma temporal
+- ✅ Imagen multiarquitectura (amd64, arm64, armv7…) compatible con Raspberry Pi, NAS y servidores estándar
 - ✅ Soporte de idiomas (Spanish, English, Dutch, German, Russian, Galician, Italian, Catalan)
 
 ¿Lo buscas en [![](https://badgen.net/badge/icon/docker?icon=docker&label)](https://hub.docker.com/r/dgongut/docker-controller-bot)?
 
 **NUEVO** Canal de novedades en [![](https://badgen.net/badge/icon/telegram?icon=telegram&label)](https://t.me/dockercontrollerbotnews)
 
-🖼️ Si deseas establecerle el icono al bot de telegram, te dejo [aquí](https://raw.githubusercontent.com/dgongut/pictures/main/Docker-Controller-Bot/Docker-Controller-Bot.png) el icono en alta resolución. Solo tienes que descargarlo y mandárselo al [BotFather](https://t.me/BotFather) en la opción de BotPic.
+## Crear tu bot de Telegram
+
+Antes de levantar el contenedor necesitas un bot propio en Telegram y conocer tu identificador de usuario.
+
+1. Abre [@BotFather](https://t.me/BotFather) en Telegram y envía `/newbot`. Sigue las instrucciones (un nombre y un username acabado en `bot`).
+2. BotFather te devolverá el token del bot. Guárdalo: irá en la variable `TELEGRAM_TOKEN`.
+3. Para conocer tu propio chat ID (lo necesitas para `TELEGRAM_ADMIN`), habla con [@MissRose_bot](https://t.me/MissRose_bot) y envíale `/id`. Te responderá con un número, ese es tu ID.
+4. *(Opcional)* Si vas a usar el bot dentro de un grupo, añádelo, hazlo administrador y obtén el chat ID del grupo de la misma forma; ese valor irá en `TELEGRAM_GROUP`.
+5. *(Opcional)* Si quieres ponerle el icono oficial al bot, descarga la imagen en alta resolución [aquí](https://raw.githubusercontent.com/dgongut/pictures/main/Docker-Controller-Bot/Docker-Controller-Bot.png) y envíasela a [@BotFather](https://t.me/BotFather) usando la opción `/setuserpic`.
+
+## Comandos disponibles
+
+Casi todos los comandos pueden ejecutarse en dos modos: escribiendo el comando solo (`/run`) para que el bot muestre un menú interactivo con botones, o pasando directamente el nombre del contenedor (`/run nginx`) para actuar sin menús.
+
+| Comando | Descripción |
+|---|---|
+| `/start` | Menú principal con la lista de comandos |
+| `/list` | Listado completo de contenedores |
+| `/run` `/stop` `/restart` | Arranca / detiene / reinicia un contenedor o un proyecto Compose entero |
+| `/delete` | Elimina un contenedor o un proyecto Compose entero |
+| `/exec` | Ejecuta un comando dentro de un contenedor |
+| `/logs` `/logfile` | Logs en mensaje o como fichero |
+| `/checkupdate` | Comprueba si un contenedor tiene actualización |
+| `/updateall` | Actualiza todos los contenedores |
+| `/changetag` | Cambia el tag de la imagen (rollback o salto de versión) |
+| `/compose` | Extrae el `docker-compose` de un contenedor o proyecto |
+| `/info` | Muestra información detallada de un contenedor o de un proyecto |
+| `/ports` | Lista puertos usados, comprueba uno concreto o genera uno libre |
+| `/prune` | Limpia contenedores, imágenes, redes o volúmenes no usados |
+| `/mute <minutos>` | Silencia las notificaciones durante X minutos |
+| `/schedule` | Menú para crear, editar y borrar tareas programadas |
+| `/version` `/donate` `/donors` | Versión actual / donar / lista de donantes |
+
+## Soporte para Docker Compose
+
+Si tus contenedores fueron creados con `docker compose`, el bot los reconoce automáticamente como un **proyecto** y los presenta agrupados.
+
+En comandos como `/run`, `/stop`, `/restart`, `/delete`, `/info` o `/compose` verás primero la lista de proyectos y, al pulsar uno, sus contenedores. Las acciones de inicio, parada, reinicio y borrado se pueden aplicar al **proyecto entero** o a un contenedor individual.
+
+## Programaciones (`/schedule`)
+
+Desde `/schedule` puedes crear tareas que se ejecuten en cron.
+
+- Acciones soportadas: `run`, `stop`, `restart`, `exec`, `prune` y `mute`.
+- Acepta expresiones cron estándar (`0 */4 * * *`) y atajos: `@yearly`, `@monthly`, `@weekly`, `@daily`, `@hourly` y `@reboot`.
+- Las programaciones se persisten en `/app/schedule` (recuerda mapear ese volumen).
 
 ## Configuración en las variables del Docker Compose
 
@@ -52,9 +103,8 @@ Lleva el control de tus contenedores docker desde un único lugar.
 |TZ |✅| Timezone (Por ejemplo Europe/Madrid) |
 |CHECK_UPDATES |❌| Si se desea que compruebe actualizaciones. 0 no - 1 sí. Por defecto 1|
 |CHECK_UPDATE_EVERY_HOURS |❌| Tiempo de espera en horas entre chequeo de actualizaciones. Por defecto 4 |
-|CHECK_UPDATE_STOPPED_CONTAINERS |❌| Si se desea que compruebe las actualizaciones de los contenedores detenidos. 0 no - 1 sí. Por defecto 1 | 
-|GROUPED_UPDATES |❌| Si se desea que agrupe los mensajes de las actualizaciones en uno solo. 0 no - 1 sí. Por defecto 1 | 
-|BUTTON_COLUMNS |❌| Numero de columnas de botones en las listas de contenedores. Por defecto 2 | 
+|CHECK_UPDATE_STOPPED_CONTAINERS |❌| Si se desea que compruebe las actualizaciones de los contenedores detenidos. 0 no - 1 sí. Por defecto 1 |
+|BUTTON_COLUMNS |❌| Numero de columnas de botones en las listas de contenedores. Por defecto 2 |
 |LANGUAGE |❌| Idioma, puede ser ES / EN / NL / DE / RU / GL / IT / CAT. Por defecto ES (Spanish) | 
 |EXTENDED_MESSAGES |❌| Si se desea que muestre más mensajes de información. 0 no - 1 sí. Por defecto 0 | 
 
@@ -81,7 +131,6 @@ services:
             #- CHECK_UPDATES=1
             #- CHECK_UPDATE_EVERY_HOURS=4
             #- CHECK_UPDATE_STOPPED_CONTAINERS=1
-            #- GROUPED_UPDATES=1
             #- BUTTON_COLUMNS=2
             #- LANGUAGE=ES
             #- EXTENDED_MESSAGES=0
@@ -178,7 +227,33 @@ services:
       - "DCB-Auto-Update"
     restart: unless-stopped
 ```
-</details> 
+</details>
+
+<details>
+<summary>🧩 He creado mis contenedores con docker-compose y aparecen agrupados, ¿puedo gestionar uno solo?</summary>
+
+Sí. Cuando entras en un proyecto verás cada contenedor por separado con su estado y podrás actuar sobre él individualmente, igual que sobre los contenedores standalone.
+
+Las acciones globales (arrancar, parar, reiniciar o eliminar el proyecto entero) están disponibles como un botón adicional dentro del menú del proyecto.
+</details>
+
+<details>
+<summary>📢 Si configuro <code>TELEGRAM_NOTIFICATION_CHANNEL</code>, ¿se duplican las notificaciones?</summary>
+
+No. Cuando se define ese canal, los avisos de cambio de estado de los contenedores (arranque, parada, caída, actualización disponible…) van **solo** a ese canal y dejan de aparecer en el chat principal.
+
+El resto de mensajes (resultados de comandos, menús interactivos, etc.) siguen llegando al chat normal donde hablas con el bot.
+</details>
+
+<details>
+<summary>🔄 ¿Cómo actualizo el propio bot?</summary>
+
+Igual que cualquier otro contenedor: desde `/checkupdate docker-controller-bot` o desde `/updateall`.
+
+Internamente el bot lanza un contenedor auxiliar (`UPDATER-Docker-Controler-Bot`) que se encarga de descargar la nueva imagen, sustituirla y volver a levantar el bot, evitando que el propio bot se quede sin proceso a mitad de la actualización.
+
+Si le añades la label `DCB-Auto-Update` a su `docker-compose.yml`, se actualizará solo en cuanto detecte una nueva versión.
+</details>
 
 ---
 ## Solo para desarrolladores

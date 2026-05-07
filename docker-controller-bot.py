@@ -1,5 +1,6 @@
 import docker
 import hashlib
+import html
 import io
 import json
 import os
@@ -18,27 +19,24 @@ from datetime import datetime, timedelta
 from telebot.types import InlineKeyboardButton
 from telebot.types import InlineKeyboardMarkup
 from docker_update import extract_container_config, perform_update
+from docker_compose_manager import (
+    ComposeDetector,
+    ComposeProjectManager
+)
 from schedule_manager import ScheduleManager
 from schedule_flow import (
     save_schedule_state, load_schedule_state, clear_schedule_state,
     init_add_schedule_state
 )
-from migrate_schedules import migrate_schedules
+from port_manager import PortManager
+from logger import debug, error, warning
+from message_queue import MessageQueue
 
-VERSION = "3.11.1"
+VERSION = "4.0.0"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
 _cache_lock = threading.Lock()  # Lock for thread-safe cache operations
-
-def debug(message):
-	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - DEBUG: {message}')
-
-def error(message):
-	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - ERROR: {message}')
-
-def warning(message):
-	print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - WARNING: {message}')
 
 def sizeof_fmt(num, suffix="B"):
 	for unit in ("", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "Zi"):
@@ -84,7 +82,7 @@ def get_text(key, *args):
 	return translated_text
 
 
-# Comprobación inicial de variables
+# Initial variable validation
 if TELEGRAM_TOKEN is None or TELEGRAM_TOKEN == '':
 	error("You need to configure the bot token with the TELEGRAM_TOKEN variable")
 	sys.exit(1)
@@ -123,126 +121,19 @@ if not os.path.exists(FULL_MUTE_FILE_PATH):
 	with open(FULL_MUTE_FILE_PATH, 'w') as mute_file:
 		mute_file.write("0")
 
-# Instanciamos el bot
+# Instantiate the bot
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# Instanciamos el ScheduleManager
+# Instantiate the ScheduleManager
 schedule_manager = ScheduleManager(SCHEDULE_PATH, SCHEDULE_JSON_FILE)
 
-# Ejecutar migración de schedules si es necesario
-try:
-	migrate_schedules()
-	# Refresh the cache after migration to ensure schedules are loaded
-	schedule_manager._load_cache()
-except Exception as e:
-	error(f"Error during schedule migration: {e}")
-
-# ============================================================================
-# SISTEMA DE COLA DE MENSAJES CON RATE LIMITING
-# ============================================================================
-import queue
-from threading import Thread, Lock
-
-class MessageQueue:
-	"""
-	Sistema de cola de mensajes con rate limiting para evitar saturar Telegram.
-	Implementa:
-	- Cola de mensajes con delays configurables
-	- Reintentos con backoff exponencial
-	- Manejo de errores de rate limiting
-	"""
-	def __init__(self, delay_between_messages=0.5, max_retries=3):
-		self.queue = queue.Queue()
-		self.delay_between_messages = delay_between_messages
-		self.max_retries = max_retries
-		self.lock = Lock()
-		self.running = True
-		self.worker_thread = Thread(target=self._process_queue, daemon=True)
-		self.worker_thread.start()
-		debug("Message queue started")
-
-	def _process_queue(self):
-		"""Procesa la cola de mensajes de forma continua"""
-		while self.running:
-			try:
-				# Obtener el siguiente mensaje de la cola (timeout para permitir shutdown)
-				message_data = self.queue.get(timeout=1)
-				if message_data is None:  # Señal de parada
-					break
-
-				self._execute_message(message_data)
-				time.sleep(self.delay_between_messages)
-			except queue.Empty:
-				continue
-			except Exception as e:
-				error(f"Error processing message queue: {str(e)}")
-
-	def _execute_message(self, message_data):
-		"""Ejecuta un mensaje con reintentos y backoff exponencial"""
-		func = message_data['func']
-		args = message_data['args']
-		kwargs = message_data['kwargs']
-		result_queue = message_data.get('result_queue')
-
-		try:
-			for attempt in range(self.max_retries):
-				try:
-					result = func(*args, **kwargs)
-					if result_queue:
-						result_queue.put(result)
-					return result
-				except Exception as e:
-					error_msg = str(e)
-					# Detectar rate limiting de Telegram
-					if "Too Many Requests" in error_msg or "429" in error_msg:
-						if attempt < self.max_retries - 1:
-							wait_time = (2 ** attempt) * 2  # Backoff exponencial: 2, 4, 8 segundos
-							warning(f"Rate limit detected. Waiting {wait_time}s before retrying...")
-							time.sleep(wait_time)
-							continue
-					elif attempt < self.max_retries - 1:
-						wait_time = 1 * (attempt + 1)
-						debug(f"Error sending message (attempt {attempt + 1}/{self.max_retries}). Retrying in {wait_time}s...")
-						time.sleep(wait_time)
-						continue
-
-					error(f"Final error sending message after {self.max_retries} attempts: {str(e)}")
-					if result_queue:
-						result_queue.put(None)
-					break
-		except Exception as e:
-			error(f"Error processing message queue: {str(e)}")
-			if result_queue:
-				result_queue.put(None)
-
-	def add_message(self, func, *args, wait_for_result=False, **kwargs):
-		"""Añade un mensaje a la cola. Si wait_for_result=True, espera el resultado"""
-		result_queue = queue.Queue() if wait_for_result else None
-		self.queue.put({
-			'func': func,
-			'args': args,
-			'kwargs': kwargs,
-			'result_queue': result_queue
-		})
-		if wait_for_result:
-			try:
-				return result_queue.get(timeout=60)  # Esperar máximo 60 segundos
-			except queue.Empty:
-				error("Error processing message queue: Timeout esperando resultado del mensaje")
-				return None
-		return None
-
-	def shutdown(self):
-		"""Detiene la cola de mensajes"""
-		self.running = False
-		self.queue.put(None)
-
-# Instanciar la cola de mensajes global
+# Instantiate the global message queue
 message_queue = MessageQueue(delay_between_messages=0.1, max_retries=5)
 
 class DockerManager:
 	def __init__(self):
 		self.client = docker.from_env()
+		self.compose_manager = ComposeProjectManager(self.client)
 
 	def list_containers(self, comando=""):
 		comando = comando.split('@', 1)[0]
@@ -263,6 +154,65 @@ class DockerManager:
 		status_order = {'running': 0, 'restarting': 1, 'paused': 2, 'exited': 3, 'created': 4, 'dead': 5}
 		sorted_containers = sorted(containers, key=lambda x: (0 if x.name == CONTAINER_NAME else 1, status_order.get(x.status, 6), x.name.lower()))
 		return sorted_containers
+
+	# ========== COMPOSE PROJECT METHODS ==========
+
+	def get_compose_projects(self):
+		"""
+		Returns all detected Docker Compose projects.
+
+		Returns:
+			dict: Dictionary {project_name: ComposeProjectInfo}
+		"""
+		return self.compose_manager.get_all_projects()
+
+	def is_compose_container(self, container):
+		"""
+		Checks whether a container is part of a Compose project.
+
+		Args:
+			container: Docker SDK container object
+
+		Returns:
+			bool: True if it is part of a Compose project
+		"""
+		is_compose = ComposeDetector.is_compose_container(container)
+		if is_compose:
+			project_name = ComposeDetector.get_project_name(container)
+			service_name = ComposeDetector.get_service_name(container)
+			debug(f"Container '{container.name}' is part of compose project '{project_name}' (service: {service_name})")
+		return is_compose
+
+	def get_container_project_info(self, container):
+		"""
+		Returns information about the Compose project a container belongs to.
+
+		Args:
+			container: Docker SDK container object
+
+		Returns:
+			tuple: (project_name, service_name) or (None, None) if not Compose
+		"""
+		if not ComposeDetector.is_compose_container(container):
+			return None, None
+
+		project_name = ComposeDetector.get_project_name(container)
+		service_name = ComposeDetector.get_service_name(container)
+		return project_name, service_name
+
+	def get_project_info(self, project_name):
+		"""
+		Returns full information about a Compose project.
+
+		Args:
+			project_name: Project name
+
+		Returns:
+			ComposeProjectInfo: Project information or None if it doesn't exist
+		"""
+		return self.compose_manager.get_project_info(project_name)
+
+	# ========== END COMPOSE PROJECT METHODS ==========
 
 	def stop_container(self, container_id, container_name, from_schedule=False):
 		try:
@@ -331,6 +281,82 @@ class DockerManager:
 			error(f"Could not show docker compose for container {container_name}. Error: [{e}]")
 			return get_text("error_showing_compose_container", container_name)
 
+	def get_project_info_formatted(self, project_name):
+		"""
+		Returns formatted information about a Compose project for display to the user.
+
+		Args:
+			project_name: Project name
+
+		Returns:
+			str: Formatted text with the project information
+		"""
+		try:
+			project_info = self.get_project_info(project_name)
+			if not project_info:
+				return get_text("error_project_not_found", project_name)
+
+			# Basic information
+			text = f'📦 <b>{get_text("project_info_title", project_name)}</b>\n\n'
+			text += '<pre><code>'
+
+			# Project name
+			text += f'🏷️  {get_text("project_name")}: {project_name}\n\n'
+
+			# Working directory
+			working_dir = project_info.get_working_dir()
+			if working_dir:
+				text += f'📁 {get_text("project_working_dir")}: {working_dir}\n\n'
+
+			# Configuration file
+			config_files = project_info.get_config_files()
+			if config_files:
+				# Extract only the file name
+				import os
+				config_file_name = os.path.basename(config_files)
+				text += f'📄 {get_text("project_config_file")}: {config_file_name}\n\n'
+
+			# Number of services
+			service_count = project_info.get_container_count()
+			text += f'🐳 {get_text("project_services_count")}: {service_count}\n\n'
+
+			# Service list with status and image
+			text += f'📋 {get_text("project_services_list")}:\n'
+			for service_name in sort_project_services(project_info):
+				container = project_info.services[service_name]
+				status_emoji = get_status_emoji(container.status, container.name, container)
+
+				# Get image (short name)
+				image_with_tag = container.attrs.get('Config', {}).get('Image', 'N/A')
+				# Shorten the image name if it is too long
+				if len(image_with_tag) > 30:
+					image_with_tag = image_with_tag[:27] + "..."
+
+				text += f'  {status_emoji} {service_name} ({image_with_tag})\n'
+
+			# Dependencies between services
+			text += f'\n🔗 {get_text("project_dependencies")}:\n'
+			has_dependencies = False
+			for service_name in sort_project_services(project_info):
+				container = project_info.services[service_name]
+				depends_on = container.labels.get('com.docker.compose.depends_on', '')
+				if depends_on:
+					has_dependencies = True
+					# Format dependencies (they may be comma-separated)
+					deps = depends_on.replace(',', ', ')
+					text += f'  {service_name} → {deps}\n'
+
+			if not has_dependencies:
+				text += f'  {get_text("project_no_dependencies")}\n'
+
+			text += '</code></pre>'
+
+			return text
+
+		except Exception as e:
+			error(f"Could not display information for project {project_name}. Error: [{e}]")
+			return get_text("error_showing_info_project", project_name)
+
 	def get_info(self, container_id, container_name):
 		try:
 			container = self.client.containers.get(container_id)
@@ -375,16 +401,18 @@ class DockerManager:
 			possible_update = False
 			container_attrs = container.attrs.get('Config', {})
 			image_with_tag = container_attrs.get('Image', 'N/A')
-			if CHECK_UPDATES:
-				try:
-					image_status = read_container_update_status(image_with_tag, container_name)
-					if image_status is None:
-						image_status = ""
-				except Exception as e:
-					debug(f"Queried for update {container_name} and it is not available: [{e}]")
 
-				if image_status and get_text("NEED_UPDATE_CONTAINER_TEXT") in image_status:
-					possible_update = True
+			# Always read cache, regardless of CHECK_UPDATES setting
+			# CHECK_UPDATES only controls automatic detection, not manual /checkupdate
+			try:
+				image_status = read_container_update_status(image_with_tag, container_name)
+				if image_status is None:
+					image_status = ""
+			except Exception as e:
+				debug(f"Queried for update {container_name} and it is not available: [{e}]")
+
+			if image_status and get_text("NEED_UPDATE_CONTAINER_TEXT") in image_status:
+				possible_update = True
 
 			text = '<pre><code>\n'
 			text += f'{get_text("status")}: {get_status_emoji(container.status, container_name, container)} ({container.status})\n\n'
@@ -396,9 +424,34 @@ class DockerManager:
 					text += f"- CPU: {used_cpu}%\n\n"
 				if ("0.00 MB") not in ram:
 					text += f"- RAM: {ram}\n\n"
+
+			# Port mappings
+			port_bindings = container.attrs.get('HostConfig', {}).get('PortBindings', {})
+			if port_bindings:
+				text += f"- {get_text('ports')}:\n"
+				for container_port, host_bindings in port_bindings.items():
+					if host_bindings:
+						for host_binding in host_bindings:
+							host_ip = host_binding.get('HostIp', '0.0.0.0')
+							host_port = host_binding.get('HostPort', '')
+							# Format: 0.0.0.0:8080 -> 80/tcp
+							if host_ip == '0.0.0.0' or host_ip == '':
+								text += f"  {host_port} → {container_port}\n"
+							else:
+								text += f"  {host_ip}:{host_port} → {container_port}\n"
+				text += "\n"
+
 			text += f'- {get_text("container_id")}: {container_id}\n\n'
 			text += f'- {get_text("used_image")}:\n{image_with_tag}\n\n'
-			text += f'- {get_text("image_id")}: {container.image.id.replace("sha256:", "")[:CONTAINER_ID_LENGTH]}'
+
+			# Try to get image ID (may fail if image was deleted)
+			try:
+				image_id = container.image.id.replace("sha256:", "")[:CONTAINER_ID_LENGTH]
+				text += f'- {get_text("image_id")}: {image_id}'
+			except Exception as e:
+				debug(f"Could not get image ID for container {container_name}: [{e}]")
+				text += f'- {get_text("image_id")}: N/A'
+
 			if CHECK_UPDATES:
 				text += f"\n\n{image_status}"
 			text += "</code></pre>"
@@ -458,11 +511,18 @@ class DockerManager:
 			return get_text("error_updating_container", container_name)
 
 	def force_check_update(self, container_id):
+		loading_msg = None
+		container = None
+		image_with_tag = ''
+		image_status = ''
 		try:
 			container = self.client.containers.get(container_id)
 			container_attrs = container.attrs.get('Config', {})
 			image_with_tag = container_attrs.get('Image', '')
 			local_image = container.image.id
+
+			# Show loading message while pulling the image (can be slow for big images)
+			loading_msg = send_message(message=get_text("fetching_image_data"))
 
 			try:
 				remote_image = self.client.images.pull(image_with_tag)
@@ -470,16 +530,28 @@ class DockerManager:
 					error(f"Failed to pull image {image_with_tag}. Verify that the image exists in the registry.")
 					image_status = ""
 					save_container_update_status(image_with_tag, container.name, image_status)
+					if loading_msg:
+						delete_message(loading_msg.message_id)
+						loading_msg = None
+					send_message(message=get_text("error_pulling_image", image_with_tag))
 					return
 			except docker.errors.ImageNotFound:
 				error(f"Image {image_with_tag} not found in registry. Check the image name.")
 				image_status = ""
 				save_container_update_status(image_with_tag, container.name, image_status)
+				if loading_msg:
+					delete_message(loading_msg.message_id)
+					loading_msg = None
+				send_message(message=get_text("error_pulling_image", image_with_tag))
 				return
 			except docker.errors.APIError as e:
 				error(f"Error pulling image {image_with_tag}. Error: [{e}]")
 				image_status = ""
 				save_container_update_status(image_with_tag, container.name, image_status)
+				if loading_msg:
+					delete_message(loading_msg.message_id)
+					loading_msg = None
+				send_message(message=get_text("error_pulling_image", image_with_tag))
 				return
 
 			local_image_normalized = local_image.replace('sha256:', '')
@@ -487,24 +559,34 @@ class DockerManager:
 
 			debug(f"Checking update: {container.name} ({image_with_tag}): LOCAL IMAGE [{local_image_normalized[:CONTAINER_ID_LENGTH]}] - REMOTE IMAGE [{remote_image_normalized[:CONTAINER_ID_LENGTH]}]")
 
+			if loading_msg:
+				delete_message(loading_msg.message_id)
+				loading_msg = None
+
 			if local_image_normalized != remote_image_normalized:
-				debug(f"{container.name} update detected! Deleting downloaded image [{remote_image_normalized[:CONTAINER_ID_LENGTH]}]")
-				try:
-					self.client.images.remove(remote_image.id)
-				except:
-					pass # Si no se puede borrar es porque esta siendo usada por otro contenedor
+				# Keep the pulled image cached locally so the subsequent update
+				# operation does not need to re-download it.
+				debug(f"{container.name} update detected! Keeping downloaded image [{remote_image_normalized[:CONTAINER_ID_LENGTH]}] for upcoming update")
 				markup = InlineKeyboardMarkup(row_width = 1)
-				markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}"))
+				markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{container.id[:CONTAINER_ID_LENGTH]}"))
 				image_status = get_text("NEED_UPDATE_CONTAINER_TEXT")
-				send_message(message=get_text("available_update", container.name), reply_markup=markup)
+				sent_message = send_message(message=get_text("available_update", container.name), reply_markup=markup)
+				# Save container cache for this notification
+				if sent_message:
+					save_container_cache(sent_message.chat.id, sent_message.message_id, [container])
 			else:
 				image_status = get_text("UPDATED_CONTAINER_TEXT")
 				send_message(message=get_text("already_updated", container.name))
 		except Exception as e:
 			error(f"Could not check update: [{e}]")
 			image_status = ""
+			if loading_msg:
+				try:
+					delete_message(loading_msg.message_id)
+				except:
+					pass
 
-		if image_with_tag and container and container.name:
+		if image_with_tag and container is not None and getattr(container, 'name', None):
 			save_container_update_status(image_with_tag, container.name, image_status)
 
 	def delete(self, container_id, container_name):
@@ -578,8 +660,11 @@ class DockerManager:
 			error(f"Error executing command [{command}] in container {container_name}. Error: [{e}]")
 			return get_text("error_executing_command_container", command, container_name)
 
-# Instanciamos el DockerManager
+# Instantiate the DockerManager
 docker_manager = DockerManager()
+
+# Instantiate the PortManager
+port_manager = PortManager(docker_manager)
 
 class DockerEventMonitor:
 	def __init__(self):
@@ -615,7 +700,7 @@ class DockerEventMonitor:
 					send_message_to_notification_channel(message=message)
 				except Exception as e:
 					error(f"Could not send notification [{message}]. Error: [{e}]")
-					time.sleep(20) # Posible saturación de Telegram y el send_message lanza excepción
+					time.sleep(20) # Possible Telegram saturation causing send_message to raise an exception
 
 	def _event_loop_with_retry(self):
 		"""Event loop wrapper with automatic retry on failure."""
@@ -656,9 +741,11 @@ class DockerUpdateMonitor:
 	def detectar_actualizaciones(self):
 		while True:
 			containers = self.client.containers.list(all=True)
-			grouped_updates_containers = []
+			# Sort containers: bot first, then running, then stopped (all alphabetically)
+			sorted_containers = sort_containers_by_priority(containers)
+			grouped_updates_containers = []  # list of [id, name] pairs
 			should_notify = False
-			for container in containers:
+			for container in sorted_containers:
 				if (container.status == "exited" or container.status == "dead") and not CHECK_UPDATE_STOPPED_CONTAINERS:
 					debug(f"Ignoring update check for container {container.name} (stopped)")
 					continue
@@ -695,10 +782,10 @@ class DockerUpdateMonitor:
 						try:
 							self.client.images.remove(remote_image.id)
 						except:
-							pass # Si no se puede borrar es porque esta siendo usada por otro contenedor
+							pass # If it can't be removed it's because another container is using it
 
 						if container.name != CONTAINER_NAME:
-							grouped_updates_containers.append(container.name)
+							grouped_updates_containers.append([container.id[:CONTAINER_ID_LENGTH], container.name])
 
 						if image_status == old_image_status:
 							debug("Update already notified")
@@ -706,9 +793,12 @@ class DockerUpdateMonitor:
 
 						if container.name == CONTAINER_NAME:
 							markup = InlineKeyboardMarkup(row_width = 1)
-							markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}"))
+							markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{container.id[:CONTAINER_ID_LENGTH]}"))
 							if not is_muted():
-								send_message(message=get_text("available_update", container.name), reply_markup=markup)
+								sent_message = send_message(message=get_text("available_update", container.name), reply_markup=markup)
+								# Save container cache for this notification
+								if sent_message:
+									save_container_cache(sent_message.chat.id, sent_message.message_id, [container])
 							else:
 								debug(f"Message [{get_text('available_update', container.name)}] omitted because muted")
 							continue
@@ -724,8 +814,8 @@ class DockerUpdateMonitor:
 			if grouped_updates_containers and should_notify:
 				markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
 				markup.add(*[
-					InlineKeyboardButton(f'{ICON_CONTAINER_MARK_FOR_UPDATE} {name}', callback_data=f'toggleUpdate|{name}')
-					for name in grouped_updates_containers
+					InlineKeyboardButton(f'{ICON_CONTAINER_MARK_FOR_UPDATE} {cname}', callback_data=f'toggleUpdate|{cid}')
+					for cid, cname in grouped_updates_containers
 				])
 				markup.add(
 					InlineKeyboardButton(get_text("button_update_all"), callback_data="toggleUpdateAll"),
@@ -735,6 +825,19 @@ class DockerUpdateMonitor:
 					message = send_message(message=get_text("available_updates", len(grouped_updates_containers)), reply_markup=markup)
 					if message:
 						save_update_data(TELEGRAM_GROUP, message.message_id, grouped_updates_containers)
+						# Also populate the container name cache so the callback parser
+						# can resolve names from IDs without an extra Docker lookup.
+						_objs = []
+						for cid, _ in grouped_updates_containers:
+							try:
+								_objs.append(self.client.containers.get(cid))
+							except Exception as e:
+								debug(f"Could not fetch container {cid} for cache: {e}")
+						if _objs:
+							try:
+								save_container_cache(message.chat.id, message.message_id, _objs)
+							except Exception as e:
+								debug(f"Could not pre-populate container name cache: {e}")
 				else:
 					debug(f"Message [{get_text('available_updates', len(grouped_updates_containers))}] omitted because muted")
 			debug(f"Waiting {CHECK_UPDATE_EVERY_HOURS} hours for the next update check...")
@@ -805,6 +908,7 @@ class DockerScheduleMonitor:
 			minutes = schedule.get("minutes")
 			command = schedule.get("command", "")
 			show_output = bool(schedule.get("show_output", False))
+			prune_type = schedule.get("prune_type", "")
 			schedule_name = schedule.get("name", "")
 
 			# Helper function to handle errors consistently
@@ -849,6 +953,39 @@ class DockerScheduleMonitor:
 				if not containerId:
 					return handle_error(f"Container {container} not found for action {action}")
 				execute_command(containerId, container, command, show_output)
+
+			elif action == "prune":
+				# Execute prune based on type
+				result_message = None
+				data = None
+				prune_label = ""
+
+				if prune_type == "containers":
+					result_message, data = docker_manager.prune_containers()
+					prune_label = get_text("button_containers")
+				elif prune_type == "images":
+					result_message, data = docker_manager.prune_images()
+					prune_label = get_text("button_images")
+				elif prune_type == "networks":
+					result_message, data = docker_manager.prune_networks()
+					prune_label = get_text("button_networks")
+				elif prune_type == "volumes":
+					result_message, data = docker_manager.prune_volumes()
+					prune_label = get_text("button_volumes")
+				else:
+					return handle_error(f"Unknown prune type: {prune_type}")
+
+				# Show output if requested, otherwise just log
+				if show_output and result_message:
+					# Send the same format as manual /prune command
+					markup = InlineKeyboardMarkup(row_width=1)
+					markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
+					fichero_temporal = get_temporal_file(data, prune_label)
+					x = send_message(message=get_text("loading_file"))
+					send_document(document=fichero_temporal, reply_markup=markup, caption=result_message)
+					delete_message(x.message_id)
+				else:
+					debug(f"Scheduled prune executed: {result_message}")
 
 			return True
 
@@ -950,13 +1087,9 @@ def _validate_schedule_index(index_str: str, schedules: list) -> int:
 	except (ValueError, TypeError):
 		return -1
 
-def _build_schedule_summary(state: dict, include_step: bool = False, current_step: int = None, total_steps: int = None) -> str:
+def _build_schedule_summary(state: dict) -> str:
 	"""Build a consistent schedule summary message from state dict"""
 	lines = []
-
-	# Add step indicator if requested
-	if include_step and current_step and total_steps:
-		lines.append(f"<i>Paso {current_step}/{total_steps}</i>\n")
 
 	# Add schedule details
 	if state.get("name"):
@@ -969,8 +1102,10 @@ def _build_schedule_summary(state: dict, include_step: bool = False, current_ste
 		lines.append(f"<b>{get_text('schedule_label_container')}:</b> {state.get('container')}")
 	if state.get("minutes") is not None:  # Use is not None to handle 0
 		lines.append(f"<b>{get_text('schedule_label_minutes')}:</b> {state.get('minutes')}")
-	# Only show show_output if action is exec and show_output is not None
-	if state.get("action") == "exec" and state.get("show_output") is not None:
+	if state.get("prune_type"):
+		lines.append(f"<b>{get_text('schedule_label_prune_type')}:</b> {state.get('prune_type')}")
+	# Only show show_output if action is exec or prune and show_output is not None
+	if state.get("action") in ("exec", "prune") and state.get("show_output") is not None:
 		lines.append(f"<b>{get_text('schedule_label_show_output')}:</b> {get_text('schedule_yes') if state.get('show_output') else get_text('schedule_no')}")
 	if state.get("command"):
 		lines.append(f"<b>{get_text('schedule_label_command')}:</b> {state.get('command')}")
@@ -1005,6 +1140,7 @@ def show_schedule_menu(user_id: int, chat_id: int):
 	label_container = get_text('schedule_label_container')
 	label_command = get_text('schedule_label_command')
 	label_show_output = get_text('schedule_label_show_output')
+	label_prune_type = get_text('schedule_label_prune_type')
 	yes_text = get_text('schedule_yes')
 	no_text = get_text('schedule_no')
 
@@ -1023,6 +1159,7 @@ def show_schedule_menu(user_id: int, chat_id: int):
 			minutes = sched.get('minutes', '')
 			command = sched.get('command', '')
 			show_output = sched.get('show_output', False)
+			prune_type = sched.get('prune_type', '')
 			enabled = sched.get('enabled', True)
 
 			# Build schedule entry
@@ -1040,6 +1177,10 @@ def show_schedule_menu(user_id: int, chat_id: int):
 			elif action == 'exec':
 				lines.append(f"  {label_container}: <b>{container}</b>")
 				lines.append(f"  {label_command}: <code>{command}</code>")
+				output_text = yes_text if show_output else no_text
+				lines.append(f"  {label_show_output}: <b>{output_text}</b>")
+			elif action == 'prune':
+				lines.append(f"  {label_prune_type}: <b>{prune_type}</b>")
 				output_text = yes_text if show_output else no_text
 				lines.append(f"  {label_show_output}: <b>{output_text}</b>")
 			elif action in ('run', 'stop', 'restart'):
@@ -1118,6 +1259,7 @@ def show_schedule_edit_options(user_id: int, schedule_name: str):
 	minutes = schedule.get('minutes', '')
 	command = schedule.get('command', '')
 	show_output = schedule.get('show_output', False)
+	prune_type = schedule.get('prune_type', '')
 	status_text = get_text('schedule_status_enabled') if enabled else get_text('schedule_status_disabled')
 	status_icon = "🟢" if enabled else "🔴"
 
@@ -1132,6 +1274,9 @@ def show_schedule_edit_options(user_id: int, schedule_name: str):
 	elif action == 'exec':
 		message_text += f"<b>{get_text('schedule_label_container')}:</b> <b>{container}</b>\n"
 		message_text += f"<b>{get_text('schedule_label_command')}:</b> <code>{command}</code>\n"
+		message_text += f"<b>{get_text('schedule_label_show_output')}:</b> <b>{get_text('schedule_yes') if show_output else get_text('schedule_no')}</b>\n"
+	elif action == 'prune':
+		message_text += f"<b>{get_text('schedule_label_prune_type')}:</b> <b>{prune_type}</b>\n"
 		message_text += f"<b>{get_text('schedule_label_show_output')}:</b> <b>{get_text('schedule_yes') if show_output else get_text('schedule_no')}</b>\n"
 	elif action in ('run', 'stop', 'restart'):
 		message_text += f"<b>{get_text('schedule_label_container')}:</b> <b>{container}</b>\n"
@@ -1152,6 +1297,11 @@ def show_schedule_edit_options(user_id: int, schedule_name: str):
 
 	if action == 'exec':
 		markup.add(InlineKeyboardButton(get_text("schedule_edit_command"), callback_data=f"scheduleEditField|command|{schedule_id}"))
+
+	if action == 'prune':
+		markup.add(InlineKeyboardButton(get_text("schedule_edit_prune_type"), callback_data=f"scheduleEditField|prune_type|{schedule_id}"))
+
+	if action in ('exec', 'prune'):
 		markup.add(InlineKeyboardButton(get_text("schedule_edit_show_output"), callback_data=f"scheduleEditField|show_output|{schedule_id}"))
 
 	# Add status toggle button
@@ -1165,13 +1315,8 @@ def show_schedule_edit_options(user_id: int, schedule_name: str):
 def ask_schedule_name(user_id: int):
 	"""Ask user for schedule name"""
 	state = init_add_schedule_state()
-
-	markup = InlineKeyboardMarkup(row_width=1)
-	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
-
 	message_text = get_text("schedule_ask_name")
-
-	msg = send_message(message=message_text, reply_markup=markup)
+	msg = send_message(message=message_text, reply_markup=create_simple_keyboard("button_cancel"))
 	state["last_message_id"] = msg.message_id if msg else None
 	save_schedule_state(user_id, state)
 
@@ -1219,14 +1364,6 @@ def is_valid_cron(cron_expr: str) -> bool:
 
 def confirm_schedule_creation(user_id: int, state: dict):
 	"""Show confirmation of schedule creation"""
-	name = state.get("name")
-	cron = state.get("cron")
-	action = state.get("action")
-	container = state.get("container")
-	minutes = state.get("minutes")
-	show_output = state.get("show_output")
-	command = state.get("command")
-
 	# Delete previous message if exists
 	if state.get("last_message_id"):
 		try:
@@ -1234,20 +1371,9 @@ def confirm_schedule_creation(user_id: int, state: dict):
 		except:
 			pass
 
+	# Use the centralized summary builder
 	message_text = get_text("schedule_confirm_title") + "\n\n"
-	message_text += f"<b>{get_text('schedule_label_name')}:</b> {name}\n"
-	message_text += f"<b>{get_text('schedule_label_cron')}:</b> {cron}\n"
-	message_text += f"<b>{get_text('schedule_label_action')}:</b> {action}\n"
-
-	if container:
-		message_text += f"<b>{get_text('schedule_label_container')}:</b> {container}\n"
-	if minutes is not None:  # Use is not None to handle 0 correctly
-		message_text += f"<b>{get_text('schedule_label_minutes')}:</b> {minutes}\n"
-	# Only show output option for exec action
-	if action == "exec" and show_output is not None:
-		message_text += f"<b>{get_text('schedule_label_show_output')}:</b> {get_text('schedule_yes') if show_output else get_text('schedule_no')}\n"
-	if command:
-		message_text += f"<b>{get_text('schedule_label_command')}:</b> {command}\n"
+	message_text += _build_schedule_summary(state)
 
 	markup = InlineKeyboardMarkup(row_width=2)
 	markup.add(
@@ -1484,7 +1610,8 @@ def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: in
 			InlineKeyboardButton("stop", callback_data="scheduleSelectAction|stop"),
 			InlineKeyboardButton("restart", callback_data="scheduleSelectAction|restart"),
 			InlineKeyboardButton("mute", callback_data="scheduleSelectAction|mute"),
-			InlineKeyboardButton("exec", callback_data="scheduleSelectAction|exec")
+			InlineKeyboardButton("exec", callback_data="scheduleSelectAction|exec"),
+			InlineKeyboardButton("prune", callback_data="scheduleSelectAction|prune")
 		)
 		markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 		msg = send_message(message=message_text, reply_markup=markup)
@@ -1565,7 +1692,7 @@ def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: in
 		# For exec action, go to confirmation
 		confirm_schedule_creation(user_id, state)
 
-@bot.message_handler(commands=["start", "list", "run", "stop", "restart", "delete", "exec", "checkupdate", "updateall", "changetag", "logs", "logfile", "compose", "mute", "schedule", "info", "version", "donate", "donors", "prune"])
+@bot.message_handler(commands=["start", "list", "run", "stop", "restart", "delete", "exec", "checkupdate", "updateall", "changetag", "logs", "logfile", "compose", "mute", "schedule", "info", "version", "donate", "donors", "prune", "ports"])
 def command_controller(message):
 	userId = message.from_user.id
 	comando = message.text.split(' ', 1)[0]
@@ -1593,96 +1720,142 @@ def command_controller(message):
 	if comando not in ('/start', f'/start@{bot.get_me().username}'):
 		delete_message(messageId)
 
-	# Listar contenedores
+	# List containers
 	if comando in ('/start', f'/start@{bot.get_me().username}'):
 		texto_inicial = get_text("menu")
 		send_message(message=texto_inicial)
 	elif comando in ('/list', f'/list@{bot.get_me().username}'):
-		markup = InlineKeyboardMarkup(row_width = 1)
-		markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
 		containers = docker_manager.list_containers(comando=comando)
-		send_message(message=display_containers(containers), reply_markup=markup)
+		send_message(message=display_containers(containers), reply_markup=create_simple_keyboard("button_close"))
 	elif comando in ('/run', f'/run@{bot.get_me().username}'):
 		if container_id:
 			run(container_id, container_name)
 		else:
-			containers = docker_manager.list_containers(comando=comando)
-			container_names = [container.name for container in containers if CONTAINER_NAME != container.name]
-			if not container_names:
+			# Get ALL containers to show projects with all containers, but filter standalone to only stopped
+			containers = docker_manager.list_containers()
+			if not containers or all(c.name == CONTAINER_NAME for c in containers):
 				send_message(message=get_text("no_containers_to_start"))
 				return
 
-			markup = build_generic_keyboard(container_names, set(), 0, "Run", get_text("button_run"), get_text("button_run_all"))
-			message = send_message(message=get_text("start_a_container"), reply_markup=markup)
-			if message:
-				save_action_data(TELEGRAM_GROUP, message.message_id, "run", container_names)
+			# Use hierarchical keyboard with filters:
+			# - Standalone: only stopped/paused/exited/created
+			# - Projects: hide if ALL containers are running/restarting
+			markup, standalone_containers = build_hierarchical_keyboard(
+				containers, "Run", CONTAINER_NAME,
+				filter_standalone_status=['exited', 'stopped', 'paused', 'created'],
+				filter_projects_with_all_status=['running', 'restarting']
+			)
+			sent_message = send_message(message=get_text("start_a_container"), reply_markup=markup)
+			# Save container cache for standalone containers
+			if sent_message and standalone_containers:
+				save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
 	elif comando in ('/stop', f'/stop@{bot.get_me().username}'):
 		if container_id:
 			stop(container_id, container_name)
 		else:
-			containers = docker_manager.list_containers(comando=comando)
-			container_names = [container.name for container in containers if CONTAINER_NAME != container.name]
-			if not container_names:
+			# Get ALL containers to show projects with all containers, but filter standalone to only running
+			containers = docker_manager.list_containers()
+			if not containers or all(c.name == CONTAINER_NAME for c in containers):
 				send_message(message=get_text("no_containers_to_stop"))
 				return
 
-			markup = build_generic_keyboard(container_names, set(), 0, "Stop", get_text("button_stop"), get_text("button_stop_all"))
-			message = send_message(message=get_text("stop_a_container"), reply_markup=markup)
-			if message:
-				save_action_data(TELEGRAM_GROUP, message.message_id, "stop", container_names)
+			# Use hierarchical keyboard with filters:
+			# - Standalone: only running/restarting
+			# - Projects: hide if ALL containers are stopped/paused/exited/created
+			markup, standalone_containers = build_hierarchical_keyboard(
+				containers, "Stop", CONTAINER_NAME,
+				filter_standalone_status=['running', 'restarting'],
+				filter_projects_with_all_status=['exited', 'stopped', 'paused', 'created']
+			)
+			sent_message = send_message(message=get_text("stop_a_container"), reply_markup=markup)
+			# Save container cache for standalone containers
+			if sent_message and standalone_containers:
+				save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
 	elif comando in ('/restart', f'/restart@{bot.get_me().username}'):
 		if container_id:
 			restart(container_id, container_name)
 		else:
-			containers = docker_manager.list_containers(comando=comando)
-			container_names = [container.name for container in containers if CONTAINER_NAME != container.name]
-			if not container_names:
+			# Get ALL containers (not just running) to show with status indicators
+			containers = docker_manager.list_containers()
+			if not containers or all(c.name == CONTAINER_NAME for c in containers):
 				send_message(message=get_text("no_containers_to_restart"))
 				return
 
-			markup = build_generic_keyboard(container_names, set(), 0, "Restart", get_text("button_restart"), get_text("button_restart_all"))
-			message = send_message(message=get_text("restart_a_container"), reply_markup=markup)
-			if message:
-				save_action_data(TELEGRAM_GROUP, message.message_id, "restart", container_names)
+			# Use hierarchical keyboard (Level 1: projects + standalone containers)
+			markup, standalone_containers = build_hierarchical_keyboard(containers, "Restart", CONTAINER_NAME)
+			sent_message = send_message(message=get_text("restart_a_container"), reply_markup=markup)
+			# Save container cache for standalone containers
+			if sent_message and standalone_containers:
+				save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
 	elif comando in ('/logs', f'/logs@{bot.get_me().username}'):
 		if container_id:
 			logs(container_id, container_name)
 		else:
-			markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
-			botones = []
-			containers = docker_manager.list_containers(comando=comando)
-			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name, container)} {container.name}', callback_data=f'logs|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+			# Get ALL containers to show projects and standalone
+			containers = docker_manager.list_containers()
+			if not containers:
+				send_message(message=get_text("no_containers_for_logs"))
+				return
 
-			markup.add(*botones)
-			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
-			send_message(message=get_text("show_logs"), reply_markup=markup)
+			# Use hierarchical keyboard (Level 1: projects + standalone containers)
+			# No project-level action for logs (can't get logs from whole project)
+			# Filter: show all containers (you can see logs from any container)
+			# Don't exclude bot container for logs (we want to see bot logs too)
+			markup, standalone_containers = build_hierarchical_keyboard(
+				containers,
+				"Logs",
+				None  # Don't exclude any container
+			)
+			sent_message = send_message(message=get_text("logs_command_container"), reply_markup=markup)
+			# Save container cache for standalone containers
+			if sent_message and standalone_containers:
+				save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
 	elif comando in ('/logfile', f'/logfile@{bot.get_me().username}'):
 		if container_id:
 			log_file(container_id, container_name)
 		else:
-			markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
-			botones = []
-			containers = docker_manager.list_containers(comando=comando)
-			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name, container)} {container.name}', callback_data=f'logfile|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+			# Get ALL containers to show projects and standalone
+			containers = docker_manager.list_containers()
+			if not containers:
+				send_message(message=get_text("no_containers_for_logs"))
+				return
 
-			markup.add(*botones)
-			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
-			send_message(message=get_text("show_logsfile"), reply_markup=markup)
+			# Use hierarchical keyboard (Level 1: projects + standalone containers)
+			# No project-level action for logfile (can't get logfile from whole project)
+			# Filter: show all containers (you can get logfile from any container)
+			# Don't exclude bot container for logfile (we want to see bot logfile too)
+			markup, standalone_containers = build_hierarchical_keyboard(
+				containers,
+				"Logfile",
+				None  # Don't exclude any container
+			)
+			sent_message = send_message(message=get_text("show_logsfile"), reply_markup=markup)
+			# Save container cache for standalone containers
+			if sent_message and standalone_containers:
+				save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
 	elif comando in ('/compose', f'/compose@{bot.get_me().username}'):
 		if container_id:
 			compose(container_id, container_name)
 		else:
-			markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
-			botones = []
-			containers = docker_manager.list_containers(comando=comando)
-			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name, container)} {container.name}', callback_data=f'compose|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+			# Get ALL containers to show projects and standalone
+			containers = docker_manager.list_containers()
+			if not containers:
+				send_message(message=get_text("error_no_containers_available"))
+				return
 
-			markup.add(*botones)
-			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
-			send_message(message=get_text("show_compose"), reply_markup=markup)
+			# Use hierarchical keyboard (Level 1: projects + standalone containers)
+			# No project-level action for compose (can't get compose file from whole project)
+			# Filter: show all containers (you can get compose file from any container)
+			# Don't exclude bot container for compose (we want to see bot compose too)
+			markup, standalone_containers = build_hierarchical_keyboard(
+				containers,
+				"Compose",
+				None  # Don't exclude any container
+			)
+			sent_message = send_message(message=get_text("show_compose"), reply_markup=markup)
+			# Save container cache for standalone containers
+			if sent_message and standalone_containers:
+				save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
 	elif comando in ('/mute', f'/mute@{bot.get_me().username}'):
 		try:
 			minutes = int(message.text.split()[1])
@@ -1696,68 +1869,107 @@ def command_controller(message):
 		if container_id:
 			info(container_id, container_name)
 		else:
-			markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
-			botones = []
-			containers = docker_manager.list_containers(comando=comando)
-			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name, container)} {container.name}', callback_data=f'info|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+			# Get ALL containers to show projects and standalone
+			containers = docker_manager.list_containers()
+			if not containers:
+				send_message(message=get_text("no_containers_for_info"))
+				return
 
-			markup.add(*botones)
-			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
-			send_message(message=get_text("show_info"), reply_markup=markup)
+			# Use hierarchical keyboard (Level 1: projects + standalone containers)
+			# No project-level action for info (can't get info from whole project)
+			# Filter: show all containers (you can see info from any container)
+			# Don't exclude bot container (we want to see bot info too)
+			markup, standalone_containers = build_hierarchical_keyboard(
+				containers,
+				"Info",
+				None  # Don't exclude any container
+			)
+			sent_message = send_message(message=get_text("info_command_container"), reply_markup=markup)
+			# Save container cache for standalone containers
+			if sent_message and standalone_containers:
+				save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
 	elif comando in ('/exec', f'/exec@{bot.get_me().username}'):
 		if container_id:
 			ask_command(userId, container_id, container_name)
 		else:
-			markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
-			botones = []
-			containers = docker_manager.list_containers(comando=comando)
-			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name, container)} {container.name}', callback_data=f'askCommand|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+			# Get ALL containers to show projects and standalone
+			containers = docker_manager.list_containers()
+			if not containers:
+				send_message(message=get_text("no_containers_for_exec"))
+				return
 
-			markup.add(*botones)
-			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
-			send_message(message=get_text("exec_command_container"), reply_markup=markup)
+			# Use hierarchical keyboard (Level 1: projects + standalone containers)
+			# No project-level action for exec (can't exec on whole project)
+			# Filter: only show running/restarting containers and projects with at least one running container
+			# Don't exclude bot container (we want to exec into the bot too)
+			markup, standalone_containers = build_hierarchical_keyboard(
+				containers,
+				"Exec",
+				None,  # Don't exclude any container
+				filter_standalone_status=['running', 'restarting'],
+				filter_projects_with_all_status=['exited', 'paused', 'dead', 'created']
+			)
+			sent_message = send_message(message=get_text("exec_command_container"), reply_markup=markup)
+			# Save container cache for standalone containers
+			if sent_message and standalone_containers:
+				save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
 	elif comando in ('/delete', f'/delete@{bot.get_me().username}'):
 		if container_id:
 			confirm_delete(container_id, container_name)
 		else:
-			markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
-			botones = []
-			containers = docker_manager.list_containers(comando=comando)
-			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name, container)} {container.name}', callback_data=f'confirmDelete|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+			# Get ALL containers to show projects and standalone
+			containers = docker_manager.list_containers()
+			if not containers or all(c.name == CONTAINER_NAME for c in containers):
+				send_message(message=get_text("no_containers_to_delete"))
+				return
 
-			markup.add(*botones)
-			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
-			send_message(message=get_text("delete_container"), reply_markup=markup)
+			# Use hierarchical keyboard (Level 1: projects + standalone containers)
+			markup, standalone_containers = build_hierarchical_keyboard(containers, "Delete", CONTAINER_NAME)
+			sent_message = send_message(message=get_text("delete_container"), reply_markup=markup)
+			# Save container cache for standalone containers
+			if sent_message and standalone_containers:
+				save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
 	elif comando in ('/checkupdate', f'/checkupdate@{bot.get_me().username}'):
 		if container_id:
 			docker_manager.force_check_update(container_id)
 		else:
-			markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
-			botones = []
-			containers = docker_manager.list_containers(comando=comando)
-			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_update_emoji(container.name)} {container.name}', callback_data=f'checkUpdate|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+			# Get ALL containers to show projects and standalone
+			containers = docker_manager.list_containers()
+			if not containers:
+				send_message(message=get_text("no_containers_for_checkupdate"))
+				return
 
-			markup.add(*botones)
-			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
-			send_message(message=get_text("update_container"), reply_markup=markup)
+			# Use hierarchical keyboard (Level 1: projects + standalone containers)
+			# No project-level action for checkupdate (can't check updates on whole project)
+			# Filter: show all containers (you can check updates on any container)
+			# Don't exclude bot container (we want to check bot updates too)
+			markup, standalone_containers = build_hierarchical_keyboard(
+				containers,
+				"CheckUpdate",
+				None  # Don't exclude any container
+			)
+			sent_message = send_message(message=get_text("checkupdate_command_container"), reply_markup=markup)
+			# Save container cache for standalone containers
+			if sent_message and standalone_containers:
+				save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
 	elif comando in ('/updateall', f'/updateall@{bot.get_me().username}'):
 		containers = docker_manager.list_containers()
-		containersToUpdate = []
-		for container in containers:
+		# Sort containers: bot first, then running, then stopped (all alphabetically)
+		sorted_containers = sort_containers_by_priority(containers)
+		containersToUpdate = []  # list of [id, name] pairs
+		containersToUpdateObjs = []
+		for container in sorted_containers:
 			if update_available(container):
-				containersToUpdate.append(container.name)
+				containersToUpdate.append([container.id[:CONTAINER_ID_LENGTH], container.name])
+				containersToUpdateObjs.append(container)
 		if not containersToUpdate:
 			send_message(message=get_text("already_updated_all"))
 			return
 
 		markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
 		markup.add(*[
-			InlineKeyboardButton(f'{ICON_CONTAINER_MARK_FOR_UPDATE} {name}', callback_data=f'toggleUpdate|{name}')
-			for name in containersToUpdate
+			InlineKeyboardButton(f'{ICON_CONTAINER_MARK_FOR_UPDATE} {cname}', callback_data=f'toggleUpdate|{cid}')
+			for cid, cname in containersToUpdate
 		])
 		markup.add(
 			InlineKeyboardButton(get_text("button_update_all"), callback_data="toggleUpdateAll"),
@@ -1766,20 +1978,32 @@ def command_controller(message):
 		message = send_message(message=get_text("available_updates", len(containersToUpdate)), reply_markup=markup)
 		if message:
 			save_update_data(TELEGRAM_GROUP, message.message_id, containersToUpdate)
+			# Pre-populate name cache so callback parser can resolve names from IDs
+			save_container_cache(message.chat.id, message.message_id, containersToUpdateObjs)
 
 	elif comando in ('/changetag', f'/changetag@{bot.get_me().username}'):
 		if container_id:
 			change_tag_container(container_id, container_name)
 		else:
-			markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
-			botones = []
-			containers = docker_manager.list_containers(comando=comando)
-			for container in containers:
-				botones.append(InlineKeyboardButton(f'{get_status_emoji(container.status, container.name, container)} {container.name}', callback_data=f'changeTagContainer|{container.id[:CONTAINER_ID_LENGTH]}|{container.name}'))
+			# Get ALL containers to show projects and standalone
+			containers = docker_manager.list_containers()
+			if not containers:
+				send_message(message=get_text("error_no_containers_available"))
+				return
 
-			markup.add(*botones)
-			markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
-			send_message(message=get_text("change_tag_container"), reply_markup=markup)
+			# Use hierarchical keyboard (Level 1: projects + standalone containers)
+			# No project-level action for changetag (can't change tag for whole project)
+			# Filter: show all containers (you can change tag on any container)
+			# Don't exclude bot container (we want to change bot tag too)
+			markup, standalone_containers = build_hierarchical_keyboard(
+				containers,
+				"ChangeTag",
+				None  # Don't exclude any container
+			)
+			sent_message = send_message(message=get_text("change_tag_container"), reply_markup=markup)
+			# Save container cache for standalone containers
+			if sent_message and standalone_containers:
+				save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
 	elif comando in ('/prune', f'/prune@{bot.get_me().username}'):
 			markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
 			botones = []
@@ -1805,6 +2029,9 @@ def command_controller(message):
 	elif comando in ('/donors', f'/donors@{bot.get_me().username}'):
 		print_donors()
 
+	elif comando in ('/ports', f'/ports@{bot.get_me().username}'):
+		show_container_ports()
+
 def parse_call_data(call_data):
 	parts = call_data.split("|")
 	comando = parts[0]
@@ -1829,18 +2056,16 @@ def button_controller(call):
 		chatId = call.message.chat.id
 		userId = call.from_user.id
 
-		# Responder inmediatamente al callback para evitar timeout
-		bot.answer_callback_query(call.id, show_alert=False)
-
 		if not is_admin(userId):
 			warning(f"User {userId} ({call.from_user.username}) tried to use admin command without permission")
 			send_message(chat_id=userId, message=get_text("user_not_admin"))
+			bot.answer_callback_query(call.id, text="❌", show_alert=False)
 			return
 
 		data = parse_call_data(call.data)
 		comando = data["comando"]
 		containerId = data.get("containerId")
-		containerName = data.get("containerName")
+		containerName = data.get("containerName")  # For toggles and project names
 		tag = data.get("tag")
 		action = data.get("action")
 		containerIdx = data.get("containerIdx")
@@ -1850,6 +2075,31 @@ def button_controller(call):
 		field = data.get("field")
 		scheduleId = data.get("scheduleId")
 		value = data.get("value")
+		pruneType = data.get("pruneType")
+
+		# For toggle commands, don't answer immediately - let the handler do it with feedback
+		# For other commands, answer immediately to prevent timeout
+		if comando not in ["toggleUpdate", "toggleUpdateAll"]:
+			bot.answer_callback_query(call.id, show_alert=False)
+
+		# If containerId is present but containerName is not, get it from cache/Docker
+		if containerId and not containerName:
+			containerName = get_container_name(chatId, messageId, containerId)
+			if not containerName:
+				send_message(message=get_text("container_does_not_exist", containerId))
+				debug(f"Container {containerId} not found in cache or Docker")
+				return
+
+		# For project-scoped commands the "containerName" arg actually carries
+		# a short hash of the project name (to stay under Telegram's 64-byte
+		# callback_data limit). Resolve it back to the real project name here.
+		if comando in PROJECT_COMMANDS and containerName:
+			resolved = resolve_project_name(containerName)
+			if not resolved:
+				send_message(message=get_text("error_project_not_found", containerName))
+				debug(f"Unknown project hash: {containerName}")
+				return
+			containerName = resolved
 
 		debug(f"BUTTON: {comando} | USER: {userId} | CHAT: {chatId}")
 	except Exception as e:
@@ -1861,7 +2111,8 @@ def button_controller(call):
 		return
 
 	try:
-		if comando not in ["toggleUpdate", "toggleUpdateAll", "toggleRun", "toggleRunAll", "toggleStop", "toggleStopAll", "toggleRestart", "toggleRestartAll"]:
+		# Don't delete message for toggle actions and hierarchical navigation
+		if comando not in ["toggleUpdate", "toggleUpdateAll", "enterRestartProject", "backToRestartLevel1", "enterRunProject", "backToRunLevel1", "enterStopProject", "backToStopLevel1", "enterDeleteProject", "backToDeleteLevel1", "confirmDeleteWholeProject", "enterExecProject", "backToExecLevel1", "enterLogsProject", "backToLogsLevel1", "enterCheckUpdateProject", "backToCheckUpdateLevel1", "enterInfoProject", "showProjectInfo", "backToInfoLevel1", "enterChangeTagProject", "backToChangeTagLevel1", "enterLogfileProject", "backToLogfileLevel1", "enterComposeProject", "backToComposeLevel1"]:
 			delete_message(messageId)
 
 		if call.data == "cerrar":
@@ -1869,11 +2120,8 @@ def button_controller(call):
 			update_data = read_cache_item(f"update_data_{chatId}_{messageId}")
 			if update_data is not None:
 				clear_update_data(chatId, messageId)
-			for action in ["run", "stop", "restart"]:
-				action_data = read_cache_item(f"{action}_data_{chatId}_{messageId}")
-				if action_data is not None:
-					clear_action_data(chatId, messageId, action)
-					break
+			# Clean up container name cache
+			clear_container_cache(chatId, messageId)
 			return
 
 		# RUN
@@ -1919,7 +2167,9 @@ def button_controller(call):
 		# CONFIRM UPDATE ALL
 		elif comando == "updateAll":
 			containers = docker_manager.list_containers()
-			for container in containers:
+			# Sort containers: bot first, then running, then stopped (all alphabetically)
+			sorted_containers = sort_containers_by_priority(containers)
+			for container in sorted_containers:
 				if update_available(container):
 					update(container.id, container.name)
 
@@ -1958,14 +2208,26 @@ def button_controller(call):
 
 		# CHANGE_TAG_CONTAINER
 		elif comando == "changeTagContainer":
+			# Get container name from cache or Docker
+			containerName = get_container_name(chatId, messageId, containerId)
+			if not containerName:
+				containerName = "Unknown"
 			change_tag_container(containerId, containerName)
 
 		# CHANGE_TAG_CONTAINER
 		elif comando == "confirmChangeTag":
+			# Get container name from cache or Docker
+			containerName = get_container_name(chatId, messageId, containerId)
+			if not containerName:
+				containerName = "Unknown"
 			confirm_change_tag(containerId, containerName, tag)
 
 		# CHANGE_TAG
 		elif comando == "changeTag":
+			# Get container name from cache or Docker
+			containerName = get_container_name(chatId, messageId, containerId)
+			if not containerName:
+				containerName = "Unknown"
 			x = send_message(message=get_text("updating", containerName))
 			result = docker_manager.update(container_id=containerId, container_name=containerName, message=x, bot=bot, tag=tag)
 			delete_message(x.message_id)
@@ -1985,25 +2247,45 @@ def button_controller(call):
 		# MARCAR COMO UPDATE
 		elif comando == "toggleUpdate":
 			containers, selected = load_update_data(chatId, messageId)
-			if containerName in selected:
-				selected.remove(containerName)
+			was_selected = containerId in selected
+
+			if was_selected:
+				selected.remove(containerId)
 			else:
-				selected.add(containerName)
+				selected.add(containerId)
 			save_update_data(chatId, messageId, containers, selected)
 
 			markup = build_generic_keyboard(containers, selected, messageId, "Update", get_text("button_update"), get_text("button_update_all"))
-			edit_message_reply_markup(chatId, messageId, reply_markup=markup)
+
+			# Use synchronous edit for immediate feedback
+			try:
+				edit_message_reply_markup_sync(chatId, messageId, reply_markup=markup)
+				# Answer callback without text (no annoying popup)
+				bot.answer_callback_query(call.id, show_alert=False)
+			except Exception as e:
+				error(f"Error updating toggle: {e}")
+				bot.answer_callback_query(call.id, show_alert=False)
 
 		# MARCAR COMO UPDATE TODOS
 		elif comando == "toggleUpdateAll":
 			containers, selected = load_update_data(chatId, messageId)
-			for container in containers:
-				if container not in selected:
-					selected.add(container)
+			newly_selected_count = 0
+			for cid, _cname in containers:
+				if cid not in selected:
+					selected.add(cid)
+					newly_selected_count += 1
 			save_update_data(chatId, messageId, containers, selected)
 
 			markup = build_generic_keyboard(containers, selected, messageId, "Update", get_text("button_update"), get_text("button_update_all"))
-			edit_message_reply_markup(chatId, messageId, reply_markup=markup)
+
+			# Use synchronous edit for immediate feedback
+			try:
+				edit_message_reply_markup_sync(chatId, messageId, reply_markup=markup)
+				# Answer callback without text (no annoying popup)
+				bot.answer_callback_query(call.id, show_alert=False)
+			except Exception as e:
+				error(f"Error updating toggle all: {e}")
+				bot.answer_callback_query(call.id, show_alert=False)
 
 		# CONFIRM UPDATE SELECTED
 		elif comando == "confirmUpdateSelected":
@@ -2012,155 +2294,249 @@ def button_controller(call):
 		# UPDATE SELECTED
 		elif comando == "updateSelected":
 			containers, selected = load_update_data(chatId, originalMessageId)
-			for containerName in selected:
-				container_id = get_container_id_by_name(container_name=containerName)
-				if not container_id:
-					send_message(message=get_text("container_does_not_exist", containerName))
-					debug(f"Container {containerName} not found")
+			for cid in selected:
+				try:
+					container = docker_manager.client.containers.get(cid)
+				except Exception:
+					send_message(message=get_text("container_does_not_exist", cid))
+					debug(f"Container {cid} not found")
 					continue
-				client = docker.from_env()
-				container = client.containers.get(container_id)
 				if update_available(container):
 					update(container.id, container.name)
 			clear_update_data(chatId, originalMessageId)
 
-		# TOGGLE RUN
-		elif comando == "toggleRun":
-			containers, selected = load_action_data(chatId, messageId, "run")
-			if containerName in selected:
-				selected.remove(containerName)
-			else:
-				selected.add(containerName)
-			save_action_data(chatId, messageId, "run", containers, selected)
 
-			markup = build_generic_keyboard(containers, selected, messageId, "Run", get_text("button_run"), get_text("button_run_all"))
-			edit_message_reply_markup(chatId, messageId, reply_markup=markup)
+		# ENTER RESTART PROJECT (Level 2: show project containers)
+		elif comando == "enterRestartProject":
+			handle_enter_project_level2('Restart', containerName, chatId, messageId)
 
-		# TOGGLE RUN ALL
-		elif comando == "toggleRunAll":
-			containers, selected = load_action_data(chatId, messageId, "run")
-			for container in containers:
-				if container not in selected:
-					selected.add(container)
-			save_action_data(chatId, messageId, "run", containers, selected)
+		# BACK TO RESTART LEVEL 1
+		elif comando == "backToRestartLevel1":
+			result = build_back_to_level1_keyboard('Restart', chatId, messageId)
+			if result:
+				markup, message_key = result
+				edit_message_text(get_text(message_key), chatId, messageId, reply_markup=markup)
 
-			markup = build_generic_keyboard(containers, selected, messageId, "Run", get_text("button_run"), get_text("button_run_all"))
-			edit_message_reply_markup(chatId, messageId, reply_markup=markup)
+		# RESTART WHOLE PROJECT
+		elif comando == "restartWholeProject":
+			project_name = containerName
+			restart_compose_project(project_name)
 
-		# CONFIRM RUN SELECTED
-		elif comando == "confirmRunSelected":
-			containers, selected = load_action_data(chatId, originalMessageId, "run")
-			containersToRun = ""
-			for container in selected:
-				containersToRun += f"· <b>{container}</b>\n"
-			markup = InlineKeyboardMarkup(row_width = 1)
-			markup.add(InlineKeyboardButton(get_text("button_run"), callback_data=f"runSelected|{originalMessageId}"))
-			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
-			send_message(message=get_text("confirm_run_selected", containersToRun), reply_markup=markup)
+		# ENTER RUN PROJECT (Level 2: show project containers)
+		elif comando == "enterRunProject":
+			handle_enter_project_level2('Run', containerName, chatId, messageId)
 
-		# RUN SELECTED
-		elif comando == "runSelected":
-			containers, selected = load_action_data(chatId, originalMessageId, "run")
-			for containerName in selected:
-				container_id = get_container_id_by_name(container_name=containerName)
-				if not container_id:
-					send_message(message=get_text("container_does_not_exist", containerName))
-					debug(f"Container {containerName} not found")
-					continue
-				run(container_id, containerName)
-			clear_action_data(chatId, originalMessageId, "run")
+		# BACK TO RUN LEVEL 1
+		elif comando == "backToRunLevel1":
+			result = build_back_to_level1_keyboard('Run', chatId, messageId)
+			if result:
+				markup, message_key = result
+				edit_message_text(get_text(message_key), chatId, messageId, reply_markup=markup)
 
-		# TOGGLE STOP
-		elif comando == "toggleStop":
-			containers, selected = load_action_data(chatId, messageId, "stop")
-			if containerName in selected:
-				selected.remove(containerName)
-			else:
-				selected.add(containerName)
-			save_action_data(chatId, messageId, "stop", containers, selected)
+		# RUN WHOLE PROJECT
+		elif comando == "runWholeProject":
+			project_name = containerName
+			run_compose_project(project_name)
 
-			markup = build_generic_keyboard(containers, selected, messageId, "Stop", get_text("button_stop"), get_text("button_stop_all"))
-			edit_message_reply_markup(chatId, messageId, reply_markup=markup)
+		# ENTER STOP PROJECT (Level 2: show project containers)
+		elif comando == "enterStopProject":
+			handle_enter_project_level2('Stop', containerName, chatId, messageId)
 
-		# TOGGLE STOP ALL
-		elif comando == "toggleStopAll":
-			containers, selected = load_action_data(chatId, messageId, "stop")
-			for container in containers:
-				if container not in selected:
-					selected.add(container)
-			save_action_data(chatId, messageId, "stop", containers, selected)
+		# BACK TO STOP LEVEL 1
+		elif comando == "backToStopLevel1":
+			result = build_back_to_level1_keyboard('Stop', chatId, messageId)
+			if result:
+				markup, message_key = result
+				edit_message_text(get_text(message_key), chatId, messageId, reply_markup=markup)
 
-			markup = build_generic_keyboard(containers, selected, messageId, "Stop", get_text("button_stop"), get_text("button_stop_all"))
-			edit_message_reply_markup(chatId, messageId, reply_markup=markup)
+		# STOP WHOLE PROJECT
+		elif comando == "stopWholeProject":
+			project_name = containerName
+			stop_compose_project(project_name)
 
-		# CONFIRM STOP SELECTED
-		elif comando == "confirmStopSelected":
-			containers, selected = load_action_data(chatId, originalMessageId, "stop")
-			containersToStop = ""
-			for container in selected:
-				containersToStop += f"· <b>{container}</b>\n"
-			markup = InlineKeyboardMarkup(row_width = 1)
-			markup.add(InlineKeyboardButton(get_text("button_stop"), callback_data=f"stopSelected|{originalMessageId}"))
-			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
-			send_message(message=get_text("confirm_stop_selected", containersToStop), reply_markup=markup)
+		# ENTER DELETE PROJECT (Level 2: show project containers)
+		elif comando == "enterDeleteProject":
+			handle_enter_project_level2('Delete', containerName, chatId, messageId)
 
-		# STOP SELECTED
-		elif comando == "stopSelected":
-			containers, selected = load_action_data(chatId, originalMessageId, "stop")
-			for containerName in selected:
-				container_id = get_container_id_by_name(container_name=containerName)
-				if not container_id:
-					send_message(message=get_text("container_does_not_exist", containerName))
-					debug(f"Container {containerName} not found")
-					continue
-				stop(container_id, containerName)
-			clear_action_data(chatId, originalMessageId, "stop")
+		# BACK TO DELETE LEVEL 1
+		elif comando == "backToDeleteLevel1":
+			result = build_back_to_level1_keyboard('Delete', chatId, messageId)
+			if result:
+				markup, message_key = result
+				edit_message_text(get_text(message_key), chatId, messageId, reply_markup=markup)
 
-		# TOGGLE RESTART
-		elif comando == "toggleRestart":
-			containers, selected = load_action_data(chatId, messageId, "restart")
-			if containerName in selected:
-				selected.remove(containerName)
-			else:
-				selected.add(containerName)
-			save_action_data(chatId, messageId, "restart", containers, selected)
+		# ENTER EXEC PROJECT (Level 2: show project containers)
+		elif comando == "enterExecProject":
+			handle_enter_project_level2('Exec', containerName, chatId, messageId, filter_running_only=True)
 
-			markup = build_generic_keyboard(containers, selected, messageId, "Restart", get_text("button_restart"), get_text("button_restart_all"))
-			edit_message_reply_markup(chatId, messageId, reply_markup=markup)
+		# BACK TO EXEC LEVEL 1
+		elif comando == "backToExecLevel1":
+			result = build_back_to_level1_keyboard('Exec', chatId, messageId)
+			if result:
+				markup, message_key = result
+				edit_message_text(get_text(message_key), chatId, messageId, reply_markup=markup)
 
-		# TOGGLE RESTART ALL
-		elif comando == "toggleRestartAll":
-			containers, selected = load_action_data(chatId, messageId, "restart")
-			for container in containers:
-				if container not in selected:
-					selected.add(container)
-			save_action_data(chatId, messageId, "restart", containers, selected)
+		# ENTER LOGS PROJECT (Level 2: show project containers)
+		elif comando == "enterLogsProject":
+			handle_enter_project_level2('Logs', containerName, chatId, messageId)
 
-			markup = build_generic_keyboard(containers, selected, messageId, "Restart", get_text("button_restart"), get_text("button_restart_all"))
-			edit_message_reply_markup(chatId, messageId, reply_markup=markup)
+		# BACK TO LOGS LEVEL 1
+		elif comando == "backToLogsLevel1":
+			result = build_back_to_level1_keyboard('Logs', chatId, messageId)
+			if result:
+				markup, message_key = result
+				edit_message_text(get_text(message_key), chatId, messageId, reply_markup=markup)
 
-		# CONFIRM RESTART SELECTED
-		elif comando == "confirmRestartSelected":
-			containers, selected = load_action_data(chatId, originalMessageId, "restart")
-			containersToRestart = ""
-			for container in selected:
-				containersToRestart += f"· <b>{container}</b>\n"
-			markup = InlineKeyboardMarkup(row_width = 1)
-			markup.add(InlineKeyboardButton(get_text("button_restart"), callback_data=f"restartSelected|{originalMessageId}"))
-			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
-			send_message(message=get_text("confirm_restart_selected", containersToRestart), reply_markup=markup)
+		# ENTER LOGFILE PROJECT (Level 2: show project containers)
+		elif comando == "enterLogfileProject":
+			handle_enter_project_level2('Logfile', containerName, chatId, messageId)
 
-		# RESTART SELECTED
-		elif comando == "restartSelected":
-			containers, selected = load_action_data(chatId, originalMessageId, "restart")
-			for containerName in selected:
-				container_id = get_container_id_by_name(container_name=containerName)
-				if not container_id:
-					send_message(message=get_text("container_does_not_exist", containerName))
-					debug(f"Container {containerName} not found")
-					continue
-				restart(container_id, containerName)
-			clear_action_data(chatId, originalMessageId, "restart")
+		# BACK TO LOGFILE LEVEL 1
+		elif comando == "backToLogfileLevel1":
+			result = build_back_to_level1_keyboard('Logfile', chatId, messageId)
+			if result:
+				markup, message_key = result
+				edit_message_text(get_text(message_key), chatId, messageId, reply_markup=markup)
+
+		# ENTER COMPOSE PROJECT (Level 2: show project containers)
+		elif comando == "enterComposeProject":
+			project_name = containerName
+			project_info = docker_manager.get_project_info(project_name)
+
+			if not project_info:
+				send_message(message=get_text("error_project_not_found", project_name))
+				return
+
+			# Build Level 2 keyboard
+			markup = InlineKeyboardMarkup(row_width=BUTTON_COLUMNS)
+			botones = []
+
+			# Add individual container buttons (sorted by status and service name)
+			for service_name in sort_project_services(project_info):
+				container = project_info.services[service_name]
+				status_emoji = get_status_emoji(container.status, container.name, container)
+				botones.append(
+					InlineKeyboardButton(
+						f"{status_emoji} {service_name}",
+						callback_data=f"compose|{container.id[:CONTAINER_ID_LENGTH]}"
+					)
+				)
+
+			markup.add(*botones)
+
+			# Add back button
+			markup.add(
+				InlineKeyboardButton(
+					get_text("button_back"),
+					callback_data="backToComposeLevel1"
+				)
+			)
+
+			# Save container cache for this project
+			save_container_cache(chatId, messageId, project_info.containers)
+
+			edit_message_text(
+				get_text("select_container_from_project", project_name),
+				chatId,
+				messageId,
+				reply_markup=markup
+			)
+
+		# BACK TO COMPOSE LEVEL 1
+		elif comando == "backToComposeLevel1":
+			result = build_back_to_level1_keyboard('Compose', chatId, messageId)
+			if result:
+				markup, message_key = result
+				edit_message_text(get_text(message_key), chatId, messageId, reply_markup=markup)
+
+		# ENTER CHECKUPDATE PROJECT (Level 2: show project containers)
+		elif comando == "enterCheckUpdateProject":
+			handle_enter_project_level2('CheckUpdate', containerName, chatId, messageId)
+
+		# BACK TO CHECKUPDATE LEVEL 1
+		elif comando == "backToCheckUpdateLevel1":
+			result = build_back_to_level1_keyboard('CheckUpdate', chatId, messageId)
+			if result:
+				markup, message_key = result
+				edit_message_text(get_text(message_key), chatId, messageId, reply_markup=markup)
+
+		# ENTER INFO PROJECT (Level 2: show project containers)
+		elif comando == "enterInfoProject":
+			handle_enter_project_level2('Info', containerName, chatId, messageId)
+
+		# SHOW PROJECT INFO (display project information)
+		elif comando == "showProjectInfo":
+			project_name = containerName
+
+			# Get formatted project info
+			info_text = docker_manager.get_project_info_formatted(project_name)
+
+			# Build keyboard with close button
+			markup = InlineKeyboardMarkup(row_width=1)
+			markup.add(
+				InlineKeyboardButton(
+					get_text("button_close"),
+					callback_data="cerrar"
+				)
+			)
+
+			edit_message_text(
+				info_text,
+				chatId,
+				messageId,
+				reply_markup=markup
+			)
+
+		# BACK TO INFO LEVEL 1
+		elif comando == "backToInfoLevel1":
+			result = build_back_to_level1_keyboard('Info', chatId, messageId)
+			if result:
+				markup, message_key = result
+				edit_message_text(get_text(message_key), chatId, messageId, reply_markup=markup)
+
+		# ENTER CHANGETAG PROJECT (Level 2: show project containers)
+		elif comando == "enterChangeTagProject":
+			handle_enter_project_level2('ChangeTag', containerName, chatId, messageId)
+
+		# BACK TO CHANGETAG LEVEL 1
+		elif comando == "backToChangeTagLevel1":
+			result = build_back_to_level1_keyboard('ChangeTag', chatId, messageId)
+			if result:
+				markup, message_key = result
+				edit_message_text(get_text(message_key), chatId, messageId, reply_markup=markup)
+
+		# CONFIRM DELETE WHOLE PROJECT (show warning)
+		elif comando == "confirmDeleteWholeProject":
+			project_name = containerName
+			project_info = docker_manager.get_project_info(project_name)
+
+			if not project_info:
+				send_message(message=get_text("error_project_not_found", project_name))
+				return
+
+			container_count = project_info.get_container_count()
+			markup = InlineKeyboardMarkup(row_width=2)
+			markup.add(
+				InlineKeyboardButton(
+					f"✅ {get_text('button_yes_delete')}",
+					callback_data=f"deleteWholeProject|{register_project_hash(project_name)}"
+				),
+				InlineKeyboardButton(
+					get_text('button_cancel'),
+					callback_data="backToDeleteLevel1"
+				)
+			)
+			edit_message_text(
+				get_text("confirm_delete_project", project_name, container_count),
+				chatId,
+				messageId,
+				reply_markup=markup
+			)
+
+		# DELETE WHOLE PROJECT
+		elif comando == "deleteWholeProject":
+			project_name = containerName
+			delete_compose_project(project_name)
 
 		# PRUNE
 		elif comando == "prune":
@@ -2169,8 +2545,7 @@ def button_controller(call):
 				confirm_prune_containers()
 			elif action == "pruneContainers":
 				result, data = docker_manager.prune_containers()
-				markup = InlineKeyboardMarkup(row_width = 1)
-				markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
+				markup = create_simple_keyboard("button_delete")
 				fichero_temporal = get_temporal_file(data, get_text("button_containers"))
 				x = send_message(message=get_text("loading_file"))
 				send_document(document=fichero_temporal, reply_markup=markup, caption=result)
@@ -2181,8 +2556,7 @@ def button_controller(call):
 				confirm_prune_images()
 			elif action == "pruneImages":
 				result, data = docker_manager.prune_images()
-				markup = InlineKeyboardMarkup(row_width = 1)
-				markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
+				markup = create_simple_keyboard("button_delete")
 				fichero_temporal = get_temporal_file(data, get_text("button_images"))
 				x = send_message(message=get_text("loading_file"))
 				send_document(document=fichero_temporal, reply_markup=markup, caption=result)
@@ -2193,8 +2567,7 @@ def button_controller(call):
 				confirm_prune_networks()
 			elif action == "pruneNetworks":
 				result, data = docker_manager.prune_networks()
-				markup = InlineKeyboardMarkup(row_width = 1)
-				markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
+				markup = create_simple_keyboard("button_delete")
 				fichero_temporal = get_temporal_file(data, get_text("button_networks"))
 				x = send_message(message=get_text("loading_file"))
 				send_document(document=fichero_temporal, reply_markup=markup, caption=result)
@@ -2205,12 +2578,35 @@ def button_controller(call):
 				confirm_prune_volumes()
 			elif action == "pruneVolumes":
 				result, data = docker_manager.prune_volumes()
-				markup = InlineKeyboardMarkup(row_width = 1)
-				markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
+				markup = create_simple_keyboard("button_delete")
 				fichero_temporal = get_temporal_file(data, get_text("button_volumes"))
 				x = send_message(message=get_text("loading_file"))
 				send_document(document=fichero_temporal, reply_markup=markup, caption=result)
 				delete_message(x.message_id)
+
+		# PORTS CALLBACKS
+		elif comando == "generatePort":
+			# Generate a random available port
+			port = get_random_available_port()
+
+			# Build the message with the generated port
+			if port:
+				result_message = get_text("ports_generated_port", port)
+			else:
+				result_message = get_text("ports_no_available_port")
+
+			# Delete the original message and send a new one with the result
+			delete_message(messageId, chatId)
+			send_message(chat_id=chatId, message=result_message)
+
+		elif comando == "checkPort":
+			# Ask user for port to check
+			ask_port_to_check(userId)
+
+		elif comando == "cancelCheckPort":
+			# Cancel port check request
+			clear_port_check_request_state(userId)
+			delete_message(messageId, chatId)
 
 		# SCHEDULE CALLBACKS
 		elif comando == "scheduleAdd":
@@ -2279,6 +2675,25 @@ def button_controller(call):
 					message_text += f"\n\n{get_text('schedule_ask_minutes')}"
 
 					markup = InlineKeyboardMarkup(row_width=1)
+					markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+					msg = send_message(message=message_text, reply_markup=markup)
+					schedule_state["last_message_id"] = msg.message_id if msg else None
+					save_schedule_state(userId, schedule_state)
+				elif action == "prune":
+					schedule_state["step"] = "ask_prune_type"
+					schedule_state["container"] = None  # Not applicable for prune
+
+					# Build message with summary
+					message_text = _build_schedule_summary(schedule_state)
+					message_text += f"\n\n{get_text('schedule_ask_prune_type')}"
+
+					markup = InlineKeyboardMarkup(row_width=2)
+					markup.add(
+						InlineKeyboardButton(get_text("schedule_prune_containers"), callback_data="scheduleSelectPruneType|containers"),
+						InlineKeyboardButton(get_text("schedule_prune_images"), callback_data="scheduleSelectPruneType|images"),
+						InlineKeyboardButton(get_text("schedule_prune_networks"), callback_data="scheduleSelectPruneType|networks"),
+						InlineKeyboardButton(get_text("schedule_prune_volumes"), callback_data="scheduleSelectPruneType|volumes")
+					)
 					markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 					msg = send_message(message=message_text, reply_markup=markup)
 					schedule_state["last_message_id"] = msg.message_id if msg else None
@@ -2358,6 +2773,49 @@ def button_controller(call):
 				schedule_state["last_message_id"] = msg.message_id if msg else None
 				save_schedule_state(userId, schedule_state)
 
+		elif comando == "scheduleSelectPruneType":
+			schedule_state = load_schedule_state(userId)
+			if schedule_state:
+				schedule_state["prune_type"] = pruneType
+				schedule_state["step"] = "ask_show_output_prune"
+
+				# Delete previous message if exists
+				if schedule_state.get("last_message_id"):
+					try:
+						delete_message(schedule_state.get("last_message_id"))
+					except:
+						pass
+
+				# Build message with summary
+				message_text = _build_schedule_summary(schedule_state)
+				message_text += f"\n\n{get_text('schedule_ask_show_output')}"
+
+				markup = InlineKeyboardMarkup(row_width=2)
+				markup.add(
+					InlineKeyboardButton(get_text("button_yes"), callback_data="scheduleSelectPruneShowOutput|yes"),
+					InlineKeyboardButton(get_text("button_no"), callback_data="scheduleSelectPruneShowOutput|no")
+				)
+				markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+				msg = send_message(message=message_text, reply_markup=markup)
+				schedule_state["last_message_id"] = msg.message_id if msg else None
+				save_schedule_state(userId, schedule_state)
+
+		elif comando == "scheduleSelectPruneShowOutput":
+			schedule_state = load_schedule_state(userId)
+			if schedule_state:
+				schedule_state["show_output"] = (action == "yes")
+				schedule_state["step"] = "confirm"
+
+				# Delete previous message if exists
+				if schedule_state.get("last_message_id"):
+					try:
+						delete_message(schedule_state.get("last_message_id"))
+					except:
+						pass
+
+				save_schedule_state(userId, schedule_state)
+				confirm_schedule_creation(userId, schedule_state)
+
 		elif comando == "scheduleConfirm":
 			schedule_state = load_schedule_state(userId)
 			if schedule_state:
@@ -2369,7 +2827,8 @@ def button_controller(call):
 						container=schedule_state.get("container"),
 						minutes=schedule_state.get("minutes"),
 						show_output=schedule_state.get("show_output", False),
-						command=schedule_state.get("command")
+						command=schedule_state.get("command"),
+						prune_type=schedule_state.get("prune_type")
 					)
 					send_message(message=get_text("schedule_added_success", schedule_state["name"]))
 					clear_schedule_state(userId)
@@ -2486,6 +2945,24 @@ def button_controller(call):
 					edit_state["last_message_id"] = msg.message_id if msg else None
 					save_schedule_state(userId, edit_state)
 
+				elif field == "prune_type":
+					current_prune_type = schedule.get('prune_type', '')
+					message_text = f"<b>{get_text('schedule_edit_prune_type')}</b>\n\n"
+					message_text += f"{get_text('schedule_ask_prune_type')}\n"
+					message_text += f"<i>{get_text('current_value')}: {current_prune_type}</i>"
+
+					markup = InlineKeyboardMarkup(row_width=2)
+					markup.add(
+						InlineKeyboardButton(get_text("schedule_prune_containers"), callback_data=f"scheduleEditValue|prune_type|{scheduleId}|containers"),
+						InlineKeyboardButton(get_text("schedule_prune_images"), callback_data=f"scheduleEditValue|prune_type|{scheduleId}|images"),
+						InlineKeyboardButton(get_text("schedule_prune_networks"), callback_data=f"scheduleEditValue|prune_type|{scheduleId}|networks"),
+						InlineKeyboardButton(get_text("schedule_prune_volumes"), callback_data=f"scheduleEditValue|prune_type|{scheduleId}|volumes")
+					)
+					markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+					msg = send_message(message=message_text, reply_markup=markup)
+					edit_state["last_message_id"] = msg.message_id if msg else None
+					save_schedule_state(userId, edit_state)
+
 		elif comando == "scheduleEditValue":
 			if field and scheduleId and value:
 				schedule = schedule_manager.get_schedule_by_id(int(scheduleId))
@@ -2498,6 +2975,9 @@ def button_controller(call):
 				# Update the schedule based on field type
 				if field == "show_output":
 					schedule_manager.update_schedule(schedule_name, show_output=(value == "yes"))
+					send_message(message=get_text("schedule_updated_success", schedule_name))
+				elif field == "prune_type":
+					schedule_manager.update_schedule(schedule_name, prune_type=value)
 					send_message(message=get_text("schedule_updated_success", schedule_name))
 				elif field == "container":
 					# value is now the container index, retrieve name from edit state
@@ -2549,6 +3029,7 @@ def handle_text(message):
 	userId = message.from_user.id
 	username = message.from_user.username
 	pending = load_command_request_state(userId)
+	pending_port_check = load_port_check_request_state(userId)
 	schedule_state = load_schedule_state(userId)
 	message_thread_id = message.message_thread_id
 	if not message_thread_id:
@@ -2571,49 +3052,265 @@ def handle_text(message):
 		delete_message(message.message_id, message.chat.id)
 		clear_command_request_state(userId)
 		confirm_execute_command(containerId, containerName, command_text)
+	elif pending_port_check:
+		port_text = message.text.strip()
+		deleteMessage = pending_port_check.get("deleteMessage")
+		delete_message(deleteMessage)
+		delete_message(message.message_id, message.chat.id)
+		clear_port_check_request_state(userId)
+
+		# Validate port number
+		try:
+			port_number = int(port_text)
+			if port_number < 1 or port_number > 65535:
+				send_message(message=get_text("ports_invalid_range"))
+				return
+
+			# Check the port
+			is_available, result_message = check_specific_port(port_number)
+			send_message(message=result_message)
+		except ValueError:
+			send_message(message=get_text("ports_invalid_number"))
 	elif schedule_state:
 		handle_schedule_flow(userId, message.text.strip(), schedule_state, message.chat.id, message.message_id)
 	else:
 		pass
 
-def run(containerId, containerName, from_schedule=False):
-	debug(f"Running command: run for container {containerName}")
-	x = send_message(message=get_text("starting", containerName))
-	result = docker_manager.start_container(container_id=containerId, container_name=containerName, from_schedule=from_schedule)
+def _execute_container_action(action, containerId, containerName, from_schedule=False):
+	"""
+	Generic function to execute container actions (run, stop, restart).
+
+	Args:
+		action: Action name ('run', 'stop', 'restart')
+		containerId: Container ID
+		containerName: Container name
+		from_schedule: Whether called from schedule
+	"""
+	action_map = {
+		'run': {
+			'debug': 'run',
+			'message_key': 'starting',
+			'method': docker_manager.start_container
+		},
+		'stop': {
+			'debug': 'stop',
+			'message_key': 'stopping',
+			'method': docker_manager.stop_container
+		},
+		'restart': {
+			'debug': 'restart',
+			'message_key': 'restarting',
+			'method': docker_manager.restart_container
+		}
+	}
+
+	config = action_map.get(action)
+	if not config:
+		error(f"Unknown action: {action}")
+		return
+
+	debug(f"Running command: {config['debug']} for container {containerName}")
+	x = send_message(message=get_text(config['message_key'], containerName))
+	result = config['method'](container_id=containerId, container_name=containerName, from_schedule=from_schedule)
 	if x:
 		delete_message(x.message_id)
 	if result:
 		send_message(message=result)
+
+def run(containerId, containerName, from_schedule=False):
+	_execute_container_action('run', containerId, containerName, from_schedule)
 
 def stop(containerId, containerName, from_schedule=False):
-	debug(f"Running command: stop for container {containerName}")
-	x = send_message(message=get_text("stopping", containerName))
-	result = docker_manager.stop_container(container_id=containerId, container_name=containerName, from_schedule=from_schedule)
-	if x:
-		delete_message(x.message_id)
-	if result:
-		send_message(message=result)
+	_execute_container_action('stop', containerId, containerName, from_schedule)
 
 def restart(containerId, containerName, from_schedule=False):
-	debug(f"Running command: restart for container {containerName}")
-	x = send_message(message=get_text("restarting", containerName))
-	result = docker_manager.restart_container(container_id=containerId, container_name=containerName, from_schedule=from_schedule)
-	if x:
-		delete_message(x.message_id)
-	if result:
-		send_message(message=result)
+	_execute_container_action('restart', containerId, containerName, from_schedule)
+
+def _execute_compose_project_action(action, project_name, show_extended=True):
+	"""
+	Generic function to execute compose project actions (run, stop, restart).
+
+	Args:
+		action: Action name ('run', 'stop', 'restart')
+		project_name: Project name
+		show_extended: Whether to show extended messages
+	"""
+	debug(f"Running command: {action}_compose_project for project {project_name}")
+
+	# Get project information
+	project_info = docker_manager.get_project_info(project_name)
+	if not project_info:
+		send_message(message=get_text("error_project_not_found", project_name))
+		return
+
+	# Get containers sorted by dependencies
+	containers = project_info.containers
+	sorted_containers = docker_manager.compose_manager.sort_containers_by_dependencies(containers)
+
+	# Per-action configuration
+	if action == 'restart':
+		send_message(message=get_text("restarting_project", project_name))
+		# Stop containers in reverse order
+		for container in reversed(sorted_containers):
+			service_name = container.labels.get('com.docker.compose.service', container.name)
+			if EXTENDED_MESSAGES and show_extended:
+				send_message(message=get_text("stopping_service", service_name))
+			try:
+				container.stop(timeout=10)
+			except Exception as e:
+				debug(f"Error stopping {service_name}: {e}")
+				if show_extended:
+					send_message(message=get_text("error_stopping_service", service_name))
+		# Start containers in the correct order
+		for container in sorted_containers:
+			service_name = container.labels.get('com.docker.compose.service', container.name)
+			if EXTENDED_MESSAGES and show_extended:
+				send_message(message=get_text("starting_service", service_name))
+			try:
+				container.start()
+			except Exception as e:
+				debug(f"Error starting {service_name}: {e}")
+				if show_extended:
+					send_message(message=get_text("error_starting_service", service_name))
+		send_message(message=get_text("project_restarted_success", project_name))
+
+	elif action == 'run':
+		send_message(message=get_text("starting_project", project_name))
+		# Start containers in the correct order
+		for container in sorted_containers:
+			service_name = container.labels.get('com.docker.compose.service', container.name)
+			if EXTENDED_MESSAGES and show_extended:
+				send_message(message=get_text("starting_service", service_name))
+			try:
+				container.start()
+			except Exception as e:
+				debug(f"Error starting {service_name}: {e}")
+				if show_extended:
+					send_message(message=get_text("error_starting_service", service_name))
+		send_message(message=get_text("project_started_success", project_name))
+
+	elif action == 'stop':
+		send_message(message=get_text("stopping_project", project_name))
+		# Stop containers in reverse order
+		for container in reversed(sorted_containers):
+			service_name = container.labels.get('com.docker.compose.service', container.name)
+			if EXTENDED_MESSAGES and show_extended:
+				send_message(message=get_text("stopping_service", service_name))
+			try:
+				container.stop(timeout=10)
+			except Exception as e:
+				debug(f"Error stopping {service_name}: {e}")
+				if show_extended:
+					send_message(message=get_text("error_stopping_service", service_name))
+		send_message(message=get_text("project_stopped_success", project_name))
+
+def restart_compose_project(project_name):
+	"""Restarts a complete Docker Compose project respecting dependency order."""
+	_execute_compose_project_action('restart', project_name)
+
+def restart_compose_project_after_update(project_name):
+	"""
+	Restarts a complete Docker Compose project after updating a container.
+	Shows informational messages about the project restart.
+
+	Args:
+		project_name: Compose project name to restart
+	"""
+	debug(f"Restarting project {project_name} after container update")
+
+	# Get project information
+	project_info = docker_manager.get_project_info(project_name)
+	if not project_info:
+		send_message(message=get_text("error_project_not_found", project_name))
+		return
+
+	# Get containers sorted by dependencies
+	containers = project_info.containers
+	sorted_containers = docker_manager.compose_manager.sort_containers_by_dependencies(containers)
+	container_count = len(sorted_containers)
+
+	# Initial message
+	send_message(message=get_text("restarting_project_after_update", project_name, container_count))
+
+	# Stop containers in reverse order (dependents first)
+	for container in reversed(sorted_containers):
+		service_name = container.labels.get('com.docker.compose.service', container.name)
+		if EXTENDED_MESSAGES:
+			send_message(message=get_text("stopping_service", service_name))
+		try:
+			container.stop(timeout=10)
+		except Exception as e:
+			debug(f"Error stopping {service_name}: {e}")
+			if EXTENDED_MESSAGES:
+				send_message(message=get_text("error_stopping_service", service_name))
+
+	# Start containers in the correct order (dependencies first)
+	for container in sorted_containers:
+		service_name = container.labels.get('com.docker.compose.service', container.name)
+		if EXTENDED_MESSAGES:
+			send_message(message=get_text("starting_service", service_name))
+		try:
+			container.start()
+		except Exception as e:
+			debug(f"Error starting {service_name}: {e}")
+			if EXTENDED_MESSAGES:
+				send_message(message=get_text("error_starting_service", service_name))
+
+	# Final message
+	send_message(message=get_text("project_restarted_after_update_success", project_name, container_count))
+
+def run_compose_project(project_name):
+	"""Starts a complete Docker Compose project respecting dependency order."""
+	_execute_compose_project_action('run', project_name)
+
+def stop_compose_project(project_name):
+	"""Stops a complete Docker Compose project respecting dependency order."""
+	_execute_compose_project_action('stop', project_name)
+
+def delete_compose_project(project_name):
+	"""
+	Deletes a complete Docker Compose project.
+
+	Args:
+		project_name: Compose project name to delete
+	"""
+	debug(f"Running command: delete_compose_project for project {project_name}")
+
+	# Get project information
+	project_info = docker_manager.get_project_info(project_name)
+	if not project_info:
+		send_message(message=get_text("error_project_not_found", project_name))
+		return
+
+	# Get the project's containers
+	containers = project_info.containers
+	container_count = len(containers)
+
+	# Initial message
+	send_message(message=get_text("deleting_project", project_name, container_count))
+
+	# Delete each container
+	for container in containers:
+		service_name = container.labels.get('com.docker.compose.service', container.name)
+		if EXTENDED_MESSAGES:
+			send_message(message=get_text("deleting_service", service_name))
+		try:
+			container.remove(force=True)
+		except Exception as e:
+			debug(f"Error deleting {service_name}: {e}")
+			send_message(message=get_text("error_deleting_service", service_name))
+
+	# Final message
+	send_message(message=get_text("project_deleted_success", project_name, container_count))
 
 def logs(containerId, containerName):
 	debug(f"Running command: logs for container {containerName}")
-	markup = InlineKeyboardMarkup(row_width = 1)
-	markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
 	result = docker_manager.show_logs(container_id=containerId, container_name=containerName)
-	send_message(message=result, reply_markup=markup)
+	send_message(message=result, reply_markup=create_simple_keyboard("button_close"))
 
 def log_file(containerId, containerName):
 	debug(f"Running command: log_file for container {containerName}")
-	markup = InlineKeyboardMarkup(row_width = 1)
-	markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
+	markup = create_simple_keyboard("button_delete")
 	result = docker_manager.show_logs_raw(container_id=containerId, container_name=containerName)
 	if isinstance(result, str):
 		fichero_temporal = get_temporal_file(result, f'logs_{containerName}')
@@ -2702,8 +3399,7 @@ def check_mute():
 
 def compose(containerId, containerName):
 	debug(f"Running command: compose for container {containerName}")
-	markup = InlineKeyboardMarkup(row_width = 1)
-	markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
+	markup = create_simple_keyboard("button_delete")
 	result = docker_manager.get_docker_compose(container_id=containerId, container_name=containerName)
 	if isinstance(result, str) and not result.startswith("Error"):
 		fichero_temporal = io.BytesIO(result.encode('utf-8'))
@@ -2722,59 +3418,48 @@ def info(containerId, containerName):
 	result, possible_update = docker_manager.get_info(container_id=containerId, container_name=containerName)
 	delete_message(x.message_id)
 	if possible_update:
-		markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{containerId}|{containerName}"))
-	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+		markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{containerId}"))
+	markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
 	send_message(message=result, reply_markup=markup)
 
-def confirm_prune_containers():
-	debug("Running command: confirm_prune_containers")
+def _confirm_prune_action(prune_type):
+	"""Generic function to confirm prune actions (containers, images, networks, volumes)"""
+	debug(f"Running command: confirm_prune_{prune_type}")
 	markup = InlineKeyboardMarkup(row_width = 1)
-	markup.add(InlineKeyboardButton(get_text("button_confirm"), callback_data=f"prune|pruneContainers"))
+	# Capitalize first letter for callback: containers -> Containers
+	callback_type = prune_type.capitalize()
+	markup.add(InlineKeyboardButton(get_text("button_confirm"), callback_data=f"prune|prune{callback_type}"))
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
-	send_message(message=get_text("confirm_prune_containers"), reply_markup=markup)
+	send_message(message=get_text(f"confirm_prune_{prune_type}"), reply_markup=markup)
+
+def confirm_prune_containers():
+	_confirm_prune_action('containers')
 
 def confirm_prune_images():
-	debug("Running command: confirm_prune_images")
-	markup = InlineKeyboardMarkup(row_width = 1)
-	markup.add(InlineKeyboardButton(get_text("button_confirm"), callback_data=f"prune|pruneImages"))
-	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
-	send_message(message=get_text("confirm_prune_images"), reply_markup=markup)
+	_confirm_prune_action('images')
 
 def confirm_prune_networks():
-	debug("Running command: confirm_prune_networks")
-	markup = InlineKeyboardMarkup(row_width = 1)
-	markup.add(InlineKeyboardButton(get_text("button_confirm"), callback_data=f"prune|pruneNetworks"))
-	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
-	send_message(message=get_text("confirm_prune_networks"), reply_markup=markup)
+	_confirm_prune_action('networks')
 
 def confirm_prune_volumes():
-	debug("Running command: confirm_prune_volumes")
-	markup = InlineKeyboardMarkup(row_width = 1)
-	markup.add(InlineKeyboardButton(get_text("button_confirm"), callback_data=f"prune|pruneVolumes"))
-	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
-	send_message(message=get_text("confirm_prune_volumes"), reply_markup=markup)
+	_confirm_prune_action('volumes')
 
 def confirm_delete(containerId, containerName):
 	debug(f"Running command: confirm_delete for container {containerName}")
-	markup = InlineKeyboardMarkup(row_width = 1)
-	markup.add(InlineKeyboardButton(get_text("button_confirm_delete"), callback_data=f"delete|{containerId}|{containerName}"))
-	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+	markup = create_confirm_cancel_keyboard(f"delete|{containerId}", "button_confirm_delete")
 	send_message(message=get_text("confirm_delete", containerName), reply_markup=markup)
 
 def ask_command(userId, containerId, containerName):
 	debug(f"Running command: ask_command for container {containerName}")
-	markup = InlineKeyboardMarkup(row_width = 1)
-	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cancelAskCommand"))
+	markup = create_simple_keyboard("button_cancel", "cancelAskCommand")
 	x = send_message(message=get_text("prompt_enter_command", containerName), reply_markup=markup)
 	if x:
 		save_command_request_state(userId, containerId, containerName, x.message_id)
 
 def confirm_execute_command(containerId, containerName, command):
 	debug(f"Running command: confirm_exec for container {containerName} with command [{command}]")
-	markup = InlineKeyboardMarkup(row_width = 1)
 	commandId = save_command_cache(command)
-	markup.add(InlineKeyboardButton(get_text("button_confirm"), callback_data=f"exec|{containerId}|{containerName}|{commandId}"))
-	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data=f"cancelExec|{commandId}"))
+	markup = create_confirm_cancel_keyboard(f"exec|{containerId}|{commandId}", "button_confirm", f"cancelExec|{commandId}")
 	send_message(message=get_text("confirm_exec", containerName, command), reply_markup=markup)
 
 def execute_command(containerId, containerName, command, sendMessage=True):
@@ -2792,22 +3477,108 @@ def execute_command(containerId, containerName, command, sendMessage=True):
 				send_message(message=f"<pre><code>{part}</code></pre>")
 
 def confirm_change_tag(containerId, containerName, tag):
-	markup = InlineKeyboardMarkup(row_width = 1)
-	markup.add(InlineKeyboardButton(get_text("button_confirm_change_tag", tag), callback_data=f"changeTag|{containerId}|{containerName}|{tag}"))
+	debug(f"Running command: confirm_change_tag for container {containerName} to tag {tag}")
+
+	# Show loading message
+	loading_msg = send_message(message=get_text("fetching_image_data"))
+
+	# Get detailed comparison
+	comparison = get_image_comparison(containerId, containerName, new_tag=tag)
+
+	# Delete loading message
+	if loading_msg:
+		delete_message(loading_msg.message_id)
+
+	if not comparison:
+		# Fallback to simple confirmation if comparison fails
+		markup = create_confirm_cancel_keyboard(f"changeTag|{containerId}|{tag}", f"button_confirm_change_tag", "cerrar", "button_cancel")
+		send_message(message=get_text("confirm_change_tag", containerName, tag), reply_markup=markup)
+		return
+
+	# Check if images are identical
+	if comparison['current_digest'] == comparison['new_digest']:
+		# Same image, just show info
+		message = f"""📦 <b>{containerName}</b>
+
+ℹ️ <b>Información:</b>
+   {get_text('update_tag')}: <code>{comparison['current_tag']}</code> → <code>{comparison['new_tag']}</code>
+   {get_text('update_created')}: {comparison['current_date']}
+   {get_text('update_size')}: {comparison['current_size']}
+   {get_text('update_digest')}: <code>{comparison['current_digest']}</code>
+
+⚠️ Ambos tags apuntan a la misma imagen (mismo digest)."""
+	else:
+		# Different images, show full comparison
+		# Build changes list
+		changes = []
+		changes.append(f"{get_text('update_size_change')}: {comparison['size_diff']}")
+		if comparison['days_diff'] > 0:
+			changes.append(f"{comparison['days_diff']} {get_text('update_days_newer')}")
+		elif comparison['days_diff'] < 0:
+			changes.append(f"{abs(comparison['days_diff'])} {get_text('update_days_older')}")
+
+		# Format changes (use bullet points only if multiple items)
+		if len(changes) > 1:
+			changes_text = "\n   • " + "\n   • ".join(changes)
+		else:
+			changes_text = "\n   " + changes[0]
+
+		message = f"""📦 <b>{containerName}</b>
+
+📌 <b>{get_text('update_current_image')}:</b>
+   {get_text('update_tag')}: <code>{comparison['current_tag']}</code>
+   {get_text('update_created')}: {comparison['current_date']}
+   {get_text('update_size')}: {comparison['current_size']}
+   {get_text('update_digest')}: <code>{comparison['current_digest']}</code>
+
+🆕 <b>{get_text('update_new_image')}:</b>
+   {get_text('update_tag')}: <code>{comparison['new_tag']}</code>
+   {get_text('update_created')}: {comparison['new_date']}
+   {get_text('update_size')}: {comparison['new_size']}
+   {get_text('update_digest')}: <code>{comparison['new_digest']}</code>
+
+📊 <b>{get_text('update_changes')}:</b>{changes_text}"""
+
+	if comparison['description']:
+		message += f"\n\n📝 <b>{get_text('update_description')}:</b>\n{comparison['description']}"
+
+	if comparison['registry_url']:
+		# Use dynamic text based on registry
+		if comparison['registry_name']:
+			link_text = f"{get_text('update_more_info_registry', comparison['registry_name'])}"
+		else:
+			link_text = get_text('update_more_info')
+		message += f"\n\n🔗 <a href=\"{comparison['registry_url']}\">{link_text}</a>"
+
+	# Create keyboard with tag parameter in button text
+	markup = InlineKeyboardMarkup(row_width=1)
+	markup.add(InlineKeyboardButton(get_text("button_confirm_change_tag", tag), callback_data=f"changeTag|{containerId}|{tag}"))
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
-	send_message(message=get_text("confirm_change_tag", containerName, tag), reply_markup=markup)
+	send_message(message=message, reply_markup=markup)
 
 def update(containerId, containerName):
 	x = send_message(message=get_text("updating", containerName))
+
+	# Get container to check if it's part of a Compose project
+	container = docker_manager.client.containers.get(containerId)
+	project_name = ComposeDetector.get_project_name(container)
+
+	# Perform the update
 	result = docker_manager.update(container_id=containerId, container_name=containerName, message=x, bot=bot)
 	delete_message(x.message_id)
 	send_message(message=result)
 
+	# If container is part of a Compose project, restart the entire project
+	if project_name:
+		project_info = docker_manager.get_project_info(project_name)
+		if project_info and project_info.get_container_count() > 1:
+			# Only restart project if it has more than 1 container
+			restart_compose_project_after_update(project_name)
+
 def change_tag_container(containerId, containerName):
 	try:
 		markup = InlineKeyboardMarkup(row_width = BUTTON_COLUMNS)
-		client = docker.from_env()
-		container = client.containers.get(containerId)
+		container = docker_manager.client.containers.get(containerId)
 		repo = container.attrs['Config']['Image'].split(":")[0]
 		tags = get_docker_tags(repo)
 
@@ -2818,7 +3589,7 @@ def change_tag_container(containerId, containerName):
 
 		botones = []
 		for tag in tags:
-			callback_data = f"confirmChangeTag|{containerId}|{containerName}|{tag}"
+			callback_data = f"confirmChangeTag|{containerId}|{tag}"
 			if len(callback_data) <= 64:
 				botones.append(InlineKeyboardButton(tag, callback_data=callback_data))
 			else:
@@ -2831,30 +3602,361 @@ def change_tag_container(containerId, containerName):
 		error(f"Error changing tag for container {containerName}. Error: [{e}]")
 		send_message(message=get_text("error_changing_tag", containerName))
 
+def get_image_comparison(containerId, containerName, new_tag=None):
+	"""
+	Get detailed comparison between current and new image.
+
+	Args:
+		containerId: Container ID
+		containerName: Container name
+		new_tag: Optional new tag to compare against. If None, pulls the same tag to check for updates.
+
+	Returns:
+		dict with comparison information or None if error
+	"""
+	try:
+		container = docker_manager.client.containers.get(containerId)
+		current_image = container.image
+		current_tag = container.attrs['Config']['Image']
+
+		# Current image info
+		current_digest = current_image.id.replace('sha256:', '')[:12]
+		current_size = current_image.attrs.get('Size', 0)
+		current_created = current_image.attrs.get('Created', '')
+
+		# Determine what image to pull for comparison
+		if new_tag:
+			# Changing tag: use the new tag
+			repo = current_tag.split(':')[0]
+			tag_to_pull = f"{repo}:{new_tag}"
+		else:
+			# Checking for update: pull the same tag
+			tag_to_pull = current_tag
+
+		# Pull new image (without applying to container)
+		debug(f"Pulling image {tag_to_pull} for comparison")
+		new_image = docker_manager.client.images.pull(tag_to_pull)
+
+		# New image info
+		new_digest = new_image.id.replace('sha256:', '')[:12]
+		new_size = new_image.attrs.get('Size', 0)
+		new_created = new_image.attrs.get('Created', '')
+
+		# Calculate differences
+		has_update = current_digest != new_digest
+		size_diff = new_size - current_size
+
+		# Format dates
+		from datetime import datetime
+		try:
+			current_date = datetime.fromisoformat(current_created.replace('Z', '+00:00'))
+			new_date = datetime.fromisoformat(new_created.replace('Z', '+00:00'))
+			current_date_str = current_date.strftime('%Y-%m-%d')
+			new_date_str = new_date.strftime('%Y-%m-%d')
+			days_diff = (new_date - current_date).days
+		except:
+			current_date_str = get_text('update_date_unknown')
+			new_date_str = get_text('update_date_unknown')
+			days_diff = 0
+
+		# Format size difference
+		if size_diff > 0:
+			size_diff_str = f"+{sizeof_fmt(size_diff)}"
+		elif size_diff < 0:
+			size_diff_str = f"-{sizeof_fmt(abs(size_diff))}"
+		else:
+			size_diff_str = get_text('update_no_size_change')
+
+		# Get Docker Hub description (optional, may fail for private images)
+		description = get_dockerhub_description(tag_to_pull)
+
+		# Clean up description: remove Markdown formatting and truncate
+		if description:
+			# Remove Markdown headers (# ## ### with or without space)
+			description = re.sub(r'^#+\s*', '', description, flags=re.MULTILINE)
+			# Remove Markdown links [text](url) -> text
+			description = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', description)
+			# Remove Markdown bold/italic (**text** or *text* or __text__)
+			description = re.sub(r'[*_]{1,2}([^*_]+)[*_]{1,2}', r'\1', description)
+			# Remove extra whitespace and newlines
+			description = ' '.join(description.split())
+			# Remove any remaining # symbols
+			description = description.replace('#', '')
+			# Truncate if still too long
+			if len(description) > 200:
+				description = description[:200].rsplit(' ', 1)[0] + '...'
+			# Final cleanup: if description is just "..." or empty, set to None
+			if not description or description.strip() in ['...', '.', '']:
+				description = None
+
+		# Build registry URL
+		registry_url, registry_name = build_registry_url(tag_to_pull)
+
+		# Keep the pulled image cached locally so that the subsequent update
+		# (or change-tag) operation does not need to re-download it.
+
+		return {
+			'has_update': has_update,
+			'current_tag': current_tag,
+			'new_tag': tag_to_pull,
+			'current_digest': current_digest,
+			'current_size': sizeof_fmt(current_size),
+			'new_digest': new_digest,
+			'new_size': sizeof_fmt(new_size),
+			'size_diff': size_diff_str,
+			'current_date': current_date_str,
+			'new_date': new_date_str,
+			'days_diff': days_diff,
+			'description': description,
+			'registry_url': registry_url,
+			'registry_name': registry_name
+		}
+	except Exception as e:
+		error(f"Error getting update comparison for {containerName}: {e}")
+		return None
+
+def sanitize_dockerhub_description(text):
+	"""
+	Sanitize a Docker Hub description so it renders cleanly inside a
+	Telegram HTML message:
+	- Convert <br> and common block-level closing tags to line breaks.
+	- Strip all remaining HTML tags.
+	- Decode HTML entities (e.g. &amp; -> &).
+	- Escape characters that are special in Telegram HTML (& < >).
+	- Collapse runs of whitespace and blank lines.
+	"""
+	if not text:
+		return text
+
+	# Line breaks for <br> variants and common block-level closers
+	text = re.sub(r'<\s*br\s*/?\s*>', '\n', text, flags=re.IGNORECASE)
+	text = re.sub(r'</\s*(p|div|li|tr|h[1-6])\s*>', '\n', text, flags=re.IGNORECASE)
+
+	# Strip any remaining HTML tags
+	text = re.sub(r'<[^>]+>', '', text)
+
+	# Decode HTML entities before re-escaping for Telegram
+	text = html.unescape(text)
+
+	# Escape Telegram HTML special chars (interpolated into an HTML message)
+	text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+	# Collapse whitespace: tabs/spaces -> single space, max one blank line
+	text = re.sub(r'[ \t]+', ' ', text)
+	text = re.sub(r' *\n *', '\n', text)
+	text = re.sub(r'\n{3,}', '\n\n', text)
+
+	return text.strip()
+
+def get_dockerhub_description(image_tag):
+	"""
+	Get description from Docker Hub API.
+	Returns truncated description or None if not available.
+	"""
+	try:
+		import requests
+
+		# Parse image name
+		# Format: [registry/]repository[:tag]
+		# Examples: nginx:latest, library/nginx:latest, ghcr.io/user/image:tag
+
+		parts = image_tag.split('/')
+
+		# Check if it's a Docker Hub image (no registry or docker.io)
+		if len(parts) == 1 or (len(parts) == 2 and '.' not in parts[0]):
+			# Docker Hub image
+			if len(parts) == 1:
+				# Official image (e.g., nginx:latest)
+				namespace = 'library'
+				repo_with_tag = parts[0]
+			else:
+				# User image (e.g., user/image:latest)
+				namespace = parts[0]
+				repo_with_tag = parts[1]
+
+			# Remove tag
+			repo = repo_with_tag.split(':')[0]
+
+			# Call Docker Hub API
+			url = f"https://hub.docker.com/v2/repositories/{namespace}/{repo}/"
+			response = requests.get(url, timeout=5)
+
+			if response.status_code == 200:
+				data = response.json()
+				full_description = data.get('full_description', '')
+				if full_description:
+					# Sanitize before truncating so we don't break HTML/entities
+					sanitized = sanitize_dockerhub_description(full_description)
+					if sanitized and len(sanitized) > 300:
+						return sanitized[:300].rsplit(' ', 1)[0] + '...'
+					return sanitized or None
+
+		return None
+	except Exception as e:
+		debug(f"Could not get Docker Hub description: {e}")
+		return None
+
+def build_registry_url(image_tag):
+	"""
+	Build registry URL for an image (Docker Hub, GitHub Container Registry, etc.).
+	Returns tuple (url, registry_name) or (None, None) if unknown.
+	"""
+	try:
+		parts = image_tag.split('/')
+
+		# Check if it's a Docker Hub image
+		if len(parts) == 1 or (len(parts) == 2 and '.' not in parts[0]):
+			if len(parts) == 1:
+				# Official image - use /_/ format
+				repo_with_tag = parts[0]
+				repo = repo_with_tag.split(':')[0]
+				return (f"https://hub.docker.com/_/{repo}", "Docker Hub")
+			else:
+				# User image - use /r/namespace/repo format
+				namespace = parts[0]
+				repo_with_tag = parts[1]
+				repo = repo_with_tag.split(':')[0]
+				return (f"https://hub.docker.com/r/{namespace}/{repo}", "Docker Hub")
+
+		# GitHub Container Registry (ghcr.io)
+		elif len(parts) >= 2 and parts[0] == 'ghcr.io':
+			# ghcr.io/owner/repo -> https://github.com/owner/repo/pkgs/container/repo
+			owner = parts[1]
+			repo_with_tag = parts[2] if len(parts) > 2 else parts[1]
+			repo = repo_with_tag.split(':')[0]
+			return (f"https://github.com/{owner}/{repo}/pkgs/container/{repo}", "GitHub")
+
+		# Google Container Registry (gcr.io)
+		elif len(parts) >= 2 and parts[0] in ['gcr.io', 'us.gcr.io', 'eu.gcr.io', 'asia.gcr.io']:
+			# gcr.io/project/image -> https://gcr.io/project/image
+			image_path = '/'.join(parts[1:]).split(':')[0]
+			return (f"https://{parts[0]}/{image_path}", "Google Container Registry")
+
+		# Quay.io
+		elif len(parts) >= 2 and parts[0] == 'quay.io':
+			# quay.io/namespace/repo -> https://quay.io/repository/namespace/repo
+			namespace = parts[1]
+			repo_with_tag = parts[2] if len(parts) > 2 else parts[1]
+			repo = repo_with_tag.split(':')[0]
+			return (f"https://quay.io/repository/{namespace}/{repo}", "Quay.io")
+
+		# Amazon ECR Public
+		elif len(parts) >= 2 and 'public.ecr.aws' in parts[0]:
+			# public.ecr.aws/namespace/repo -> https://gallery.ecr.aws/namespace/repo
+			namespace = parts[1]
+			repo_with_tag = parts[2] if len(parts) > 2 else parts[1]
+			repo = repo_with_tag.split(':')[0]
+			return (f"https://gallery.ecr.aws/{namespace}/{repo}", "Amazon ECR Public")
+
+		else:
+			# Unknown registry
+			return (None, None)
+	except:
+		return (None, None)
+
 def confirm_update(containerId, containerName):
-	markup = InlineKeyboardMarkup(row_width = 1)
-	markup.add(InlineKeyboardButton(get_text("button_confirm_update"), callback_data=f"update|{containerId}|{containerName}"))
-	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
-	send_message(message=get_text("confirm_update", containerName), reply_markup=markup)
+	debug(f"Running command: confirm_update for container {containerName}")
+
+	# Show loading message
+	loading_msg = send_message(message=get_text("fetching_image_data"))
+
+	# Get detailed comparison
+	comparison = get_image_comparison(containerId, containerName)
+
+	# Delete loading message
+	if loading_msg:
+		delete_message(loading_msg.message_id)
+
+	if not comparison:
+		# Fallback to simple confirmation if comparison fails
+		markup = create_confirm_cancel_keyboard(f"update|{containerId}", "button_confirm_update")
+		send_message(message=get_text("confirm_update", containerName), reply_markup=markup)
+		return
+
+	# Check if images are identical (no update available)
+	if comparison['current_digest'] == comparison['new_digest']:
+		# Same image, no update needed - save to cache as updated
+		image_with_tag = comparison['current_tag']
+		image_status = get_text("UPDATED_CONTAINER_TEXT")
+		save_container_update_status(image_with_tag, containerName, image_status)
+		send_message(message=get_text("already_updated", containerName))
+		return
+
+	# Build changes list
+	changes = []
+	changes.append(f"{get_text('update_size_change')}: {comparison['size_diff']}")
+	if comparison['days_diff'] > 0:
+		changes.append(f"{comparison['days_diff']} {get_text('update_days_newer')}")
+	elif comparison['days_diff'] < 0:
+		changes.append(f"{abs(comparison['days_diff'])} {get_text('update_days_older')}")
+
+	# Format changes (use bullet points only if multiple items)
+	if len(changes) > 1:
+		changes_text = "\n   • " + "\n   • ".join(changes)
+	else:
+		changes_text = "\n   " + changes[0]
+
+	# Build detailed message
+	message = f"""📦 <b>{containerName}</b>
+
+📌 <b>{get_text('update_current_image')}:</b>
+   {get_text('update_tag')}: <code>{comparison['current_tag']}</code>
+   {get_text('update_created')}: {comparison['current_date']}
+   {get_text('update_size')}: {comparison['current_size']}
+   {get_text('update_digest')}: <code>{comparison['current_digest']}</code>
+
+🆕 <b>{get_text('update_new_image')}:</b>
+   {get_text('update_tag')}: <code>{comparison['new_tag']}</code>
+   {get_text('update_created')}: {comparison['new_date']}
+   {get_text('update_size')}: {comparison['new_size']}
+   {get_text('update_digest')}: <code>{comparison['new_digest']}</code>
+
+📊 <b>{get_text('update_changes')}:</b>{changes_text}"""
+
+	if comparison['description']:
+		message += f"\n\n📝 <b>{get_text('update_description')}:</b>\n{comparison['description']}"
+
+	if comparison['registry_url']:
+		# Use dynamic text based on registry
+		if comparison['registry_name']:
+			link_text = f"{get_text('update_more_info_registry', comparison['registry_name'])}"
+		else:
+			link_text = get_text('update_more_info')
+		message += f"\n\n🔗 <a href=\"{comparison['registry_url']}\">{link_text}</a>"
+
+	markup = create_confirm_cancel_keyboard(f"update|{containerId}", "button_confirm_update")
+	send_message(message=message, reply_markup=markup)
 
 def confirm_update_selected(chatId, messageId):
-	_, selected = load_update_data(chatId, messageId)
+	containers, selected = load_update_data(chatId, messageId)
+	# Build id -> name map from cached containers (list of [id, name] pairs)
+	id_to_name = {cid: cname for cid, cname in containers}
+	# If only one container is selected, show the detailed comparison view
+	if len(selected) == 1:
+		container_id = next(iter(selected))
+		container_name = id_to_name.get(container_id)
+		if container_id and container_name:
+			clear_update_data(chatId, messageId)
+			confirm_update(container_id, container_name)
+			return
 	containersToUpdate = ""
-	for container in selected:
-		containersToUpdate += f"· <b>{container}</b>\n"
-	markup = InlineKeyboardMarkup(row_width = 1)
-	markup.add(InlineKeyboardButton(get_text("button_confirm_update"), callback_data=f"updateSelected|{messageId}"))
-	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+	for cid in selected:
+		containersToUpdate += f"· <b>{id_to_name.get(cid, cid)}</b>\n"
+	markup = create_confirm_cancel_keyboard(f"updateSelected|{messageId}", "button_confirm_update")
 	send_message(message=get_text("confirm_update_all", containersToUpdate), reply_markup=markup)
 
 def build_generic_keyboard(container_available, selected_containers, originalMessageId, action_type, button_text, button_text_all=None):
-	"""Generic keyboard builder for run/stop/restart actions"""
+	"""Generic keyboard builder for the multi-select update flow.
+
+	container_available: list of [id, name] pairs.
+	selected_containers: set of container IDs.
+	"""
 	markup = InlineKeyboardMarkup(row_width=BUTTON_COLUMNS)
 	botones = []
-	for container in container_available:
-		icono = ICON_CONTAINER_MARKED_FOR_UPDATE if container in selected_containers else ICON_CONTAINER_MARK_FOR_UPDATE
+	for cid, cname in container_available:
+		icono = ICON_CONTAINER_MARKED_FOR_UPDATE if cid in selected_containers else ICON_CONTAINER_MARK_FOR_UPDATE
 		botones.append(
-			InlineKeyboardButton(f"{icono} {container}", callback_data=f"toggle{action_type}|{container}")
+			InlineKeyboardButton(f"{icono} {cname}", callback_data=f"toggle{action_type}|{cid}")
 		)
 	markup.add(*botones)
 
@@ -2869,6 +3971,423 @@ def build_generic_keyboard(container_available, selected_containers, originalMes
 	fixed_buttons.append(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 
 	markup.add(*fixed_buttons)
+	return markup
+
+def build_hierarchical_keyboard(containers, action_type, bot_container_name, filter_standalone_status=None, filter_projects_with_all_status=None):
+	"""
+	Build hierarchical keyboard with Compose projects and standalone containers.
+	Level 1: Shows projects (📦) and standalone containers (🐳)
+
+	Args:
+		containers: List of container objects
+		action_type: Type of action (Restart, Stop, Run)
+		bot_container_name: Name of the bot container to exclude
+		filter_standalone_status: Optional list of statuses to filter standalone containers (e.g., ['running', 'restarting'])
+		filter_projects_with_all_status: Optional list of statuses - hide projects where ALL containers have these statuses
+
+	Returns:
+		InlineKeyboardMarkup: Keyboard with projects and standalone containers
+	"""
+	markup = InlineKeyboardMarkup(row_width=BUTTON_COLUMNS)
+
+	# Separate containers into projects and standalone
+	project_containers = {}  # {project_name: [containers]}
+	standalone_containers = []
+
+	for container in containers:
+		if container.name == bot_container_name:
+			continue
+
+		labels = container.labels or {}
+		project_name = labels.get('com.docker.compose.project')
+
+		if project_name:
+			if project_name not in project_containers:
+				project_containers[project_name] = []
+			project_containers[project_name].append(container)
+		else:
+			standalone_containers.append(container)
+
+	# Apply rule: projects with only 1 container are shown as standalone
+	single_container_projects = []
+	for project_name, project_conts in list(project_containers.items()):
+		if len(project_conts) == 1:
+			standalone_containers.extend(project_conts)
+			single_container_projects.append(project_name)
+
+	# Remove single-container projects from project_containers
+	for project_name in single_container_projects:
+		del project_containers[project_name]
+
+	# Build buttons
+	botones = []
+
+	# Add project buttons (sorted)
+	for project_name in sorted(project_containers.keys()):
+		# Apply project filter if specified (hide projects where ALL containers have the specified statuses)
+		if filter_projects_with_all_status:
+			project_info = docker_manager.get_project_info(project_name)
+			if project_info:
+				all_containers = project_info.containers
+				# Check if ALL containers in the project have one of the filtered statuses
+				if all_containers and all(c.status in filter_projects_with_all_status for c in all_containers):
+					continue  # Skip this project
+
+		# Get container count (filtered by status if applicable)
+		project_info = docker_manager.get_project_info(project_name)
+		if project_info:
+			if filter_standalone_status:
+				# Count only containers matching the filter
+				container_count = sum(1 for c in project_info.containers if c.status in filter_standalone_status)
+			else:
+				# Show total count
+				container_count = project_info.get_container_count()
+		else:
+			container_count = len(project_containers[project_name])
+		botones.append(
+			InlineKeyboardButton(
+				f"📦 {project_name} ({container_count})",
+				callback_data=f"enter{action_type}Project|{register_project_hash(project_name)}"
+			)
+		)
+
+	# Action configuration map for standalone containers
+	standalone_action_config = {
+		'delete': 'confirmDelete',
+		'exec': 'askCommand',
+		'logs': 'logs',
+		'logfile': 'logfile',
+		'checkupdate': 'checkUpdate',
+		'changetag': 'changeTagContainer',
+		'info': 'info',
+		'ports': 'ports'
+	}
+
+	# Add standalone container buttons (sorted: bot first, then running, then stopped - all alphabetically)
+	for container in sort_containers_by_priority(standalone_containers):
+		# Apply status filter if specified (only for standalone containers)
+		if filter_standalone_status and container.status not in filter_standalone_status:
+			continue
+
+		# Get status emoji
+		status_emoji = get_status_emoji(container.status, container.name, container)
+
+		# Determine callback action based on action_type
+		action_lower = action_type.lower()
+		if action_lower in standalone_action_config:
+			# Use configured callback for special actions
+			callback_action = standalone_action_config[action_lower]
+		elif container.status in ['running', 'restarting']:
+			# For running containers, use the action type (restart/stop)
+			callback_action = action_lower
+		else:
+			# For stopped containers, always use "run"
+			callback_action = "run"
+
+		botones.append(
+			InlineKeyboardButton(
+				f"{status_emoji} {container.name}",
+				callback_data=f"{callback_action}|{container.id[:CONTAINER_ID_LENGTH]}"
+			)
+		)
+
+	markup.add(*botones)
+
+	# Add cancel button
+	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+
+	return markup, standalone_containers
+
+def handle_enter_project_level2(action_type, project_name, chatId, messageId, filter_running_only=False):
+	"""
+	Generic function to handle "enter...Project" callbacks (Level 2).
+
+	Args:
+		action_type: Type of action ('restart', 'run', 'stop', 'delete', 'exec', 'logs', 'logfile', 'checkupdate', 'info', 'changetag', 'compose')
+		project_name: Name of the project
+		chatId: Chat ID for saving cache
+		messageId: Message ID for saving cache
+		filter_running_only: If True, only show running/restarting containers
+
+	Returns:
+		None (sends message directly)
+	"""
+	project_info = docker_manager.get_project_info(project_name)
+
+	if not project_info:
+		send_message(message=get_text("error_project_not_found", project_name))
+		return
+
+	# Configuration map for message keys
+	message_config = {
+		'delete': 'select_container_or_project_delete',
+		'restart': 'select_container_or_project',
+		'run': 'select_container_or_project',
+		'stop': 'select_container_or_project',
+	}
+
+	# Default message key
+	message_key = message_config.get(action_type.lower(), 'select_container_from_project')
+
+	# Build Level 2 keyboard using generic function
+	markup = build_compose_project_level2_keyboard(
+		project_info,
+		project_name,
+		action_type.lower(),
+		f'backTo{action_type}Level1',  # Use action_type as-is (already has correct capitalization)
+		filter_running_only=filter_running_only
+	)
+
+	# Save container cache
+	save_container_cache(chatId, messageId, project_info.containers)
+
+	# Send message
+	edit_message_text(
+		get_text(message_key, project_name),
+		chatId,
+		messageId,
+		reply_markup=markup
+	)
+
+def build_back_to_level1_keyboard(action_type, chatId, messageId, bot_container_name=CONTAINER_NAME):
+	"""
+	Generic function to build "backTo...Level1" keyboards.
+
+	Args:
+		action_type: Type of action ('Restart', 'Run', 'Stop', 'Delete', 'Exec', 'Logs', 'Logfile', 'Compose', 'CheckUpdate', 'Info', 'ChangeTag')
+		chatId: Chat ID for saving cache
+		messageId: Message ID for saving cache
+		bot_container_name: Name of bot container to exclude (None to include all)
+
+	Returns:
+		tuple: (markup, message_key) or None if no containers
+	"""
+	# Configuration map for each action type
+	action_config = {
+		'Restart': {
+			'no_containers_key': 'no_containers_to_restart',
+			'message_key': 'restart_a_container',
+			'exclude_bot': True,
+			'check_only_bot': True,
+			'filter_standalone_status': None,
+			'filter_projects_with_all_status': None
+		},
+		'Run': {
+			'no_containers_key': 'no_containers_to_start',
+			'message_key': 'start_a_container',
+			'exclude_bot': True,
+			'check_only_bot': True,
+			'filter_standalone_status': ['exited', 'stopped', 'paused', 'created'],
+			'filter_projects_with_all_status': ['running', 'restarting']
+		},
+		'Stop': {
+			'no_containers_key': 'no_containers_to_stop',
+			'message_key': 'stop_a_container',
+			'exclude_bot': True,
+			'check_only_bot': True,
+			'filter_standalone_status': ['running', 'restarting'],
+			'filter_projects_with_all_status': ['exited', 'stopped', 'paused', 'created']
+		},
+		'Delete': {
+			'no_containers_key': 'no_containers_to_delete',
+			'message_key': 'delete_container',
+			'exclude_bot': True,
+			'check_only_bot': True,
+			'filter_standalone_status': None,
+			'filter_projects_with_all_status': None
+		},
+		'Exec': {
+			'no_containers_key': 'no_containers_for_exec',
+			'message_key': 'exec_command_container',
+			'exclude_bot': True,
+			'check_only_bot': True,
+			'filter_standalone_status': ['running', 'restarting'],
+			'filter_projects_with_all_status': ['exited', 'paused', 'dead', 'created']
+		},
+		'Logs': {
+			'no_containers_key': 'no_containers_for_logs',
+			'message_key': 'logs_command_container',
+			'exclude_bot': False,
+			'check_only_bot': False,
+			'filter_standalone_status': None,
+			'filter_projects_with_all_status': None
+		},
+		'Logfile': {
+			'no_containers_key': 'no_containers_for_logs',
+			'message_key': 'show_logsfile',
+			'exclude_bot': False,
+			'check_only_bot': False,
+			'filter_standalone_status': None,
+			'filter_projects_with_all_status': None
+		},
+		'Compose': {
+			'no_containers_key': 'error_no_containers_available',
+			'message_key': 'show_compose',
+			'exclude_bot': False,
+			'check_only_bot': False,
+			'filter_standalone_status': None,
+			'filter_projects_with_all_status': None
+		},
+		'CheckUpdate': {
+			'no_containers_key': 'no_containers_for_checkupdate',
+			'message_key': 'checkupdate_command_container',
+			'exclude_bot': False,
+			'check_only_bot': False,
+			'filter_standalone_status': None,
+			'filter_projects_with_all_status': None
+		},
+		'Info': {
+			'no_containers_key': 'no_containers_for_info',
+			'message_key': 'info_command_container',
+			'exclude_bot': False,
+			'check_only_bot': False,
+			'filter_standalone_status': None,
+			'filter_projects_with_all_status': None
+		},
+		'ChangeTag': {
+			'no_containers_key': 'error_no_containers_available',
+			'message_key': 'change_tag_container',
+			'exclude_bot': False,
+			'check_only_bot': False,
+			'filter_standalone_status': None,
+			'filter_projects_with_all_status': None
+		}
+	}
+
+	config = action_config.get(action_type, {})
+	if not config:
+		return None
+
+	containers = docker_manager.list_containers()
+
+	# Check if no containers or only bot container
+	if not containers:
+		send_message(message=get_text(config['no_containers_key']))
+		return None
+
+	if config['check_only_bot'] and all(c.name == bot_container_name for c in containers):
+		send_message(message=get_text(config['no_containers_key']))
+		return None
+
+	# Build hierarchical keyboard
+	exclude_container = bot_container_name if config['exclude_bot'] else None
+	markup, standalone_containers = build_hierarchical_keyboard(
+		containers,
+		action_type,
+		exclude_container,
+		filter_standalone_status=config['filter_standalone_status'],
+		filter_projects_with_all_status=config['filter_projects_with_all_status']
+	)
+
+	# Save container cache for standalone containers
+	if standalone_containers:
+		save_container_cache(chatId, messageId, standalone_containers)
+
+	return markup, config['message_key']
+
+def build_compose_project_level2_keyboard(project_info, project_name, action_type, back_callback, filter_running_only=False):
+	"""
+	Generic function to build Level 2 keyboard for Compose projects.
+
+	Args:
+		project_info: Project information object
+		project_name: Name of the project
+		action_type: Type of action ('restart', 'run', 'stop', 'delete', 'exec', 'logs', 'logfile', 'info', 'changetag', 'checkupdate', 'ports')
+		back_callback: Callback data for the back button
+		filter_running_only: If True, only show running/restarting containers
+
+	Returns:
+		InlineKeyboardMarkup: Configured keyboard
+	"""
+	markup = InlineKeyboardMarkup(row_width=BUTTON_COLUMNS)
+	botones = []
+
+	# Action configuration map
+	action_config = {
+		'restart': {'icon': '🔄', 'button_key': 'button_restart_project', 'whole_callback': 'restartWholeProject', 'use_emoji': False},
+		'run': {'icon': '▶️', 'button_key': 'button_run_project', 'whole_callback': 'runWholeProject', 'use_emoji': False},
+		'stop': {'icon': '⏹️', 'button_key': 'button_stop_project', 'whole_callback': 'stopWholeProject', 'use_emoji': False},
+		'delete': {'icon': '🗑️', 'button_key': 'button_delete_project', 'whole_callback': 'confirmDeleteWholeProject', 'use_emoji': True, 'callback_prefix': 'confirmDelete'},
+		'exec': {'icon': '⚙️', 'button_key': None, 'whole_callback': None, 'use_emoji': True, 'callback_prefix': 'askCommand'},
+		'logs': {'icon': '📄', 'button_key': None, 'whole_callback': None, 'use_emoji': True},
+		'logfile': {'icon': '📁', 'button_key': None, 'whole_callback': None, 'use_emoji': True},
+		'info': {'icon': 'ℹ️', 'button_key': None, 'whole_callback': None, 'use_emoji': True},
+		'changetag': {'icon': '🏷️', 'button_key': None, 'whole_callback': None, 'use_emoji': True, 'callback_prefix': 'changeTagContainer'},
+		'checkupdate': {'icon': '🔄', 'button_key': None, 'whole_callback': None, 'use_emoji': True, 'callback_prefix': 'checkUpdate'},
+		'ports': {'icon': '🔌', 'button_key': None, 'whole_callback': None, 'use_emoji': True}
+	}
+
+	config = action_config.get(action_type.lower(), {})
+
+	# Add individual container buttons (sorted by status and service name)
+	for service_name in sort_project_services(project_info):
+		container = project_info.services[service_name]
+
+		# Filter running only if requested
+		if filter_running_only and container.status not in ['running', 'restarting']:
+			continue
+
+		# Determine status indicator
+		if action_type.lower() == 'checkupdate':
+			# Special case: use update emoji for checkupdate
+			status_indicator = get_update_emoji(container.name)
+		elif config.get('use_emoji', False):
+			status_indicator = get_status_emoji(container.status, container.name, container)
+		else:
+			status_indicator = "🟢" if container.status in ['running', 'restarting'] else "🔴"
+
+		# Determine callback action based on action_type and container status
+		if config.get('callback_prefix'):
+			# Use custom callback prefix (e.g., 'confirmDelete' instead of 'delete', 'checkUpdate' instead of 'checkupdate', 'changeTag' instead of 'changetag')
+			callback_action = config['callback_prefix']
+		elif action_type.lower() in ['delete', 'info', 'logs', 'logfile', 'ports']:
+			# These actions work regardless of status
+			callback_action = action_type.lower()
+		elif container.status in ['running', 'restarting']:
+			# For running containers, use the action type (restart/stop/exec)
+			callback_action = action_type.lower()
+		else:
+			# For stopped containers, always use "run"
+			callback_action = "run"
+
+		botones.append(
+			InlineKeyboardButton(
+				f"{status_indicator} {container.name}",
+				callback_data=f"{callback_action}|{container.id[:CONTAINER_ID_LENGTH]}"
+			)
+		)
+
+	# Add container buttons to markup
+	markup.add(*botones)
+
+	# Add bottom row with action button and back button (if configured)
+	bottom_buttons = []
+
+	# Special case for 'info': add "View project info" button
+	if action_type.lower() == 'info':
+		bottom_buttons.append(
+			InlineKeyboardButton(
+				get_text("button_view_project_info"),
+				callback_data=f"showProjectInfo|{register_project_hash(project_name)}"
+			)
+		)
+	elif config.get('whole_callback'):
+		bottom_buttons.append(
+			InlineKeyboardButton(
+				f"{config['icon']} {get_text(config['button_key'])}",
+				callback_data=f"{config['whole_callback']}|{register_project_hash(project_name)}"
+			)
+		)
+
+	bottom_buttons.append(
+		InlineKeyboardButton(
+			get_text('button_back'),
+			callback_data=back_callback
+		)
+	)
+
+	markup.add(*bottom_buttons)
+
 	return markup
 
 def is_admin(userId):
@@ -2891,23 +4410,158 @@ def display_containers(containers):
 	total_containers = len(containers)
 	running_containers = sum(1 for c in containers if c.status in ['running', 'restarting'])
 	stopped_containers = sum(1 for c in containers if c.status in ['exited', 'dead'])
-	pending_updates = sum(1 for c in containers if update_available(c))
 
-	# Build summary
+	# Cache update status and project info to avoid repeated calls
+	update_cache = {}  # {container.id: bool}
+	container_info_cache = {}  # {container.id: (project_name, service_name)}
+
+	# Separate containers into projects and standalone
+	project_containers = {}  # {project_name: [containers]}
+	standalone_containers = []
+	pending_updates = 0
+
+	for container in containers:
+		# Read labels directly for better performance
+		labels = container.labels or {}
+		project_name = labels.get('com.docker.compose.project')
+		service_name = labels.get('com.docker.compose.service')
+
+		# Cache the info
+		container_info_cache[container.id] = (project_name, service_name)
+
+		# Cache update status
+		has_update = update_available(container)
+		update_cache[container.id] = has_update
+		if has_update:
+			pending_updates += 1
+
+		if project_name:
+			if project_name not in project_containers:
+				project_containers[project_name] = []
+			project_containers[project_name].append(container)
+		else:
+			standalone_containers.append(container)
+
+	# Apply rule: projects with only 1 container are shown as standalone
+	single_container_projects = []
+	for project_name, project_conts in list(project_containers.items()):
+		if len(project_conts) == 1:
+			standalone_containers.extend(project_conts)
+			single_container_projects.append(project_name)
+
+	# Remove single-container projects from project_containers
+	for project_name in single_container_projects:
+		del project_containers[project_name]
+
+	# Build summary with project count
+	project_count = len(project_containers)
 	result = f"📊 <b>{get_text('containers')}:</b> {total_containers}\n"
+	if project_count > 0:
+		result += f"📦 <b>{get_text('status_projects')}:</b> {project_count}\n"
 	result += f"🟢 {get_text('status_running')}: {running_containers}\n"
 	result += f"🔴 {get_text('status_stopped')}: {stopped_containers}\n"
 	result += f"⬆️ {get_text('status_updates')}: {pending_updates}\n\n"
 
 	# Build container list
 	result += "<pre>"
-	for container in containers:
-		result += f"{get_status_emoji(container.status, container.name, container)} {container.name}"
-		if update_available(container):
+
+	# Separate bot container from other standalone containers
+	bot_container = None
+	other_standalone = []
+	if standalone_containers:
+		for container in standalone_containers:
+			if container.name == CONTAINER_NAME:
+				bot_container = container
+			else:
+				other_standalone.append(container)
+
+	# Show bot container first if present
+	if bot_container:
+		result += f"🐳 {get_status_emoji(bot_container.status, bot_container.name, bot_container)} {bot_container.name}"
+		if update_cache[bot_container.id]:
 			result += " ⬆️"
 		result += "\n"
+		# Add empty line after bot if there are projects or other containers
+		if project_containers or other_standalone:
+			result += "\n"
+
+	# Show multi-container projects after bot
+	for project_name in sorted(project_containers.keys()):
+		project_conts = project_containers[project_name]
+		container_count = len(project_conts)
+		result += f"📦 {project_name} ({get_text('compose_project_containers', container_count)})\n"
+
+		# Sort containers within project: running first, then stopped (all alphabetically)
+		sorted_project_conts = sort_containers_by_priority(project_conts)
+		for container in sorted_project_conts:
+			# Use cached info
+			_, service_name = container_info_cache[container.id]
+			result += f"  {get_status_emoji(container.status, container.name, container)} {service_name}"
+			if update_cache[container.id]:
+				result += " ⬆️"
+			result += "\n"
+		result += "\n"  # Empty line between projects
+
+	# Show other standalone containers last (running first, then stopped - all alphabetically)
+	if other_standalone:
+		sorted_standalone = sort_containers_by_priority(other_standalone)
+		for container in sorted_standalone:
+			result += f"🐳 {get_status_emoji(container.status, container.name, container)} {container.name}"
+			if update_cache[container.id]:
+				result += " ⬆️"
+			result += "\n"
+
 	result += "</pre>"
 	return result
+
+def sort_containers_by_priority(containers):
+	"""
+	Sort containers with consistent priority:
+	1. Bot container (CONTAINER_NAME) first
+	2. Running/restarting containers (alphabetically)
+	3. Stopped/paused/exited containers (alphabetically)
+
+	Args:
+		containers: List of container objects
+
+	Returns:
+		List of sorted containers
+	"""
+	def sort_key(container):
+		# Priority 1: Bot container first
+		is_bot = 0 if container.name == CONTAINER_NAME else 1
+
+		# Priority 2: Running containers before stopped
+		is_running = 0 if container.status in ['running', 'restarting'] else 1
+
+		# Priority 3: Alphabetical by name
+		name_lower = container.name.lower()
+
+		return (is_bot, is_running, name_lower)
+
+	return sorted(containers, key=sort_key)
+
+def sort_project_services(project_info):
+	"""
+	Sort project services with consistent priority:
+	1. Running/restarting containers (alphabetically by service name)
+	2. Stopped/paused/exited containers (alphabetically by service name)
+
+	Args:
+		project_info: ComposeProjectInfo object
+
+	Returns:
+		List of service names sorted by priority
+	"""
+	def sort_key(service_name):
+		container = project_info.services[service_name]
+		# Priority 1: Running containers before stopped
+		is_running = 0 if container.status in ['running', 'restarting'] else 1
+		# Priority 2: Alphabetical by service name
+		name_lower = service_name.lower()
+		return (is_running, name_lower)
+
+	return sorted(project_info.get_service_names(), key=sort_key)
 
 def get_container_health_status(container):
 	"""Get the health status of a container. Returns 'healthy', 'unhealthy', 'starting', or None"""
@@ -2963,8 +4617,7 @@ def get_update_emoji(containerName):
 		return status
 
 	try:
-		client = docker.from_env()
-		container = client.containers.get(container_id)
+		container = docker_manager.client.containers.get(container_id)
 		image_with_tag = container.attrs['Config']['Image']
 		image_status = read_container_update_status(image_with_tag, container.name)
 		if image_status and get_text("NEED_UPDATE_CONTAINER_TEXT") in image_status:
@@ -2973,6 +4626,135 @@ def get_update_emoji(containerName):
 		error(f"Could not check update: [{e}]")
 
 	return status
+
+def get_random_available_port():
+	"""
+	Generate a random available port (10000-60000) that is truly available on the system
+	Checks both Docker containers and system-level port availability
+	Returns the port number or None if no available port found
+	"""
+	return port_manager.get_random_available_port()
+
+def show_container_ports():
+	"""
+	Show all ports used by containers
+	"""
+	containers = docker_manager.list_containers()
+
+	# Sort containers: bot first, then running, then stopped (all alphabetically)
+	sorted_containers = sort_containers_by_priority(containers)
+
+	container_blocks = []
+
+	for container in sorted_containers:
+		try:
+			ports, is_host_network = port_manager.get_container_ports(container)
+			block = []
+
+			if is_host_network:
+				# Host network shares the host's network namespace: we don't
+				# list ports here, just indicate the container uses host mode.
+				if container.status in ['running', 'restarting']:
+					emoji = "🟢"
+					block.append(f"{emoji} {container.name} (host)")
+			elif ports:
+				status = container.status
+				emoji = "🟢" if status == "running" else "🔴"
+				# Remove duplicates and sort
+				unique_ports = sorted(set(ports), key=lambda x: (int(x.split('/')[0]), x.split('/')[1]))
+				block.append(f"{emoji} {container.name}:")
+				# Add each port on a separate line with indentation
+				for port in unique_ports:
+					block.append(f"  - {port}")
+
+			if block:
+				container_blocks.append(block)
+		except Exception as e:
+			debug(f"Error getting ports from container {container.name}: {e}")
+			continue
+
+	# Add inline keyboard with Generate, Check and Close buttons
+	markup = InlineKeyboardMarkup(row_width=2)
+	markup.add(
+		InlineKeyboardButton(get_text("ports_button_generate"), callback_data="generatePort"),
+		InlineKeyboardButton(get_text("ports_button_check"), callback_data="checkPort")
+	)
+	markup.add(
+		InlineKeyboardButton(get_text("button_close"), callback_data="cerrar")
+	)
+
+	if not container_blocks:
+		send_message(message=get_text("ports_no_containers"), reply_markup=markup)
+		return
+
+	# Pack blocks into chunks below Telegram's message size limit
+	max_length = 3500
+	header = get_text("ports_list_header") + "\n\n"
+	pre_open, pre_close = "<pre>", "</pre>"
+
+	def overhead(is_first_chunk):
+		return len(pre_open) + len(pre_close) + (len(header) if is_first_chunk else 0)
+
+	chunks = []
+	current_lines = []
+	current_len = 0
+
+	for block in container_blocks:
+		block_len = sum(len(line) + 1 for line in block)
+		is_first = (len(chunks) == 0)
+
+		# If adding this block would overflow the current chunk, flush it first
+		if current_lines and current_len + block_len + overhead(is_first) > max_length:
+			chunks.append(current_lines)
+			current_lines = []
+			current_len = 0
+			is_first = False
+
+		# If a single block is larger than the limit, split it line by line
+		if not current_lines and block_len + overhead(is_first) > max_length:
+			for line in block:
+				line_len = len(line) + 1
+				if current_lines and current_len + line_len + overhead(is_first) > max_length:
+					chunks.append(current_lines)
+					current_lines = []
+					current_len = 0
+					is_first = False
+				current_lines.append(line)
+				current_len += line_len
+		else:
+			current_lines.extend(block)
+			current_len += block_len
+
+	if current_lines:
+		chunks.append(current_lines)
+
+	# Send each chunk: header only on the first, keyboard only on the last
+	for i, chunk_lines in enumerate(chunks):
+		prefix = header if i == 0 else ""
+		message = f"{prefix}{pre_open}" + "\n".join(chunk_lines) + pre_close
+		is_last = (i == len(chunks) - 1)
+		send_message(message=message, reply_markup=markup if is_last else None)
+
+def ask_port_to_check(userId):
+	"""Ask user for a port number to check"""
+	debug(f"Running command: ask_port_to_check for user {userId}")
+	markup = InlineKeyboardMarkup(row_width=1)
+	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cancelCheckPort"))
+	x = send_message(message=get_text("ports_ask_port"), reply_markup=markup)
+	if x:
+		save_port_check_request_state(userId, x.message_id)
+
+def check_specific_port(port_number):
+	"""
+	Check if a specific port is available
+	Returns tuple (is_available, message)
+	"""
+	is_available, message_key, container_name = port_manager.check_port_availability(port_number)
+
+	if container_name:
+		return is_available, get_text(message_key, port_number, container_name)
+	else:
+		return is_available, get_text(message_key, port_number)
 
 def print_donors():
 	donors = get_array_donors_online()
@@ -3076,66 +4858,195 @@ def load_update_data(chat_id, message_id):
 	selected = data.get("selected", set())
 	if not isinstance(selected, set):
 		selected = set(selected)
+	# Reject pre-upgrade format (list of plain names instead of [id, name] pairs)
+	if containers and not all(isinstance(e, (list, tuple)) and len(e) >= 2 for e in containers):
+		return [], set()
 	return containers, selected
 
 def clear_update_data(chat_id, message_id):
 	delete_cache_item(f"update_data_{chat_id}_{message_id}")
 
-def save_action_data(chat_id, message_id, action_type, containers, selected=None):
-	"""Generic function to save selection data for run/stop/restart actions"""
-	if selected is None:
-		selected = set()
-	data = {
-		"containers": containers,
-		"selected": selected
-	}
-	write_cache_item(f"{action_type}_data_{chat_id}_{message_id}", data)
+# Generic cache helpers
+def _save_cache(prefix, identifier, value):
+	"""Generic save to cache with prefix and identifier"""
+	key = f"{prefix}_{identifier}"
+	write_cache_item(key, value)
 
-def load_action_data(chat_id, message_id, action_type):
-	"""Generic function to load selection data for run/stop/restart actions"""
-	data = read_cache_item(f"{action_type}_data_{chat_id}_{message_id}")
-	if data is None or not isinstance(data, dict):
-		return [], set()
-	containers = data.get("containers", [])
-	selected = data.get("selected", set())
-	if not isinstance(selected, set):
-		selected = set(selected)
-	return containers, selected
+def _load_cache(prefix, identifier):
+	"""Generic load from cache with prefix and identifier"""
+	key = f"{prefix}_{identifier}"
+	return read_cache_item(key)
 
-def clear_action_data(chat_id, message_id, action_type):
-	"""Generic function to clear selection data for run/stop/restart actions"""
-	delete_cache_item(f"{action_type}_data_{chat_id}_{message_id}")
+def _clear_cache(prefix, identifier):
+	"""Generic clear from cache with prefix and identifier"""
+	key = f"{prefix}_{identifier}"
+	delete_cache_item(key)
 
+# Generic keyboard helpers
+def create_simple_keyboard(button_text_key, callback_data="cerrar", row_width=1):
+	"""Create a simple keyboard with one button"""
+	markup = InlineKeyboardMarkup(row_width=row_width)
+	markup.add(InlineKeyboardButton(get_text(button_text_key), callback_data=callback_data))
+	return markup
+
+def create_confirm_cancel_keyboard(confirm_callback, confirm_text_key="button_confirm", cancel_callback="cerrar", cancel_text_key="button_cancel"):
+	"""Create a keyboard with confirm and cancel buttons"""
+	markup = InlineKeyboardMarkup(row_width=1)
+	markup.add(InlineKeyboardButton(get_text(confirm_text_key), callback_data=confirm_callback))
+	markup.add(InlineKeyboardButton(get_text(cancel_text_key), callback_data=cancel_callback))
+	return markup
+
+# Command cache functions
 def save_command_cache(command):
 	command_id = uuid.uuid4().hex[:8]
-	key = f"exec_{command_id}"
-	write_cache_item(key, command)
+	_save_cache("exec", command_id, command)
 	return command_id
 
 def load_command_cache(command_id):
-	key = f"exec_{command_id}"
-	return read_cache_item(key)
+	return _load_cache("exec", command_id)
 
 def clear_command_cache(command_id):
-	key = f"exec_{command_id}"
-	delete_cache_item(key)
+	_clear_cache("exec", command_id)
 
+# Command request state functions
 def save_command_request_state(user_id, containerId, containerName, deleteMessage):
-	key = f"pending_command_{user_id}"
 	value = {"containerId": containerId, "containerName": containerName, "deleteMessage": deleteMessage}
-	write_cache_item(key, value)
+	_save_cache("pending_command", user_id, value)
 
 def load_command_request_state(user_id):
-	key = f"pending_command_{user_id}"
-	return read_cache_item(key)
+	return _load_cache("pending_command", user_id)
 
 def clear_command_request_state(user_id):
-	key = f"pending_command_{user_id}"
-	delete_cache_item(key)
+	_clear_cache("pending_command", user_id)
+
+# Port check request state functions
+def save_port_check_request_state(user_id, deleteMessage):
+	value = {"deleteMessage": deleteMessage}
+	_save_cache("pending_port_check", user_id, value)
+
+def load_port_check_request_state(user_id):
+	return _load_cache("pending_port_check", user_id)
+
+def clear_port_check_request_state(user_id):
+	_clear_cache("pending_port_check", user_id)
+
+def save_container_cache(chat_id, message_id, containers):
+	"""
+	Guarda mapeo de container_id -> container_name para un mensaje con TTL de 24h
+
+	Args:
+		chat_id: ID del chat
+		message_id: ID del mensaje
+		containers: Lista de objetos container
+	"""
+	from datetime import datetime
+	cache_data = {
+		"_timestamp": datetime.now().isoformat(),
+		"containers": {}
+	}
+	for container in containers:
+		cache_data["containers"][container.id[:CONTAINER_ID_LENGTH]] = container.name
+
+	write_cache_item(f"containers_{chat_id}_{message_id}", cache_data)
+
+def load_container_name(chat_id, message_id, container_id):
+	"""
+	Obtiene el nombre de un contenedor desde la caché
+
+	Args:
+		chat_id: ID del chat
+		message_id: ID del mensaje
+		container_id: ID corto del contenedor
+
+	Returns:
+		str: Nombre del contenedor o None si no está en caché o expiró
+	"""
+	from datetime import datetime, timedelta
+	cache_data = read_cache_item(f"containers_{chat_id}_{message_id}")
+
+	if cache_data is None:
+		return None
+
+	# Check expiry (24 hours)
+	if "_timestamp" in cache_data:
+		try:
+			timestamp = datetime.fromisoformat(cache_data["_timestamp"])
+			if datetime.now() - timestamp > timedelta(hours=24):
+				clear_container_cache(chat_id, message_id)
+				return None
+		except:
+			pass
+
+	return cache_data.get("containers", {}).get(container_id)
+
+def clear_container_cache(chat_id, message_id):
+	"""Clears the container cache for a message"""
+	delete_cache_item(f"containers_{chat_id}_{message_id}")
+
+def get_container_name_by_id(container_id):
+	"""
+	Returns the name of a container by its ID from the Docker API
+
+	Args:
+		container_id: Container ID
+
+	Returns:
+		str: Container name or None if it doesn't exist
+	"""
+	try:
+		container = docker_manager.client.containers.get(container_id)
+		return container.name
+	except Exception as e:
+		debug(f"Container {container_id} not found: {e}")
+		return None
+
+def get_container_name(chat_id, message_id, container_id):
+	"""
+	Returns the container name from cache with fallback to the Docker API
+
+	Args:
+		chat_id: Chat ID
+		message_id: Message ID
+		container_id: Container ID
+
+	Returns:
+		str: Container name or None if it doesn't exist
+	"""
+	# 1. Try the cache
+	name = load_container_name(chat_id, message_id, container_id)
+	if name:
+		return name
+
+	# 2. Fallback to the Docker API
+	return get_container_name_by_id(container_id)
 
 def short_hash(text, length=30):
 	hash_obj = hashlib.sha256(text.encode())
 	return hash_obj.hexdigest()[:length]
+
+# --- Project-name hashing for callback_data (avoid 64-byte Telegram limit) ---
+PROJECT_HASH_CACHE_KEY = "project_hash_map"
+PROJECT_HASH_LENGTH = 8
+_project_hash_lock = threading.Lock()  # Atomic read-modify-write for the mapping
+
+def register_project_hash(project_name):
+	"""Return a short hash for project_name, persisting the mapping in cache."""
+	if not project_name:
+		return project_name
+	h = short_hash(project_name, PROJECT_HASH_LENGTH)
+	with _project_hash_lock:
+		mapping = read_cache_item(PROJECT_HASH_CACHE_KEY) or {}
+		if mapping.get(h) != project_name:
+			mapping[h] = project_name
+			write_cache_item(PROJECT_HASH_CACHE_KEY, mapping)
+	return h
+
+def resolve_project_name(value):
+	"""Resolve a hash back to a project name, or None if unknown."""
+	if not value:
+		return None
+	mapping = read_cache_item(PROJECT_HASH_CACHE_KEY) or {}
+	return mapping.get(value)
 
 def generate_docker_compose(container):
 	container_attrs = container.attrs['Config']
@@ -3183,10 +5094,10 @@ def add_if_present(dictionary, key, value):
 		dictionary[key] = value
 
 # ============================================================================
-# FUNCIONES INTERNAS DE TELEGRAM (sin cola)
+# INTERNAL TELEGRAM FUNCTIONS (without queue)
 # ============================================================================
 def _send_message_direct(chat_id, message, reply_markup, parse_mode, disable_web_page_preview):
-	"""Envía un mensaje directamente sin usar la cola"""
+	"""Sends a message directly without using the queue"""
 	try:
 		if message is None:
 			message = ""
@@ -3199,7 +5110,7 @@ def _send_message_direct(chat_id, message, reply_markup, parse_mode, disable_web
 		raise
 
 def _send_document_direct(chat_id, document, reply_markup, caption, parse_mode):
-	"""Envía un documento directamente sin usar la cola"""
+	"""Sends a document directly without using the queue"""
 	try:
 		if TELEGRAM_THREAD == 1:
 			return bot.send_document(chat_id, document=document, reply_markup=reply_markup, caption=caption, parse_mode=parse_mode)
@@ -3210,7 +5121,7 @@ def _send_document_direct(chat_id, document, reply_markup, caption, parse_mode):
 		raise
 
 def _delete_message_direct(chat_id, message_id):
-	"""Elimina un mensaje directamente sin usar la cola"""
+	"""Deletes a message directly without using the queue"""
 	try:
 		if chat_id and message_id:
 			bot.delete_message(chat_id, message_id)
@@ -3219,62 +5130,65 @@ def _delete_message_direct(chat_id, message_id):
 		pass
 
 def _edit_message_text_direct(chat_id, message_id, text, parse_mode, reply_markup):
-	"""Edita el texto de un mensaje directamente sin usar la cola"""
+	"""Edits the text of a message directly without using the queue"""
 	try:
 		return bot.edit_message_text(text, chat_id, message_id, parse_mode=parse_mode, reply_markup=reply_markup)
 	except Exception as e:
-		debug(f"No se pudo editar mensaje {message_id}: {e}")
+		debug(f"Could not edit message {message_id}: {e}")
 		raise
 
 def _edit_message_reply_markup_direct(chat_id, message_id, reply_markup):
-	"""Edita el markup de un mensaje directamente sin usar la cola"""
+	"""Edits the markup of a message directly without using the queue"""
 	try:
 		return bot.edit_message_reply_markup(chat_id, message_id, reply_markup=reply_markup)
 	except Exception as e:
-		debug(f"No se pudo editar markup del mensaje {message_id}: {e}")
+		debug(f"Could not edit markup of message {message_id}: {e}")
 		raise
 
 # ============================================================================
-# FUNCIONES PÚBLICAS CON COLA DE MENSAJES
+# PUBLIC FUNCTIONS USING THE MESSAGE QUEUE
 # ============================================================================
 def delete_message(message_id, chat_id=None):
-	"""Elimina un mensaje usando la cola (asíncrono)"""
+	"""Deletes a message using the queue (async)"""
 	if chat_id is None:
 		chat_id = TELEGRAM_GROUP
 	message_queue.add_message(_delete_message_direct, chat_id, message_id, wait_for_result=False)
 
 def send_message(chat_id=TELEGRAM_GROUP, message=None, reply_markup=None, parse_mode="html", disable_web_page_preview=True):
-	"""Envía un mensaje usando la cola (espera resultado para obtener message_id)"""
+	"""Sends a message using the queue (waits for result to get the message_id)"""
 	return message_queue.add_message(_send_message_direct, chat_id, message, reply_markup, parse_mode, disable_web_page_preview, wait_for_result=True)
 
 def send_message_to_notification_channel(chat_id=TELEGRAM_NOTIFICATION_CHANNEL, message=None, reply_markup=None, parse_mode="html", disable_web_page_preview=True):
-	"""Envía un mensaje al canal de notificaciones usando la cola"""
+	"""Sends a message to the notification channel using the queue"""
 	if TELEGRAM_NOTIFICATION_CHANNEL is None or TELEGRAM_NOTIFICATION_CHANNEL == '':
 		return send_message(chat_id=TELEGRAM_GROUP, message=message, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
 	return send_message(chat_id=chat_id, message=message, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
 
 def send_document(chat_id=TELEGRAM_GROUP, document=None, reply_markup=None, caption=None, parse_mode="html"):
-	"""Envía un documento usando la cola (espera resultado para obtener message_id)"""
+	"""Sends a document using the queue (waits for result to get the message_id)"""
 	return message_queue.add_message(_send_document_direct, chat_id, document, reply_markup, caption, parse_mode, wait_for_result=True)
 
 def edit_message_text(text, chat_id, message_id, parse_mode="html", reply_markup=None):
-	"""Edita el texto de un mensaje usando la cola (asíncrono, no bloquea si falla)"""
+	"""Edits the text of a message using the queue (async, does not block on failure)"""
 	message_queue.add_message(_edit_message_text_direct, chat_id, message_id, text, parse_mode, reply_markup, wait_for_result=False)
 
 def edit_message_reply_markup(chat_id, message_id, reply_markup):
-	"""Edita el markup de un mensaje usando la cola (asíncrono)"""
+	"""Edits the markup of a message using the queue (async)"""
 	message_queue.add_message(_edit_message_reply_markup_direct, chat_id, message_id, reply_markup, wait_for_result=False)
+
+def edit_message_reply_markup_sync(chat_id, message_id, reply_markup):
+	"""Edits the markup of a message using the queue (sync, waits for confirmation)"""
+	return message_queue.add_message(_edit_message_reply_markup_direct, chat_id, message_id, reply_markup, wait_for_result=True)
 
 def delete_updater():
 	container_id = get_container_id_by_name(UPDATER_CONTAINER_NAME)
 	if container_id:
-		client = docker.from_env()
-		container = client.containers.get(container_id)
+		container = docker_manager.client.containers.get(container_id)
 		try:
 			updater_image = container.image.id
 			container.stop()
 			container.remove()
-			client.images.remove(updater_image)
+			docker_manager.client.images.remove(updater_image)
 			send_message(message=get_text("updated_container", CONTAINER_NAME))
 		except Exception as e:
 			error(f"Could not delete container {UPDATER_CONTAINER_NAME}. Error: [{e}]")
@@ -3341,7 +5255,7 @@ def parse_cron_line(line):
 
 	# Validate action and parameters using SCHEDULE_PATTERNS
 	if action not in SCHEDULE_PATTERNS:
-		return None  # Acción no reconocida
+		return None  # Unknown action
 
 	pattern = SCHEDULE_PATTERNS[action]
 	required_params = pattern.get("params", [])
@@ -3423,8 +5337,7 @@ def is_valid_cron(cron_expression):
 
 def get_my_architecture():
 	try:
-		client = docker.from_env()
-		info = client.info()
+		info = docker_manager.client.info()
 		architecture_docker = info['Architecture']
 		return docker_architectures.get(architecture_docker, architecture_docker)
 	except Exception as e:
@@ -3473,7 +5386,16 @@ def get_docker_tags_from_DockerHub(repo_name):
 	if architecture is None:
 		return []
 
-	url = f"https://hub.docker.com/v2/repositories/{repo_name}/tags?page_size=99"
+	# Handle official Docker Hub images (e.g., redis, nginx, postgres)
+	# Official images need 'library/' prefix in the API URL
+	if '/' not in repo_name:
+		# Official image - add library/ prefix
+		full_repo_name = f"library/{repo_name}"
+	else:
+		# User image - use as-is
+		full_repo_name = repo_name
+
+	url = f"https://hub.docker.com/v2/repositories/{full_repo_name}/tags?page_size=99"
 	try:
 		response = requests.get(url, timeout=10)
 		if response.status_code == 404:
@@ -3532,6 +5454,7 @@ schedule_monitor = None
 
 if __name__ == '__main__':
 	debug(f"Starting bot version {VERSION}")
+
 	eventMonitor = DockerEventMonitor()
 	eventMonitor.demonio_event()
 	debug("Starting event monitor daemon")
@@ -3564,6 +5487,7 @@ if __name__ == '__main__':
 		telebot.types.BotCommand("/prune", get_text("menu_prune")),
 		telebot.types.BotCommand("/mute", get_text("menu_mute")),
 		telebot.types.BotCommand("/info", get_text("menu_info")),
+		telebot.types.BotCommand("/ports", get_text("menu_ports")),
 		telebot.types.BotCommand("/version", get_text("menu_version")),
 		telebot.types.BotCommand("/donate", get_text("menu_donate")),
 		telebot.types.BotCommand("/donors", get_text("menu_donors"))
