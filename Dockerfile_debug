@@ -9,7 +9,8 @@ RUN apk add --no-cache python3 py3-pip tzdata && \
     export PIP_BREAK_SYSTEM_PACKAGES=1 && \
     pip3 install --no-cache-dir debugpy
 
-COPY requirements.txt docker-controller-bot.py config.py docker_update.py logger.py message_queue.py /app/
+COPY requirements.txt docker-controller-bot.py config.py docker_update.py docker_compose_manager.py schedule_flow.py schedule_manager.py port_manager.py logger.py message_queue.py /app/
+COPY locale /app/locale
 
 # Install application dependencies
 RUN export PIP_BREAK_SYSTEM_PACKAGES=1 && \

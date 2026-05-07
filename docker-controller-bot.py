@@ -32,7 +32,7 @@ from port_manager import PortManager
 from logger import debug, error, warning
 from message_queue import MessageQueue
 
-VERSION = "4.0.0_rc3"
+VERSION = "4.0.0"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
