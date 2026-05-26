@@ -21,11 +21,23 @@ class ComposeProjectInfo:
         self.containers = containers
         self.services = {}  # service_name -> container
 
-        # Group containers by service
+        # First pass: containers with a real compose service label.
         for container in containers:
             service_name = container.labels.get(COMPOSE_SERVICE_LABEL)
             if service_name:
                 self.services[service_name] = container
+
+        # Second pass: containers that share the project label but are missing
+        # the service label (e.g. Nextcloud AIO spawns siblings tagged only
+        # with the project label). Use the container name as a stand-in so
+        # they show up in project menus, without ever overwriting a real
+        # service entry from the first pass.
+        for container in containers:
+            if container.labels.get(COMPOSE_SERVICE_LABEL):
+                continue
+            fallback_name = container.name
+            if fallback_name and fallback_name not in self.services:
+                self.services[fallback_name] = container
 
     def get_service_names(self) -> List[str]:
         """Returns the list of service names"""
@@ -262,5 +274,60 @@ class ComposeProjectManager:
             if service in service_to_container:
                 sorted_containers.append(service_to_container[service])
 
+        # Append orphan containers (project label set but no service label):
+        # they don't participate in the dependency graph but should still be
+        # acted upon by project-wide operations (run/stop/restart/delete).
+        for container in containers:
+            if not ComposeDetector.get_service_name(container):
+                sorted_containers.append(container)
+
         return sorted_containers
+
+    def get_transitive_dependents(self, containers: List, target_service_name: str) -> List:
+        """
+        Returns all containers in the project that depend (directly or transitively)
+        on the target service, sorted topologically (dependencies first).
+
+        The target service itself is NOT included in the result.
+
+        Args:
+            containers: List of containers in the Compose project
+            target_service_name: Service whose dependents we want to find
+
+        Returns:
+            list: Containers that depend on target_service_name, sorted by dependency order
+        """
+        # Build service -> container map and reverse-dependency graph (who depends on whom)
+        service_to_container = {}
+        for container in containers:
+            service_name = ComposeDetector.get_service_name(container)
+            if service_name:
+                service_to_container[service_name] = container
+
+        # reverse_deps[service] = [services that depend on it]
+        reverse_deps = {service: [] for service in service_to_container.keys()}
+        for container in containers:
+            service_name = ComposeDetector.get_service_name(container)
+            if not service_name:
+                continue
+            for dep in self.get_service_dependencies(container):
+                if dep in reverse_deps:
+                    reverse_deps[dep].append(service_name)
+
+        # BFS from target to collect all transitive dependents
+        dependents = set()
+        queue = list(reverse_deps.get(target_service_name, []))
+        while queue:
+            service = queue.pop(0)
+            if service in dependents or service == target_service_name:
+                continue
+            dependents.add(service)
+            queue.extend(reverse_deps.get(service, []))
+
+        if not dependents:
+            return []
+
+        # Sort dependents using the existing topological sort, then filter
+        dependent_containers = [service_to_container[s] for s in dependents if s in service_to_container]
+        return self.sort_containers_by_dependencies(dependent_containers)
 

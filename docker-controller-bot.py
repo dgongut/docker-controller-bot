@@ -32,7 +32,7 @@ from port_manager import PortManager
 from logger import debug, error, warning
 from message_queue import MessageQueue
 
-VERSION = "4.0.0"
+VERSION = "4.0.1"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -766,15 +766,16 @@ class DockerUpdateMonitor:
 							if EXTENDED_MESSAGES and not is_muted():
 								send_message_to_notification_channel(message=get_text("auto_update", container.name))
 							debug(f"Auto-updating container {container.name}")
-							x = None
-							if not is_muted():
-								x = send_message_to_notification_channel(message=get_text("updating", container.name))
-							result = docker_manager.update(container_id=container.id, container_name=container.name, message=x, bot=bot)
-							if not is_muted():
-								delete_message(x.message_id)
-								send_message_to_notification_channel(message=result)
+							# Build a send_fn that routes to the notification channel,
+							# or silently swallows messages (with a debug trace) when muted.
+							if is_muted():
+								def _auto_update_send_fn(msg):
+									debug(f"Message [{msg}] omitted because muted")
+									return None
 							else:
-								debug(f"Message [{result}] omitted because muted")
+								def _auto_update_send_fn(msg):
+									return send_message_to_notification_channel(message=msg)
+							perform_container_update(container.id, container.name, send_fn=_auto_update_send_fn)
 							continue
 						old_image_status = read_container_update_status(image_with_tag, container.name)
 						image_status = get_text("NEED_UPDATE_CONTAINER_TEXT")
@@ -801,6 +802,11 @@ class DockerUpdateMonitor:
 									save_container_cache(sent_message.chat.id, sent_message.message_id, [container])
 							else:
 								debug(f"Message [{get_text('available_update', container.name)}] omitted because muted")
+							# Persist the "already notified" status so the bot is not spammed
+							# every cycle. Other containers reach the equivalent save below
+							# via the grouped-updates flow; the bot's self-update has its
+							# own dedicated message and would otherwise skip it.
+							save_container_update_status(image_with_tag, container.name, image_status)
 							continue
 
 						should_notify = True
@@ -2162,7 +2168,7 @@ def button_controller(call):
 
 		# UPDATE
 		elif comando == "update":
-			update(containerId, containerName)
+			perform_container_update(containerId, containerName)
 
 		# CONFIRM UPDATE ALL
 		elif comando == "updateAll":
@@ -2171,7 +2177,7 @@ def button_controller(call):
 			sorted_containers = sort_containers_by_priority(containers)
 			for container in sorted_containers:
 				if update_available(container):
-					update(container.id, container.name)
+					perform_container_update(container.id, container.name)
 
 		# CONFIRM DELETE
 		elif comando == "confirmDelete":
@@ -2228,10 +2234,7 @@ def button_controller(call):
 			containerName = get_container_name(chatId, messageId, containerId)
 			if not containerName:
 				containerName = "Unknown"
-			x = send_message(message=get_text("updating", containerName))
-			result = docker_manager.update(container_id=containerId, container_name=containerName, message=x, bot=bot, tag=tag)
-			delete_message(x.message_id)
-			send_message(message=result)
+			perform_container_update(containerId, containerName, tag=tag)
 
 		# DELETE SCHEDULE
 		elif comando == "deleteSchedule":
@@ -2302,7 +2305,7 @@ def button_controller(call):
 					debug(f"Container {cid} not found")
 					continue
 				if update_available(container):
-					update(container.id, container.name)
+					perform_container_update(container.id, container.name)
 			clear_update_data(chatId, originalMessageId)
 
 
@@ -3208,56 +3211,120 @@ def restart_compose_project(project_name):
 	"""Restarts a complete Docker Compose project respecting dependency order."""
 	_execute_compose_project_action('restart', project_name)
 
-def restart_compose_project_after_update(project_name):
+def restart_dependents_after_update(project_name, updated_service_name, send_fn=None):
 	"""
-	Restarts a complete Docker Compose project after updating a container.
-	Shows informational messages about the project restart.
+	Restarts only the services that depend (directly or transitively) on the
+	updated service. Services unrelated to the updated one are left untouched.
+	The updated container itself is NOT restarted again (it was already
+	recreated and started by perform_update).
 
 	Args:
-		project_name: Compose project name to restart
+		project_name: Compose project name
+		updated_service_name: Service name of the container that was just updated
+		send_fn: Function used to send user-facing messages. Receives the message
+			text as its only argument. If None, defaults to send_message (admin chat).
 	"""
-	debug(f"Restarting project {project_name} after container update")
+	if send_fn is None:
+		send_fn = lambda msg: send_message(message=msg)
+
+	debug(f"Restarting dependents of service {updated_service_name} in project {project_name}")
 
 	# Get project information
 	project_info = docker_manager.get_project_info(project_name)
 	if not project_info:
-		send_message(message=get_text("error_project_not_found", project_name))
+		send_fn(get_text("error_project_not_found", project_name))
 		return
 
-	# Get containers sorted by dependencies
-	containers = project_info.containers
-	sorted_containers = docker_manager.compose_manager.sort_containers_by_dependencies(containers)
-	container_count = len(sorted_containers)
+	# Get only the transitive dependents of the updated service
+	dependents = docker_manager.compose_manager.get_transitive_dependents(
+		project_info.containers, updated_service_name
+	)
+
+	if not dependents:
+		debug(f"No dependents found for service {updated_service_name}, nothing to restart")
+		return
+
+	dependent_count = len(dependents)
 
 	# Initial message
-	send_message(message=get_text("restarting_project_after_update", project_name, container_count))
+	send_fn(get_text("restarting_dependent_services", updated_service_name, dependent_count))
 
-	# Stop containers in reverse order (dependents first)
-	for container in reversed(sorted_containers):
+	# Stop dependents in reverse order (deepest dependents first)
+	for container in reversed(dependents):
 		service_name = container.labels.get('com.docker.compose.service', container.name)
 		if EXTENDED_MESSAGES:
-			send_message(message=get_text("stopping_service", service_name))
+			send_fn(get_text("stopping_service", service_name))
 		try:
 			container.stop(timeout=10)
 		except Exception as e:
 			debug(f"Error stopping {service_name}: {e}")
 			if EXTENDED_MESSAGES:
-				send_message(message=get_text("error_stopping_service", service_name))
+				send_fn(get_text("error_stopping_service", service_name))
 
-	# Start containers in the correct order (dependencies first)
-	for container in sorted_containers:
+	# Start dependents in dependency order
+	for container in dependents:
 		service_name = container.labels.get('com.docker.compose.service', container.name)
 		if EXTENDED_MESSAGES:
-			send_message(message=get_text("starting_service", service_name))
+			send_fn(get_text("starting_service", service_name))
 		try:
 			container.start()
 		except Exception as e:
 			debug(f"Error starting {service_name}: {e}")
 			if EXTENDED_MESSAGES:
-				send_message(message=get_text("error_starting_service", service_name))
+				send_fn(get_text("error_starting_service", service_name))
 
 	# Final message
-	send_message(message=get_text("project_restarted_after_update_success", project_name, container_count))
+	send_fn(get_text("dependent_services_restarted_success", updated_service_name, dependent_count))
+
+
+def perform_container_update(container_id, container_name, tag=None, send_fn=None):
+	"""
+	Single entry point for container updates. Wraps the full flow:
+	  1. Capture Compose project/service info BEFORE the update (container is recreated).
+	  2. Send the "updating" progress message via send_fn.
+	  3. Delegate the actual update to docker_manager.update().
+	  4. Send the final result message via send_fn.
+	  5. If the container belongs to a Compose project, restart only the services
+	     that depend on it (directly or transitively).
+
+	All update triggers (/update, /changetag, auto-update daemon) should go
+	through this function so the behaviour is identical regardless of origin.
+
+	Args:
+		container_id: Container ID to update.
+		container_name: Container name (used in user-facing messages).
+		tag: Optional new image tag (used by the /changetag flow).
+		send_fn: Function used to send user-facing messages. Receives the message
+			text and returns the sent telegram Message (or None to suppress).
+			If None, defaults to send_message (admin chat).
+	"""
+	if send_fn is None:
+		send_fn = lambda msg: send_message(message=msg)
+
+	# Capture Compose info BEFORE the update, since the container object is recreated.
+	project_name = None
+	updated_service_name = None
+	try:
+		container_obj = docker_manager.client.containers.get(container_id)
+		project_name = ComposeDetector.get_project_name(container_obj)
+		updated_service_name = ComposeDetector.get_service_name(container_obj)
+	except Exception as e:
+		debug(f"Could not pre-fetch Compose info for {container_name}: {e}")
+
+	# Send the initial "updating" progress message
+	x = send_fn(get_text("updating", container_name))
+
+	# Perform the actual update
+	result = docker_manager.update(container_id=container_id, container_name=container_name, message=x, bot=bot, tag=tag)
+
+	# Remove the progress message and send the final result
+	if x is not None:
+		delete_message(x.message_id)
+	send_fn(result)
+
+	# Restart dependents if applicable
+	if project_name and updated_service_name:
+		restart_dependents_after_update(project_name, updated_service_name, send_fn=send_fn)
 
 def run_compose_project(project_name):
 	"""Starts a complete Docker Compose project respecting dependency order."""
@@ -3555,25 +3622,6 @@ def confirm_change_tag(containerId, containerName, tag):
 	markup.add(InlineKeyboardButton(get_text("button_confirm_change_tag", tag), callback_data=f"changeTag|{containerId}|{tag}"))
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 	send_message(message=message, reply_markup=markup)
-
-def update(containerId, containerName):
-	x = send_message(message=get_text("updating", containerName))
-
-	# Get container to check if it's part of a Compose project
-	container = docker_manager.client.containers.get(containerId)
-	project_name = ComposeDetector.get_project_name(container)
-
-	# Perform the update
-	result = docker_manager.update(container_id=containerId, container_name=containerName, message=x, bot=bot)
-	delete_message(x.message_id)
-	send_message(message=result)
-
-	# If container is part of a Compose project, restart the entire project
-	if project_name:
-		project_info = docker_manager.get_project_info(project_name)
-		if project_info and project_info.get_container_count() > 1:
-			# Only restart project if it has more than 1 container
-			restart_compose_project_after_update(project_name)
 
 def change_tag_container(containerId, containerName):
 	try:
@@ -4494,9 +4542,12 @@ def display_containers(containers):
 		# Sort containers within project: running first, then stopped (all alphabetically)
 		sorted_project_conts = sort_containers_by_priority(project_conts)
 		for container in sorted_project_conts:
-			# Use cached info
+			# Use cached info, fall back to container name when the compose
+			# service label is missing (e.g. Nextcloud AIO spawns siblings
+			# tagged only with the project label, no service label).
 			_, service_name = container_info_cache[container.id]
-			result += f"  {get_status_emoji(container.status, container.name, container)} {service_name}"
+			display_name = service_name or container.name
+			result += f"  {get_status_emoji(container.status, container.name, container)} {display_name}"
 			if update_cache[container.id]:
 				result += " ⬆️"
 			result += "\n"
