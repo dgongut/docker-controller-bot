@@ -32,7 +32,7 @@ from port_manager import PortManager
 from logger import debug, error, warning
 from message_queue import MessageQueue
 
-VERSION = "4.0.1"
+VERSION = "4.1.0"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -508,6 +508,43 @@ class DockerManager:
 				return result
 		except Exception as e:
 			error(f"Could not update container {container_name}. Error: [{e}]")
+			return get_text("error_updating_container", container_name)
+
+	def recreate_with_overrides(self, container_id, container_name, config_overrides):
+		"""
+		Recreates a container in-place using its current image, applying the
+		given overrides to the extracted configuration before recreation.
+		Skips the image pull (the image does not change) and the
+		`save_container_update_status` write (nothing was actually updated).
+
+		Used to rewrite HostConfig namespace fields (NetworkMode, IpcMode,
+		PidMode, UTSMode) that point at a container id which has just been
+		replaced (e.g. dependents of a recreated parent that share its
+		network/ipc/pid/uts namespace).
+		"""
+		try:
+			container = self.client.containers.get(container_id)
+			config = extract_container_config(container, tag=None)
+			if config_overrides:
+				config.update(config_overrides)
+			result = perform_update(
+				client=self.client,
+				container=container,
+				config=config,
+				container_name=container_name,
+				message=None,
+				edit_message_func=lambda *a, **kw: None,
+				debug_func=debug,
+				error_func=error,
+				get_text_func=get_text,
+				save_status_func=lambda *a, **kw: None,
+				container_id_length=CONTAINER_ID_LENGTH,
+				telegram_group=TELEGRAM_GROUP,
+				skip_pull=True,
+			)
+			return result
+		except Exception as e:
+			error(f"Could not recreate container {container_name}. Error: [{e}]")
 			return get_text("error_updating_container", container_name)
 
 	def force_check_update(self, container_id):
@@ -2092,8 +2129,25 @@ def button_controller(call):
 		if containerId and not containerName:
 			containerName = get_container_name(chatId, messageId, containerId)
 			if not containerName:
+				delete_message(messageId)
 				send_message(message=get_text("container_does_not_exist", containerId))
 				debug(f"Container {containerId} not found in cache or Docker")
+				return
+
+		# Notifications for containers that were later recreated (e.g. via compose)
+		# keep a stale short id in their callback_data. If we know the name, resolve
+		# it back to the current id so the operation targets the live container
+		# instead of failing with "container does not exist".
+		if containerId and containerName and comando not in PROJECT_COMMANDS:
+			current_id = get_container_id_by_name(containerName)
+			if current_id:
+				if current_id != containerId:
+					debug(f"Resolved stale id {containerId} to current id {current_id} via name {containerName}")
+					containerId = current_id
+			else:
+				delete_message(messageId)
+				send_message(message=get_text("container_does_not_exist", containerName))
+				debug(f"Container {containerName} (stale id {containerId}) not found in Docker")
 				return
 
 		# For project-scoped commands the "containerName" arg actually carries
@@ -3211,16 +3265,124 @@ def restart_compose_project(project_name):
 	"""Restarts a complete Docker Compose project respecting dependency order."""
 	_execute_compose_project_action('restart', project_name)
 
-def restart_dependents_after_update(project_name, updated_service_name, send_fn=None):
+def _container_has_healthcheck(container):
+	"""True if `container` has a non-NONE healthcheck configured."""
+	try:
+		container.reload()
+	except Exception:
+		return False
+	hc = (container.attrs.get('Config') or {}).get('Healthcheck') or {}
+	test = hc.get('Test')
+	return bool(test) and test != ['NONE']
+
+
+def _wait_for_container_healthy(container, timeout_seconds=180):
+	"""
+	Polls the container until its healthcheck reports 'healthy'.
+	Returns True if healthy before the deadline, False otherwise (timeout,
+	container gone, or no healthcheck status reported).
+	"""
+	deadline = time.time() + timeout_seconds
+	while time.time() < deadline:
+		try:
+			container.reload()
+		except Exception:
+			return False
+		state = container.attrs.get('State') or {}
+		health = state.get('Health') or {}
+		status = health.get('Status')
+		if status is None:
+			return False
+		if status == 'healthy':
+			return True
+		time.sleep(1)
+	return False
+
+
+def _wait_for_container_exit_success(container, timeout_seconds=180):
+	"""
+	Polls the container until it exits and returns True if ExitCode == 0,
+	False on timeout, non-zero exit, or container gone.
+	"""
+	deadline = time.time() + timeout_seconds
+	while time.time() < deadline:
+		try:
+			container.reload()
+		except Exception:
+			return False
+		state = container.attrs.get('State') or {}
+		if state.get('Status') == 'exited':
+			return state.get('ExitCode') == 0
+		time.sleep(1)
+	return False
+
+
+_NAMESPACE_HOSTCONFIG_FIELDS = (
+	('NetworkMode', 'network_mode'),
+	('IpcMode', 'ipc_mode'),
+	('PidMode', 'pid_mode'),
+	('UTSMode', 'uts_mode'),
+)
+
+
+def _compute_namespace_overrides(dep_container, old_parent_id, new_parent_id):
+	"""
+	Inspects a dependent container's HostConfig and returns a dict of config
+	overrides (in extract_container_config keys) to rewrite any namespace
+	field that points at `container:<old_parent_id>` to point at
+	`container:<new_parent_id>` instead. Returns {} when no rewrite is needed.
+	"""
+	if not old_parent_id or not new_parent_id:
+		return {}
+	try:
+		dep_container.reload()
+	except Exception as e:
+		debug(f"Could not reload {dep_container.name} to inspect HostConfig for namespace overrides: {e}")
+	host_config = dep_container.attrs.get('HostConfig') or {}
+	old_refs = {f"container:{old_parent_id}", f"container:{old_parent_id[:12]}"}
+	new_ref = f"container:{new_parent_id}"
+	overrides = {}
+	for hc_field, cfg_key in _NAMESPACE_HOSTCONFIG_FIELDS:
+		val = host_config.get(hc_field) or ''
+		if val in old_refs:
+			overrides[cfg_key] = new_ref
+	# Dependents sharing a namespace with the (now-replaced) parent typically
+	# exit when the parent is removed. Force the recreation to start the new
+	# container regardless of the current (exited) status, mirroring the
+	# stop+start behaviour applied to non-namespace dependents.
+	if overrides:
+		overrides['is_running'] = True
+	return overrides
+
+
+def restart_dependents_after_update(project_name, updated_service_name, new_parent_container=None, old_parent_id=None, send_fn=None):
 	"""
 	Restarts only the services that depend (directly or transitively) on the
 	updated service. Services unrelated to the updated one are left untouched.
 	The updated container itself is NOT restarted again (it was already
 	recreated and started by perform_update).
 
+	When at least one dependent declared `condition: service_healthy` (or
+	`service_completed_successfully`) on the updated service in its compose
+	file, we honor that condition by waiting on `new_parent_container` before
+	starting the dependents back up. Falls back to immediate start when no
+	such condition is declared, or when the parent has no healthcheck.
+
+	When a dependent's `HostConfig.NetworkMode` / `IpcMode` / `PidMode` /
+	`UTSMode` points at the old parent container id (e.g. compose's
+	`network_mode: "service:<parent>"`), a simple stop+start cannot
+	re-attach the dead namespace. Those dependents are instead recreated
+	in-place via `recreate_with_overrides` so their HostConfig is rewritten
+	to reference the new parent id.
+
 	Args:
 		project_name: Compose project name
 		updated_service_name: Service name of the container that was just updated
+		new_parent_container: The freshly recreated container for the updated
+			service, used to wait on its healthcheck. Optional.
+		old_parent_id: The container id of the parent BEFORE the update, used
+			to detect dependents whose HostConfig still references the dead id.
+			Optional; when None, namespace recreation is skipped.
 		send_fn: Function used to send user-facing messages. Receives the message
 			text as its only argument. If None, defaults to send_message (admin chat).
 	"""
@@ -3246,35 +3408,101 @@ def restart_dependents_after_update(project_name, updated_service_name, send_fn=
 
 	dependent_count = len(dependents)
 
-	# Initial message
-	send_fn(get_text("restarting_dependent_services", updated_service_name, dependent_count))
+	# Prefer the parent's container name (what shows up in `docker ps`) over
+	# the compose service name when addressing the user; keep the service
+	# name in debug logs for compose-level traceability.
+	parent_display_name = new_parent_container.name if new_parent_container is not None else updated_service_name
 
-	# Stop dependents in reverse order (deepest dependents first)
+	# Initial message
+	send_fn(get_text("restarting_dependent_services", parent_display_name, dependent_count))
+
+	# Pre-compute which dependents need full recreation because they share a
+	# namespace with the (now-replaced) parent container id. Those are NOT
+	# stopped here; recreate_with_overrides will handle their lifecycle so
+	# the extracted config keeps is_running=True for them.
+	new_parent_id = new_parent_container.id if new_parent_container is not None else None
+	namespace_overrides = {}
+	for container in dependents:
+		overrides = _compute_namespace_overrides(container, old_parent_id, new_parent_id)
+		if overrides:
+			namespace_overrides[container.id] = overrides
+
+	# Stop dependents in reverse order (deepest dependents first), skipping
+	# those that will be fully recreated. Per-service stop progress is logged
+	# only in debug; the Telegram user gets a single summary at the end (and
+	# explicit error messages if a stop fails).
 	for container in reversed(dependents):
+		if container.id in namespace_overrides:
+			continue
 		service_name = container.labels.get('com.docker.compose.service', container.name)
-		if EXTENDED_MESSAGES:
-			send_fn(get_text("stopping_service", service_name))
 		try:
 			container.stop(timeout=10)
 		except Exception as e:
 			debug(f"Error stopping {service_name}: {e}")
 			if EXTENDED_MESSAGES:
-				send_fn(get_text("error_stopping_service", service_name))
+				send_fn(get_text("error_stopping_service", container.name))
 
-	# Start dependents in dependency order
+	# Honor depends_on conditions before restarting: if any dependent declared
+	# `service_healthy` / `service_completed_successfully` on the updated
+	# service, wait for the new parent to satisfy it.
+	needs_healthy = False
+	needs_completed = False
+	for container in dependents:
+		cond = docker_manager.compose_manager.get_dependency_condition(container, updated_service_name)
+		if cond == 'service_healthy':
+			needs_healthy = True
+		elif cond == 'service_completed_successfully':
+			needs_completed = True
+
+	if new_parent_container is not None and (needs_healthy or needs_completed):
+		if needs_healthy:
+			if _container_has_healthcheck(new_parent_container):
+				debug(f"Waiting for {updated_service_name} to become healthy before starting dependents")
+				if EXTENDED_MESSAGES:
+					send_fn(get_text("waiting_for_healthy", parent_display_name))
+				t0 = time.time()
+				ok = _wait_for_container_healthy(new_parent_container, timeout_seconds=180)
+				if ok:
+					debug(f"{updated_service_name} became healthy after {time.time()-t0:.1f}s")
+					if EXTENDED_MESSAGES:
+						send_fn(get_text("healthy_ready", parent_display_name))
+				else:
+					debug(f"Timed out waiting for {updated_service_name} to be healthy; starting dependents anyway")
+			else:
+				debug(f"{updated_service_name} declared as service_healthy dependency but has no healthcheck; not waiting")
+		if needs_completed:
+			debug(f"Waiting for {updated_service_name} to exit successfully before starting dependents")
+			_wait_for_container_exit_success(new_parent_container, timeout_seconds=180)
+
+	# Start dependents in dependency order. Dependents whose namespace
+	# references the old parent id are recreated in-place (rewriting the
+	# reference) instead of merely started, since starting a container with
+	# a stale `container:<id>` namespace fails. Per-service start progress is
+	# logged only in debug; recreation IS announced (it's an unusual event)
+	# and errors are reported in both paths.
 	for container in dependents:
 		service_name = container.labels.get('com.docker.compose.service', container.name)
-		if EXTENDED_MESSAGES:
-			send_fn(get_text("starting_service", service_name))
+		overrides = namespace_overrides.get(container.id)
+		if overrides:
+			debug(f"Recreating {service_name} to rewrite namespace -> new parent {updated_service_name} (id={new_parent_id[:12]}); overrides={list(overrides.keys())}")
+			if EXTENDED_MESSAGES:
+				send_fn(get_text("recreating_namespace_dependent", container.name))
+			try:
+				docker_manager.recreate_with_overrides(container.id, container.name, overrides)
+			except Exception as e:
+				debug(f"Error recreating {service_name}: {e}")
+				if EXTENDED_MESSAGES:
+					send_fn(get_text("error_recreating_namespace_dependent", container.name))
+			continue
 		try:
 			container.start()
 		except Exception as e:
 			debug(f"Error starting {service_name}: {e}")
 			if EXTENDED_MESSAGES:
-				send_fn(get_text("error_starting_service", service_name))
+				send_fn(get_text("error_starting_service", container.name))
 
 	# Final message
-	send_fn(get_text("dependent_services_restarted_success", updated_service_name, dependent_count))
+	send_fn(get_text("dependent_services_restarted_success", parent_display_name, dependent_count))
 
 
 def perform_container_update(container_id, container_name, tag=None, send_fn=None):
@@ -3304,10 +3532,12 @@ def perform_container_update(container_id, container_name, tag=None, send_fn=Non
 	# Capture Compose info BEFORE the update, since the container object is recreated.
 	project_name = None
 	updated_service_name = None
+	old_parent_id = None
 	try:
 		container_obj = docker_manager.client.containers.get(container_id)
 		project_name = ComposeDetector.get_project_name(container_obj)
 		updated_service_name = ComposeDetector.get_service_name(container_obj)
+		old_parent_id = container_obj.id
 	except Exception as e:
 		debug(f"Could not pre-fetch Compose info for {container_name}: {e}")
 
@@ -3322,9 +3552,23 @@ def perform_container_update(container_id, container_name, tag=None, send_fn=Non
 		delete_message(x.message_id)
 	send_fn(result)
 
-	# Restart dependents if applicable
+	# Restart dependents if applicable. Resolve the freshly recreated container
+	# by name (Docker enforces unique container names, and perform_update keeps
+	# the original name) so dependents can wait on its healthcheck when their
+	# compose `depends_on` declared `condition: service_healthy`.
 	if project_name and updated_service_name:
-		restart_dependents_after_update(project_name, updated_service_name, send_fn=send_fn)
+		new_parent_container = None
+		try:
+			new_parent_container = docker_manager.client.containers.get(container_name)
+		except Exception as e:
+			debug(f"Could not fetch new container after update for {container_name}: {e}")
+		restart_dependents_after_update(
+			project_name,
+			updated_service_name,
+			new_parent_container=new_parent_container,
+			old_parent_id=old_parent_id,
+			send_fn=send_fn,
+		)
 
 def run_compose_project(project_name):
 	"""Starts a complete Docker Compose project respecting dependency order."""
@@ -4983,7 +5227,7 @@ def clear_port_check_request_state(user_id):
 
 def save_container_cache(chat_id, message_id, containers):
 	"""
-	Guarda mapeo de container_id -> container_name para un mensaje con TTL de 24h
+	Guarda mapeo de container_id -> container_name para un mensaje con TTL de 7 días
 
 	Args:
 		chat_id: ID del chat
@@ -5018,11 +5262,11 @@ def load_container_name(chat_id, message_id, container_id):
 	if cache_data is None:
 		return None
 
-	# Check expiry (24 hours)
+	# Check expiry (7 days)
 	if "_timestamp" in cache_data:
 		try:
 			timestamp = datetime.fromisoformat(cache_data["_timestamp"])
-			if datetime.now() - timestamp > timedelta(hours=24):
+			if datetime.now() - timestamp > timedelta(days=7):
 				clear_container_cache(chat_id, message_id)
 				return None
 		except:

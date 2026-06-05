@@ -247,7 +247,7 @@ def extract_container_config(container, tag=None):
 
 def perform_update(client, container, config, container_name, message, edit_message_func,
 				   debug_func, error_func, get_text_func, save_status_func,
-				   container_id_length, telegram_group):
+				   container_id_length, telegram_group, skip_pull=False):
 	"""
 	Perform the actual container update with the extracted configuration.
 	Uses a lock to prevent concurrent updates of the same container.
@@ -265,6 +265,9 @@ def perform_update(client, container, config, container_name, message, edit_mess
 		save_status_func: Function to save update status
 		container_id_length: Length of container ID to display
 		telegram_group: Telegram group ID
+		skip_pull: When True, skip the image pull step. Used for in-place
+			recreation with the same image (e.g. when a dependent must be
+			recreated to point at a new parent container id).
 
 	Returns:
 		str: Success or error message
@@ -281,14 +284,14 @@ def perform_update(client, container, config, container_name, message, edit_mess
 	try:
 		return _perform_update_locked(client, container, config, container_name, message, edit_message_func,
 									   debug_func, error_func, get_text_func, save_status_func,
-									   container_id_length, telegram_group)
+									   container_id_length, telegram_group, skip_pull=skip_pull)
 	finally:
 		container_lock.release()
 
 
 def _perform_update_locked(client, container, config, container_name, message, edit_message_func,
 						   debug_func, error_func, get_text_func, save_status_func,
-						   container_id_length, telegram_group):
+						   container_id_length, telegram_group, skip_pull=False):
 	"""
 	Internal function that performs the actual update (called with lock held).
 	"""
@@ -301,18 +304,21 @@ def _perform_update_locked(client, container, config, container_name, message, e
 
 	try:
 		# Pull new image with timeout validation
-		if message:
-			edit_message_func(get_text_func("updating_pulling_image", container_name), telegram_group, message.message_id)
+		if skip_pull:
+			debug_func(f"[PULL_IMAGE] Skipping pull for {container_name} (in-place recreation)")
+		else:
+			if message:
+				edit_message_func(get_text_func("updating_pulling_image", container_name), telegram_group, message.message_id)
 
-		try:
-			debug_func(f"[PULL_IMAGE] Starting pull of {config['image']}")
-			pulled_image = client.images.pull(config['image'])
-			if not pulled_image or not pulled_image.id:
-				raise Exception("Image pull returned invalid image object")
-			debug_func(f"[PULL_IMAGE] Image pulled successfully: {pulled_image.id[:container_id_length]}")
-		except Exception as pull_error:
-			error_func(get_text_func("error_pulling_image", config['image'], str(pull_error)))
-			raise Exception(f"Failed to pull image {config['image']}: {pull_error}")
+			try:
+				debug_func(f"[PULL_IMAGE] Starting pull of {config['image']}")
+				pulled_image = client.images.pull(config['image'])
+				if not pulled_image or not pulled_image.id:
+					raise Exception("Image pull returned invalid image object")
+				debug_func(f"[PULL_IMAGE] Image pulled successfully: {pulled_image.id[:container_id_length]}")
+			except Exception as pull_error:
+				error_func(get_text_func("error_pulling_image", config['image'], str(pull_error)))
+				raise Exception(f"Failed to pull image {config['image']}: {pull_error}")
 
 		# Stop container
 		if message:
@@ -539,8 +545,11 @@ def _perform_update_locked(client, container, config, container_name, message, e
 			error_func(get_text_func("error_deleting_container_with_error", container_name, e))
 			raise Exception(f"Failed to delete old container: {e}")
 
-		# Delete old image (using saved ID, not container.image.id which is now invalid)
-		if old_image_id:
+		# Delete old image (using saved ID, not container.image.id which is now invalid).
+		# In skip_pull mode the "old" image is the same image the new container
+		# was just created from, so attempting to remove it would fail (or worse,
+		# leave dangling references); skip the delete entirely.
+		if old_image_id and not skip_pull:
 			try:
 				debug_func(f"[DELETE_IMAGE] Removing old image {old_image_id[:container_id_length]}")
 				client.images.remove(old_image_id)

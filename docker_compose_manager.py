@@ -214,6 +214,36 @@ class ComposeProjectManager:
 
         return dependencies
 
+    def get_dependency_condition(self, container, parent_service_name: str) -> Optional[str]:
+        """
+        Returns the depends_on condition that `container` declared for
+        `parent_service_name`, as set by Docker Compose in the
+        `com.docker.compose.depends_on` label.
+
+        Possible values: 'service_started', 'service_healthy',
+        'service_completed_successfully', or None when the label has no
+        entry for that parent (or uses the short list form, which has no
+        explicit condition and is equivalent to 'service_started').
+        """
+        depends_on = container.labels.get(COMPOSE_DEPENDS_ON_LABEL, '')
+        if not depends_on:
+            return None
+
+        for dep in depends_on.split(','):
+            dep = dep.strip()
+            if not dep:
+                continue
+            parts = dep.split(':')
+            if parts[0].strip() != parent_service_name:
+                continue
+            # Long form: "service:condition[:restart]"
+            if len(parts) >= 2 and parts[1].strip():
+                return parts[1].strip()
+            # Short form: bare service name, no explicit condition
+            return 'service_started'
+
+        return None
+
     def sort_containers_by_dependencies(self, containers: List) -> List:
         """
         Sorts containers by their dependencies (topological sort).
