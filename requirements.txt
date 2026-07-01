@@ -1,5 +1,5 @@
-requests==2.33.1
-pyTelegramBotAPI==4.33.0
+requests==2.34.2
+pyTelegramBotAPI==4.34.0
 docker==7.1.0
 PyYAML==6.0.3
 croniter==6.2.2

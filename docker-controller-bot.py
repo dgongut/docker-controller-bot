@@ -7,6 +7,7 @@ import os
 import pickle
 import re
 import requests
+import shlex
 import sys
 import telebot
 import threading
@@ -32,7 +33,7 @@ from port_manager import PortManager
 from logger import debug, error, warning
 from message_queue import MessageQueue
 
-VERSION = "4.1.0"
+VERSION = "4.1.1"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -687,15 +688,39 @@ class DockerManager:
 	def execute_command(self, container_id, container_name, command):
 		try:
 			container = self.client.containers.get(container_id)
-			exec_command = ['sh', '-c', command]
-			result = container.exec_run(exec_command)
-			output = result.output.decode('utf-8')
-			if not output:
-				output = get_text("command_executed_without_output")
-			return output
+			# Some minimal/distroless images do not ship a shell.
+			# Try common shells first and, if none is available, run the command directly.
+			for exec_command in (['sh', '-c', command], ['bash', '-c', command]):
+				try:
+					result = container.exec_run(exec_command)
+				except docker.errors.APIError:
+					continue
+				if not self._is_executable_missing(result):
+					return self._decode_exec_output(result)
+			# No shell available: execute the command tokens directly.
+			try:
+				direct_command = shlex.split(command)
+			except ValueError:
+				direct_command = command
+			result = container.exec_run(direct_command)
+			return self._decode_exec_output(result)
 		except Exception as e:
 			error(f"Error executing command [{command}] in container {container_name}. Error: [{e}]")
 			return get_text("error_executing_command_container", command, container_name)
+
+	def _decode_exec_output(self, result):
+		output = result.output.decode('utf-8') if result.output else ''
+		if not output:
+			output = get_text("command_executed_without_output")
+		return output
+
+	def _is_executable_missing(self, result):
+		output = (result.output or b'').decode('utf-8', errors='replace')
+		if "OCI runtime exec failed" in output or "unable to start container process" in output:
+			return True
+		if result.exit_code in (126, 127) and ("executable file not found" in output or "no such file or directory" in output):
+			return True
+		return False
 
 # Instantiate the DockerManager
 docker_manager = DockerManager()
@@ -3771,21 +3796,22 @@ def confirm_execute_command(containerId, containerName, command):
 	debug(f"Running command: confirm_exec for container {containerName} with command [{command}]")
 	commandId = save_command_cache(command)
 	markup = create_confirm_cancel_keyboard(f"exec|{containerId}|{commandId}", "button_confirm", f"cancelExec|{commandId}")
-	send_message(message=get_text("confirm_exec", containerName, command), reply_markup=markup)
+	send_message(message=get_text("confirm_exec", containerName, html.escape(command)), reply_markup=markup)
 
 def execute_command(containerId, containerName, command, sendMessage=True):
 	debug(f"Running command: exec for container {containerName} with command [{command}]")
 	result = docker_manager.execute_command(container_id=containerId, container_name=containerName, command=command)
 	if sendMessage:
 		max_length = 3500
+		escaped_command = html.escape(command)
 		if len(result) <= max_length:
-			send_message(message=get_text("executed_command", containerName, command, result))
+			send_message(message=get_text("executed_command", containerName, escaped_command, html.escape(result)))
 		else:
 			first_part = result[:max_length]
-			send_message(message=get_text("executed_command", containerName, command, first_part))
+			send_message(message=get_text("executed_command", containerName, escaped_command, html.escape(first_part)))
 			for i in range(max_length, len(result), max_length):
 				part = result[i:i + max_length]
-				send_message(message=f"<pre><code>{part}</code></pre>")
+				send_message(message=f"<pre><code>{html.escape(part)}</code></pre>")
 
 def confirm_change_tag(containerId, containerName, tag):
 	debug(f"Running command: confirm_change_tag for container {containerName} to tag {tag}")
