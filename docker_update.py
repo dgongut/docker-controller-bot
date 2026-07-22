@@ -48,6 +48,79 @@ def _get_val(data, key, default=None):
 	return val if val is not None else default
 
 
+def _normalize_command(value):
+	"""Normalize Entrypoint/Cmd values for comparison (None, [] and '' are equivalent)."""
+	if value is None or value == '':
+		return []
+	if isinstance(value, str):
+		return [value]
+	return list(value)
+
+
+def _get_old_image_config(container):
+	"""
+	Returns the Config dict of the image the container was created from,
+	or None when it cannot be resolved (e.g. the image is no longer present).
+	"""
+	try:
+		image_attrs = container.image.attrs or {}
+		return _get_dict(image_attrs, 'Config')
+	except Exception:
+		return None
+
+
+def _strip_old_image_defaults(config, container_attrs, container):
+	"""
+	Removes from `config` every value that was inherited from the OLD image
+	instead of being explicitly set by the user/compose (same approach as
+	Watchtower's GetCreateConfig). Docker merges the image Config into the
+	container Config at creation time, so anything that matches the old image
+	default was NOT set by the user and must not be pinned on recreation;
+	otherwise an update that changes ENTRYPOINT/CMD/ENV/HEALTHCHECK/... in the
+	new image would leave the new container running stale values (boot loops).
+
+	If the old image config cannot be resolved, `config` is left untouched
+	(previous behaviour).
+	"""
+	image_config = _get_old_image_config(container)
+	if image_config is None:
+		return
+
+	# Entrypoint/Cmd: inherit from the new image when they match the old
+	# image defaults. Cmd is only cleared when Entrypoint is also inherited:
+	# a user-defined entrypoint changes the meaning of Cmd.
+	if _normalize_command(config['entrypoint']) == _normalize_command(image_config.get('Entrypoint')):
+		config['entrypoint'] = None
+		if _normalize_command(config['command']) == _normalize_command(image_config.get('Cmd')):
+			config['command'] = None
+
+	# Env: drop variables that came verbatim from the old image (PATH,
+	# version pins, etc.). Variables the user overrode have a different
+	# value and are kept.
+	image_env = set(_get_list(image_config, 'Env'))
+	config['environment'] = [env for env in config['environment'] if env not in image_env]
+
+	# Labels: drop label pairs that came verbatim from the old image
+	# (LABEL instructions in its Dockerfile). Compose/user labels are kept.
+	image_labels = _get_dict(image_config, 'Labels')
+	config['labels'] = {k: v for k, v in config['labels'].items() if image_labels.get(k) != v}
+
+	# User/WorkingDir/StopSignal: inherit when identical to the old image
+	# default ('' and None are equivalent for Docker).
+	if (_get_val(container_attrs, 'User') or '') == (image_config.get('User') or ''):
+		config['user'] = None
+	if (config['working_dir'] or '') == (image_config.get('WorkingDir') or ''):
+		config['working_dir'] = None
+	if (config['stop_signal'] or '') == (image_config.get('StopSignal') or ''):
+		config['stop_signal'] = None
+
+	# Healthcheck: when it is exactly the old image's HEALTHCHECK, inherit
+	# the new image's one. A healthcheck defined in compose differs from the
+	# image default and is kept.
+	if config['healthcheck'] is not None and config['healthcheck'] == image_config.get('Healthcheck'):
+		config['healthcheck'] = None
+
+
 def extract_container_config(container, tag=None):
 	"""
 	Extract all configuration from a container for recreation.
@@ -70,6 +143,9 @@ def extract_container_config(container, tag=None):
 		'labels': _get_dict(container_attrs, 'Labels'),
 		'healthcheck': _get_val(container_attrs, 'Healthcheck'),
 	}
+
+	# Drop values inherited from the old image so the new image's defaults apply
+	_strip_old_image_defaults(config, container_attrs, container)
 
 	# Volumes and mounts
 	config['volumes'] = _get_list(host_config, 'Binds')
@@ -106,7 +182,13 @@ def extract_container_config(container, tag=None):
 	# container:<id> or none ("conflicting options: hostname and the network mode").
 	_nm = (config['network_mode'] or '').lower()
 	_nm_conflicts_with_hostname = _nm == 'host' or _nm == 'none' or _nm.startswith('container:')
-	config['hostname'] = None if _nm_conflicts_with_hostname else _get_val(container_attrs, 'Hostname')
+	# Don't pin the auto-generated hostname (the old container's short id):
+	# the new container must get its own, like `docker compose up` would.
+	_old_short_id = (container.id or '')[:12]
+	_hostname = _get_val(container_attrs, 'Hostname')
+	if _hostname == _old_short_id:
+		_hostname = None
+	config['hostname'] = None if _nm_conflicts_with_hostname else _hostname
 	config['domainname'] = None if _nm_conflicts_with_hostname else _get_val(container_attrs, 'Domainname')
 	config['dns'] = _get_list(host_config, 'Dns')
 	config['dns_opt'] = _get_list(host_config, 'DnsOptions')
@@ -142,7 +224,11 @@ def extract_container_config(container, tag=None):
 			ipv6_address = ipv6 if ipv6 else None  # Convert "" to None
 
 			# Other endpoint configuration - filter empty values
+			# Drop the alias with the old container's short id (added by the
+			# engine on some versions); it would become a stale DNS name.
 			aliases = _get_val(network_config, 'Aliases')
+			if aliases:
+				aliases = [a for a in aliases if a != _old_short_id]
 			network_aliases = aliases if aliases else None
 			links = _get_val(network_config, 'Links')
 			network_links = links if links else None
@@ -394,6 +480,12 @@ def _perform_update_locked(client, container, config, container_name, message, e
 				user=config['user'],
 				volumes=config['volumes'],
 				mounts=config['mounts_list'] if config['mounts_list'] else None,
+				# docker-py only applies networking_config when `network` is also
+				# passed (_create_container_args drops it silently otherwise, losing
+				# aliases, static IPs, links... - including the compose service-name
+				# DNS alias other containers rely on). When `network` is set it also
+				# becomes HostConfig.NetworkMode, so both paths keep the same mode.
+				network=config['network_mode'] if networking_config else None,
 				network_mode=config['network_mode'],
 				networking_config=networking_config,
 				hostname=config['hostname'],
