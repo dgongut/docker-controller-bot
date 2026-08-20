@@ -1,15 +1,15 @@
-FROM alpine:3.23.5
+FROM alpine:3.24.1
 
-ARG VERSION=4.1.2
+ARG VERSION=4.1.3
 
 ENV TZ=UTC
 
 WORKDIR /app
 
 # Install dependencies and download source
-RUN apk add --no-cache python3 py3-pip tzdata curl && \
-    curl -fsSL https://github.com/dgongut/docker-controller-bot/archive/refs/tags/v${VERSION}.tar.gz -o /tmp/app.tar.gz && \
-    tar -xzf /tmp/app.tar.gz -C /tmp && \
+RUN apk add --no-cache python3 py3-pip tzdata curl unzip && \
+    curl -fsSL https://github.com/dgongut/docker-controller-bot/archive/refs/tags/v${VERSION}.zip -o /tmp/app.zip && \
+    unzip -q /tmp/app.zip -d /tmp && \
     mv /tmp/docker-controller-bot-${VERSION}/docker-controller-bot.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/config.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/docker_update.py /app && \
@@ -21,8 +21,8 @@ RUN apk add --no-cache python3 py3-pip tzdata curl && \
     mv /tmp/docker-controller-bot-${VERSION}/message_queue.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/locale /app && \
     mv /tmp/docker-controller-bot-${VERSION}/requirements.txt /app && \
-    rm -rf /tmp/app.tar.gz /tmp/docker-controller-bot-${VERSION}/ && \
-    apk del --no-cache curl && \
+    rm -rf /tmp/app.zip /tmp/docker-controller-bot-${VERSION}/ && \
+    apk del --no-cache curl unzip && \
     export PIP_BREAK_SYSTEM_PACKAGES=1 && \
     pip3 install --no-cache-dir -Ur /app/requirements.txt
 

@@ -33,7 +33,7 @@ from port_manager import PortManager
 from logger import debug, error, warning
 from message_queue import MessageQueue
 
-VERSION = "4.1.2"
+VERSION = "4.1.3"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -841,11 +841,9 @@ class DockerUpdateMonitor:
 							continue
 						old_image_status = read_container_update_status(image_with_tag, container.name)
 						image_status = get_text("NEED_UPDATE_CONTAINER_TEXT")
-						debug(f"{container.name} update detected! Deleting downloaded image [{remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}]")
-						try:
-							self.client.images.remove(remote_image.id)
-						except:
-							pass # If it can't be removed it's because another container is using it
+						# Keep the pulled image cached locally so the subsequent update
+						# operation does not need to re-download it.
+						debug(f"{container.name} update detected! Keeping downloaded image [{remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}] for upcoming update")
 
 						if container.name != CONTAINER_NAME:
 							grouped_updates_containers.append([container.id[:CONTAINER_ID_LENGTH], container.name])
