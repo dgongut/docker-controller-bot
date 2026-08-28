@@ -16,7 +16,8 @@
 **/bin
 **/charts
 **/docker-compose*
-**/compose*
+**/compose.yaml
+**/compose.yml
 **/Dockerfile*
 **/node_modules
 **/npm-debug.log
