@@ -1,4 +1,5 @@
 import docker
+import functools
 import hashlib
 import html
 import io
@@ -19,6 +20,7 @@ from croniter import croniter
 from datetime import datetime, timedelta
 from telebot.types import InlineKeyboardButton
 from telebot.types import InlineKeyboardMarkup
+from compose_generator import ComposeGenerator
 from docker_update import extract_container_config, perform_update
 from docker_compose_manager import (
     ComposeDetector,
@@ -33,7 +35,7 @@ from port_manager import PortManager
 from logger import debug, error, warning
 from message_queue import MessageQueue
 
-VERSION = "4.1.3"
+VERSION = "4.1.4"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -131,6 +133,84 @@ schedule_manager = ScheduleManager(SCHEDULE_PATH, SCHEDULE_JSON_FILE)
 # Instantiate the global message queue
 message_queue = MessageQueue(delay_between_messages=0.1, max_retries=5)
 
+# ============================================================================
+# REPLY CONTEXT
+# ============================================================================
+# The bot answers wherever the interaction happened: a private chat with the bot
+# or TELEGRAM_GROUP (optionally a specific topic of it). Every handler stores
+# that origin here so the send helpers can default to it instead of always
+# writing to TELEGRAM_GROUP. Background daemons (docker events, update checks,
+# schedules) run without a context and fall back to TELEGRAM_GROUP, while status
+# change notifications keep going to TELEGRAM_NOTIFICATION_CHANNEL.
+_reply_context = threading.local()
+
+def set_reply_context(chat_id, message_thread_id=None):
+	"""Records the chat/topic the update being handled comes from"""
+	_reply_context.chat_id = chat_id
+	_reply_context.thread_id = message_thread_id
+
+def clear_reply_context():
+	"""Clears the context so a reused worker thread does not inherit it"""
+	_reply_context.chat_id = None
+	_reply_context.thread_id = None
+
+def get_reply_chat_id():
+	"""Chat the bot must answer in, or TELEGRAM_GROUP outside of a handler"""
+	chat_id = getattr(_reply_context, "chat_id", None)
+	if chat_id is None:
+		return TELEGRAM_GROUP
+	return chat_id
+
+def get_reply_thread_id(chat_id):
+	"""
+	Topic to post into for a given chat, or None when it has none.
+
+	The chat currently being answered uses the topic of the incoming message,
+	TELEGRAM_GROUP falls back to TELEGRAM_THREAD (notifications coming from
+	background daemons, or a topic that could not be detected) and any other chat
+	(a private chat, the notification channel) has no topics at all.
+	"""
+	context_chat_id = getattr(_reply_context, "chat_id", None)
+	thread_id = None
+	if context_chat_id is not None and str(chat_id) == str(context_chat_id):
+		thread_id = getattr(_reply_context, "thread_id", None)
+	if not thread_id and str(chat_id) == str(TELEGRAM_GROUP):
+		thread_id = TELEGRAM_THREAD
+	if not thread_id or int(thread_id) == 1:
+		return None
+	return int(thread_id)
+
+def is_allowed_origin(chat, user_id):
+	"""
+	Whether the bot accepts commands coming from a given chat.
+
+	Being an administrator is not enough on its own: the bot answers wherever it
+	is talked to, so it only listens to the private chat of the administrator
+	itself and to TELEGRAM_GROUP. Any other group the bot may have been added to
+	is ignored, otherwise its members would get to read the answers.
+	"""
+	if chat.type == "private":
+		return str(chat.id) == str(user_id)
+	return str(chat.id) == str(TELEGRAM_GROUP)
+
+def with_reply_context(handler):
+	"""Binds the reply context for the whole lifetime of a Telegram handler"""
+	@functools.wraps(handler)
+	def wrapper(update):
+		origin = update.message if isinstance(update, telebot.types.CallbackQuery) else update
+		if origin is not None and getattr(origin, "chat", None) is not None:
+			# Only forums have real topics; in any other chat message_thread_id
+			# may just point at the message being replied to
+			is_forum = bool(getattr(origin.chat, "is_forum", False))
+			set_reply_context(origin.chat.id, origin.message_thread_id if is_forum else None)
+		else:
+			clear_reply_context()
+		try:
+			return handler(update)
+		finally:
+			clear_reply_context()
+	return wrapper
+
 class DockerManager:
 	def __init__(self):
 		self.client = docker.from_env()
@@ -221,9 +301,10 @@ class DockerManager:
 				return get_text("error_can_not_do_that")
 			container = self.client.containers.get(container_id)
 			container.stop()
-			# Send confirmation only for manual commands when muted
+			# Send confirmation only for manual commands when muted: the event
+			# monitor is silent while muted, so the user gets no other feedback
 			if from_schedule is False and is_muted():
-				send_message_to_notification_channel(message=get_text("stopped_container", container_name))
+				send_message(message=get_text("stopped_container", container_name))
 			return None
 		except Exception as e:
 			error(f"Could not stop container {container_name}. Error: [{e}]")
@@ -235,9 +316,10 @@ class DockerManager:
 				return get_text("error_can_not_do_that")
 			container = self.client.containers.get(container_id)
 			container.restart()
-			# Send confirmation only for manual commands when muted
+			# Send confirmation only for manual commands when muted: the event
+			# monitor is silent while muted, so the user gets no other feedback
 			if from_schedule is False and is_muted():
-				send_message_to_notification_channel(message=get_text("restarted_container", container_name))
+				send_message(message=get_text("restarted_container", container_name))
 			return None
 		except Exception as e:
 			error(f"Could not restart container {container_name}. Error: [{e}]")
@@ -249,9 +331,10 @@ class DockerManager:
 				return get_text("error_can_not_do_that")
 			container = self.client.containers.get(container_id)
 			container.start()
-			# Send confirmation only for manual commands when muted
+			# Send confirmation only for manual commands when muted: the event
+			# monitor is silent while muted, so the user gets no other feedback
 			if from_schedule is False and is_muted():
-				send_message_to_notification_channel(message=get_text("started_container", container_name))
+				send_message(message=get_text("started_container", container_name))
 			return None
 		except Exception as e:
 			error(f"Could not start container {container_name}. Error: [{e}]")
@@ -504,7 +587,7 @@ class DockerManager:
 					get_text_func=get_text,
 					save_status_func=save_container_update_status,
 					container_id_length=CONTAINER_ID_LENGTH,
-					telegram_group=TELEGRAM_GROUP
+					telegram_group=message.chat.id if message else get_reply_chat_id()
 				)
 				return result
 		except Exception as e:
@@ -890,7 +973,7 @@ class DockerUpdateMonitor:
 				if not is_muted():
 					message = send_message(message=get_text("available_updates", len(grouped_updates_containers)), reply_markup=markup)
 					if message:
-						save_update_data(TELEGRAM_GROUP, message.message_id, grouped_updates_containers)
+						save_update_data(message.chat.id, message.message_id, grouped_updates_containers)
 						# Also populate the container name cache so the callback parser
 						# can resolve names from IDs without an extra Docker lookup.
 						_objs = []
@@ -1759,9 +1842,14 @@ def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: in
 		confirm_schedule_creation(user_id, state)
 
 @bot.message_handler(commands=["start", "list", "run", "stop", "restart", "delete", "exec", "checkupdate", "updateall", "changetag", "logs", "logfile", "compose", "mute", "schedule", "info", "version", "donate", "donors", "prune", "ports"])
+@with_reply_context
 def command_controller(message):
 	userId = message.from_user.id
 	comando = message.text.split(' ', 1)[0]
+	if not is_allowed_origin(message.chat, userId):
+		debug(f"Command {comando} ignored: chat {message.chat.id} is neither an administrator private chat nor TELEGRAM_GROUP")
+		return
+
 	messageId = message.id
 	container_id = None
 	if not comando in ('/mute', f'/mute@{bot.get_me().username}'
@@ -1775,7 +1863,9 @@ def command_controller(message):
 		message_thread_id = 1
 	debug(f"COMMAND: {comando} | USER: {userId} | CHAT: {message.chat.id} | THREAD: {message_thread_id}")
 
-	if message_thread_id != TELEGRAM_THREAD and (not message.reply_to_message or message.reply_to_message.from_user.id != bot.get_me().id):
+	# The topic filter only applies to groups: a private chat with the bot has no
+	# topics, so commands sent there must always be accepted
+	if message.chat.type != "private" and message_thread_id != TELEGRAM_THREAD and (not message.reply_to_message or message.reply_to_message.from_user.id != bot.get_me().id):
 		return
 
 	if not is_admin(userId):
@@ -2043,7 +2133,7 @@ def command_controller(message):
 		)
 		message = send_message(message=get_text("available_updates", len(containersToUpdate)), reply_markup=markup)
 		if message:
-			save_update_data(TELEGRAM_GROUP, message.message_id, containersToUpdate)
+			save_update_data(message.chat.id, message.message_id, containersToUpdate)
 			# Pre-populate name cache so callback parser can resolve names from IDs
 			save_container_cache(message.chat.id, message.message_id, containersToUpdateObjs)
 
@@ -2116,6 +2206,7 @@ def parse_call_data(call_data):
 	return parsed
 
 @bot.callback_query_handler(func=lambda mensaje: True)
+@with_reply_context
 def button_controller(call):
 	try:
 		messageId = call.message.id
@@ -3105,6 +3196,7 @@ def button_controller(call):
 			pass
 
 @bot.message_handler(func=lambda message: True)
+@with_reply_context
 def handle_text(message):
 	userId = message.from_user.id
 	username = message.from_user.username
@@ -3115,12 +3207,18 @@ def handle_text(message):
 	if not message_thread_id:
 		message_thread_id = 1
 
-	if message_thread_id != TELEGRAM_THREAD and (not message.reply_to_message or message.reply_to_message.from_user.id != bot.get_me().id):
+	if not is_allowed_origin(message.chat, userId):
+		debug(f"Message ignored: chat {message.chat.id} is neither an administrator private chat nor TELEGRAM_GROUP")
+		return
+
+	# The topic filter only applies to groups: a private chat with the bot has no
+	# topics, so messages sent there must always be accepted
+	if message.chat.type != "private" and message_thread_id != TELEGRAM_THREAD and (not message.reply_to_message or message.reply_to_message.from_user.id != bot.get_me().id):
 		return
 
 	if not is_admin(userId):
 		warning(f"User {userId} ({username}) tried to use admin command without permission")
-		send_message(get_text("user_not_admin"), chat_id=userId)
+		send_message(chat_id=userId, message=get_text("user_not_admin"))
 		return
 
 	if pending:
@@ -3570,9 +3668,11 @@ def perform_container_update(container_id, container_name, tag=None, send_fn=Non
 	# Perform the actual update
 	result = docker_manager.update(container_id=container_id, container_name=container_name, message=x, bot=bot, tag=tag)
 
-	# Remove the progress message and send the final result
+	# Remove the progress message and send the final result. The chat is taken
+	# from the sent message itself: send_fn may target the notification channel
+	# (auto-update) instead of the chat being used.
 	if x is not None:
-		delete_message(x.message_id)
+		delete_message(x.message_id, x.chat.id)
 	send_fn(result)
 
 	# Restart dependents if applicable. Resolve the freshly recreated container
@@ -5368,73 +5468,40 @@ def resolve_project_name(value):
 	return mapping.get(value)
 
 def generate_docker_compose(container):
-	container_attrs = container.attrs['Config']
-	container_command = container_attrs.get('Cmd', None)
-	container_environment = container_attrs.get('Env', None)
-	container_volumes = container.attrs['HostConfig'].get('Binds', None)
-	container_network_mode = container.attrs['HostConfig'].get('NetworkMode', None)
-	container_ports = container.attrs['HostConfig'].get('PortBindings', None)
-	container_restart_policy = container.attrs['HostConfig'].get('RestartPolicy', None)
-	container_devices = container.attrs['HostConfig'].get('Devices', None)
-	container_labels = container_attrs.get('Labels', None)
-	image_with_tag = container_attrs['Image']
+	"""
+	Builds the docker-compose of a container.
 
-	docker_compose = {
-		'version': '3',
-		'services': {
-			container.name: {
-				'image': image_with_tag,
-				'container_name': container.name
-			}
-		}
-	}
-
-	add_if_present(docker_compose['services'][container.name], 'command', container_command)
-	add_if_present(docker_compose['services'][container.name], 'environment', container_environment)
-	add_if_present(docker_compose['services'][container.name], 'volumes', container_volumes)
-	add_if_present(docker_compose['services'][container.name], 'network_mode', container_network_mode)
-	if container_restart_policy:
-		add_if_present(docker_compose['services'][container.name], 'restart', str(container_restart_policy.get('Name', '')))
-	add_if_present(docker_compose['services'][container.name], 'devices', container_devices)
-	add_if_present(docker_compose['services'][container.name], 'labels', container_labels)
-
-	if container_ports:
-		docker_compose['services'][container.name]['ports'] = []
-		for container_port, host_bindings in container_ports.items():
-			for host_binding in host_bindings:
-				port_info = f"{host_binding.get('HostPort', '')}:{container_port}"
-				docker_compose['services'][container.name]['ports'].append(port_info)
-
-	yaml_data = yaml.safe_dump(docker_compose, default_flow_style=False, sort_keys=False)
-	return yaml_data
-
-def add_if_present(dictionary, key, value):
-	if value:
-		dictionary[key] = value
+	Reuses `extract_container_config`, the same extractor every update relies
+	on, so the compose reflects what the user actually configured instead of
+	re-reading a handful of `attrs` fields: values inherited from the image
+	(PATH, the image ENTRYPOINT, its LABELs...) are already filtered out there.
+	"""
+	config = extract_container_config(container)
+	return ComposeGenerator(container.name, config).to_yaml()
 
 # ============================================================================
 # INTERNAL TELEGRAM FUNCTIONS (without queue)
 # ============================================================================
-def _send_message_direct(chat_id, message, reply_markup, parse_mode, disable_web_page_preview):
+def _send_message_direct(chat_id, message, reply_markup, parse_mode, disable_web_page_preview, message_thread_id=None):
 	"""Sends a message directly without using the queue"""
 	try:
 		if message is None:
 			message = ""
-		if TELEGRAM_THREAD == 1:
+		if message_thread_id is None:
 			return bot.send_message(chat_id, message, parse_mode=parse_mode, reply_markup=reply_markup, disable_web_page_preview=disable_web_page_preview)
 		else:
-			return bot.send_message(chat_id, message, parse_mode=parse_mode, reply_markup=reply_markup, disable_web_page_preview=disable_web_page_preview, message_thread_id=TELEGRAM_THREAD)
+			return bot.send_message(chat_id, message, parse_mode=parse_mode, reply_markup=reply_markup, disable_web_page_preview=disable_web_page_preview, message_thread_id=message_thread_id)
 	except Exception as e:
 		error(f"Error sending message to chat {chat_id}. Message: [{str(message)}]. Error: [{str(e)}]")
 		raise
 
-def _send_document_direct(chat_id, document, reply_markup, caption, parse_mode):
+def _send_document_direct(chat_id, document, reply_markup, caption, parse_mode, message_thread_id=None):
 	"""Sends a document directly without using the queue"""
 	try:
-		if TELEGRAM_THREAD == 1:
+		if message_thread_id is None:
 			return bot.send_document(chat_id, document=document, reply_markup=reply_markup, caption=caption, parse_mode=parse_mode)
 		else:
-			return bot.send_document(chat_id, document=document, reply_markup=reply_markup, caption=caption, message_thread_id=TELEGRAM_THREAD, parse_mode=parse_mode)
+			return bot.send_document(chat_id, document=document, reply_markup=reply_markup, caption=caption, message_thread_id=message_thread_id, parse_mode=parse_mode)
 	except Exception as e:
 		error(f"Error sending document to chat {chat_id}. Error: [{e}]")
 		raise
@@ -5470,22 +5537,35 @@ def _edit_message_reply_markup_direct(chat_id, message_id, reply_markup):
 def delete_message(message_id, chat_id=None):
 	"""Deletes a message using the queue (async)"""
 	if chat_id is None:
-		chat_id = TELEGRAM_GROUP
+		chat_id = get_reply_chat_id()
 	message_queue.add_message(_delete_message_direct, chat_id, message_id, wait_for_result=False)
 
-def send_message(chat_id=TELEGRAM_GROUP, message=None, reply_markup=None, parse_mode="html", disable_web_page_preview=True):
+def send_message(chat_id=None, message=None, reply_markup=None, parse_mode="html", disable_web_page_preview=True):
 	"""Sends a message using the queue (waits for result to get the message_id)"""
-	return message_queue.add_message(_send_message_direct, chat_id, message, reply_markup, parse_mode, disable_web_page_preview, wait_for_result=True)
+	if chat_id is None:
+		chat_id = get_reply_chat_id()
+	message_thread_id = get_reply_thread_id(chat_id)
+	return message_queue.add_message(_send_message_direct, chat_id, message, reply_markup, parse_mode, disable_web_page_preview, message_thread_id, wait_for_result=True)
 
-def send_message_to_notification_channel(chat_id=TELEGRAM_NOTIFICATION_CHANNEL, message=None, reply_markup=None, parse_mode="html", disable_web_page_preview=True):
-	"""Sends a message to the notification channel using the queue"""
-	if TELEGRAM_NOTIFICATION_CHANNEL is None or TELEGRAM_NOTIFICATION_CHANNEL == '':
-		return send_message(chat_id=TELEGRAM_GROUP, message=message, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
+def send_message_to_notification_channel(chat_id=None, message=None, reply_markup=None, parse_mode="html", disable_web_page_preview=True):
+	"""
+	Sends a container status change notification. It goes to
+	TELEGRAM_NOTIFICATION_CHANNEL when that channel is configured, otherwise it
+	is delivered like any other message (the chat being answered, or
+	TELEGRAM_GROUP when there is no interaction going on).
+	"""
+	if chat_id is None:
+		chat_id = TELEGRAM_NOTIFICATION_CHANNEL
+	if chat_id is None or chat_id == '':
+		return send_message(message=message, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
 	return send_message(chat_id=chat_id, message=message, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
 
-def send_document(chat_id=TELEGRAM_GROUP, document=None, reply_markup=None, caption=None, parse_mode="html"):
+def send_document(chat_id=None, document=None, reply_markup=None, caption=None, parse_mode="html"):
 	"""Sends a document using the queue (waits for result to get the message_id)"""
-	return message_queue.add_message(_send_document_direct, chat_id, document, reply_markup, caption, parse_mode, wait_for_result=True)
+	if chat_id is None:
+		chat_id = get_reply_chat_id()
+	message_thread_id = get_reply_thread_id(chat_id)
+	return message_queue.add_message(_send_document_direct, chat_id, document, reply_markup, caption, parse_mode, message_thread_id, wait_for_result=True)
 
 def edit_message_text(text, chat_id, message_id, parse_mode="html", reply_markup=None):
 	"""Edits the text of a message using the queue (async, does not block on failure)"""
@@ -5749,14 +5829,16 @@ def get_docker_tags_from_ghcr(repo_name):
 		token_url = f'https://ghcr.io/token?service=ghcr.io&scope=repository:{repo_name}:pull'
 		token = requests.get(token_url, timeout=10).json().get('token')
 		if not token:
-			return ['latest']
+			error(f"Could not get an auth token from ghcr.io for {repo_name}")
+			return []
 
 		# Get tags
 		tags_url = f'https://ghcr.io/v2/{repo_name}/tags/list'
 		tags = requests.get(tags_url, headers={'Authorization': f'Bearer {token}'}, timeout=10).json().get('tags', [])
 
 		if not tags:
-			return ['latest']
+			debug(f"No tags returned by ghcr.io for {repo_name}")
+			return []
 
 		# Sort: version tags first (newest), then others
 		version_tags = sorted([t for t in tags if t and t[0] == 'v' and any(c.isdigit() for c in t)], reverse=True)
@@ -5766,7 +5848,7 @@ def get_docker_tags_from_ghcr(repo_name):
 
 	except Exception as e:
 		error(f"Error getting tags from ghcr.io/{repo_name}: {e}")
-		return ['latest']
+		return []
 
 # Global schedule monitor instance (used by /schedule command)
 schedule_monitor = None

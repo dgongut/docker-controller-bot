@@ -98,7 +98,7 @@ Desde `/schedule` puedes crear tareas que se ejecuten en cron.
 |TELEGRAM_ADMIN |✅| ChatId del administrador (se puede obtener hablándole al bot [Rose](https://t.me/MissRose_bot) escribiendo /id). Admite múltiples administradores separados por comas. Por ejemplo 12345,54431,55944 |
 |TELEGRAM_GROUP |❌| ChatId del grupo. Si este bot va a formar parte de un grupo, es necesario especificar el chatId de dicho grupo. Es necesario que el bot sea administrador del grupo |
 |TELEGRAM_THREAD |❌| Thread del tema dentro de un supergrupo; valor numérico (2,3,4..). Por defecto 1. Se utiliza en conjunción con la variable TELEGRAM_GROUP |
-|TELEGRAM_NOTIFICATION_CHANNEL |❌| Canal donde se publicarán exclusivamente los cambios de estado de los contenedores |
+|TELEGRAM_NOTIFICATION_CHANNEL |❌| Canal donde se publicarán exclusivamente los cambios de estado de los contenedores (arranque, parada, creación y actualizaciones automáticas). La gestión se sigue haciendo desde el chat privado con el bot o desde TELEGRAM_GROUP |
 |CONTAINER_NAME |✅| Nombre del contenedor, lo que se le ponga en container_name en el docker-compose ha de ir aquí también |
 |TZ |✅| Timezone (Por ejemplo Europe/Madrid) |
 |CHECK_UPDATES |❌| Si se desea que compruebe actualizaciones. 0 no - 1 sí. Por defecto 1|
@@ -240,9 +240,19 @@ Las acciones globales (arrancar, parar, reiniciar o eliminar el proyecto entero)
 <details>
 <summary>📢 Si configuro <code>TELEGRAM_NOTIFICATION_CHANNEL</code>, ¿se duplican las notificaciones?</summary>
 
-No. Cuando se define ese canal, los avisos de cambio de estado de los contenedores (arranque, parada, caída, actualización disponible…) van **solo** a ese canal y dejan de aparecer en el chat principal.
+No. Cuando se define ese canal, los avisos de cambio de estado de los contenedores (arranque, parada, caída y actualizaciones automáticas) van **solo** a ese canal y dejan de aparecer en el chat principal.
 
-El resto de mensajes (resultados de comandos, menús interactivos, etc.) siguen llegando al chat normal donde hablas con el bot.
+El resto de mensajes (resultados de comandos, menús interactivos, avisos de actualización disponible con sus botones, etc.) **nunca** van a ese canal: el bot siempre responde en el sitio desde el que le hablas, sea el chat privado o el grupo/tema configurado en `TELEGRAM_GROUP` y `TELEGRAM_THREAD`.
+</details>
+
+<details>
+<summary>💬 ¿Desde dónde puedo manejar el bot?</summary>
+
+Desde el chat privado con el bot y desde el grupo (o el tema concreto del supergrupo) que hayas configurado en `TELEGRAM_GROUP` y `TELEGRAM_THREAD`.
+
+El bot contesta siempre donde le has escrito: si lanzas `/list` en el privado, la lista aparece en el privado; si lo lanzas en el tema del grupo, aparece en ese tema. `TELEGRAM_NOTIFICATION_CHANNEL` solo recibe las alertas de cambio de estado.
+
+Cualquier otro chat se ignora: si el bot está metido en otro grupo, ahí no responde ni ejecuta nada, aunque quien escriba sea administrador. Ser administrador no basta, el chat también tiene que ser el privado del propio administrador o `TELEGRAM_GROUP`.
 </details>
 
 <details>

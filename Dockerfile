@@ -1,6 +1,6 @@
 FROM alpine:3.24.1
 
-ARG VERSION=4.1.3
+ARG VERSION=4.1.4
 
 ENV TZ=UTC
 
@@ -14,6 +14,7 @@ RUN apk add --no-cache python3 py3-pip tzdata curl unzip && \
     mv /tmp/docker-controller-bot-${VERSION}/config.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/docker_update.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/docker_compose_manager.py /app && \
+    mv /tmp/docker-controller-bot-${VERSION}/compose_generator.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/schedule_flow.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/schedule_manager.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/port_manager.py /app && \

@@ -121,6 +121,64 @@ def _strip_old_image_defaults(config, container_attrs, container):
 		config['healthcheck'] = None
 
 
+# Endpoint settings, as named by extract_container_config, mapped to the
+# keyword arguments Network.connect() expects.
+_ENDPOINT_TO_CONNECT_KWARGS = {
+	'ipv4_address': 'ipv4_address',
+	'ipv6_address': 'ipv6_address',
+	'aliases': 'aliases',
+	'links': 'links',
+	'link_local_ips': 'link_local_ips',
+	'driver_opts': 'driver_opt',
+}
+
+
+def _connect_extra_networks(client, new_container, config, debug_func, error_func):
+	"""
+	Attaches the container to every network beyond the primary one.
+
+	`containers.create()` only takes a single network, so a container sitting on
+	several used to come back from an update attached to just one of them. They
+	are connected before the container is started, the same way `compose up`
+	does it, so it comes up with all of its interfaces at once.
+
+	Raises on failure: a half-connected container is worse than a rolled back
+	update, and the caller restores the old one.
+	"""
+	networks = config.get('networks') or {}
+	if len(networks) <= 1:
+		return
+
+	# Whatever create() already attached (the primary network, under whichever
+	# name the engine reports it: 'bridge', 'default'...) must not be redone.
+	try:
+		new_container.reload()
+		already_connected = set(_get_dict(_get_dict(new_container.attrs, 'NetworkSettings'), 'Networks'))
+	except Exception as e:
+		debug_func(f"[EXTRA_NETWORKS] Could not read the new container's networks: {e}")
+		already_connected = {config.get('network_mode')}
+
+	for network_name, endpoint in networks.items():
+		if network_name in already_connected:
+			continue
+		if str(network_name).lower() in ('host', 'none') or str(network_name).startswith('container:'):
+			continue
+
+		connect_kwargs = {}
+		for endpoint_key, connect_key in _ENDPOINT_TO_CONNECT_KWARGS.items():
+			value = (endpoint or {}).get(endpoint_key)
+			if value:
+				connect_kwargs[connect_key] = value
+
+		try:
+			network = client.networks.get(network_name)
+			network.connect(new_container.id, **connect_kwargs)
+			debug_func(f"[EXTRA_NETWORKS] Reattached to network {network_name} ({connect_kwargs or 'no endpoint settings'})")
+		except Exception as connect_error:
+			error_func(f"[EXTRA_NETWORKS] Could not reattach to network {network_name}: {connect_error}")
+			raise Exception(f"Failed to reattach network {network_name}: {connect_error}")
+
+
 def extract_container_config(container, tag=None):
 	"""
 	Extract all configuration from a container for recreation.
@@ -137,7 +195,7 @@ def extract_container_config(container, tag=None):
 		'working_dir': _get_val(container_attrs, 'WorkingDir'),
 		'entrypoint': _get_val(container_attrs, 'Entrypoint'),
 		'user': _get_val(container_attrs, 'User', 'root'),
-		'stdin_open': _get_val(container_attrs, 'AttachStdin', False),
+		'stdin_open': _get_val(container_attrs, 'OpenStdin', False),
 		'tty': _get_val(container_attrs, 'Tty', False),
 		'stop_signal': _get_val(container_attrs, 'StopSignal'),
 		'labels': _get_dict(container_attrs, 'Labels'),
@@ -150,7 +208,8 @@ def extract_container_config(container, tag=None):
 	# Volumes and mounts
 	config['volumes'] = _get_list(host_config, 'Binds')
 	config['ports'] = _get_dict(host_config, 'PortBindings')
-	config['tmpfs_mounts'] = {}
+	# `--tmpfs` and compose's `tmpfs:` land here...
+	config['tmpfs_mounts'] = dict(_get_dict(host_config, 'Tmpfs'))
 	config['mounts_list'] = []
 
 	mounts_list_raw = _get_list(host_config, 'Mounts')
@@ -159,6 +218,7 @@ def extract_container_config(container, tag=None):
 		target = _get_val(mount, 'Target', '')
 
 		if mount_type == 'tmpfs':
+			# ...and `--mount type=tmpfs` here. Both forms are merged.
 			tmpfs_options = _get_dict(mount, 'TmpfsOptions')
 			size_bytes = _get_val(tmpfs_options, 'SizeBytes', 0)
 			config['tmpfs_mounts'][target] = f"size={size_bytes}" if size_bytes else ''
@@ -239,6 +299,28 @@ def extract_container_config(container, tag=None):
 			link_local = _get_val(network_config, 'LinkLocalIPs')
 			link_local_ips = link_local if link_local else None
 
+	# Every network endpoint, not only the primary one. `containers.create()`
+	# only accepts the primary network, so `_connect_extra_networks` reattaches
+	# the rest from here, and the compose generator uses it to declare them all.
+	config['networks'] = {}
+	for _net_name, _net_config in _get_dict(network_settings, 'Networks').items():
+		_endpoint = {}
+		_ipam = _get_dict(_net_config, 'IPAMConfig')
+		for _key, _api_key in (('ipv4_address', 'IPv4Address'), ('ipv6_address', 'IPv6Address')):
+			_value = _get_val(_ipam, _api_key)
+			if _value:
+				_endpoint[_key] = _value
+		# The engine adds an alias with the container's short id on some
+		# versions; it would become a stale DNS name.
+		_aliases = [a for a in (_get_val(_net_config, 'Aliases') or []) if a != _old_short_id]
+		if _aliases:
+			_endpoint['aliases'] = _aliases
+		for _key, _api_key in (('link_local_ips', 'LinkLocalIPs'), ('links', 'Links'), ('driver_opts', 'DriverOpts')):
+			_value = _get_val(_net_config, _api_key)
+			if _value:
+				_endpoint[_key] = _value
+		config['networks'][_net_name] = _endpoint
+
 	config['ipv4_address'] = ipv4_address
 	config['ipv6_address'] = ipv6_address
 	config['network_aliases'] = network_aliases
@@ -249,6 +331,9 @@ def extract_container_config(container, tag=None):
 
 	# Resource limits
 	config['restart_policy'] = _get_dict(host_config, 'RestartPolicy')
+	# `--cpus` and compose's `cpus:` are stored as NanoCpus, not as a
+	# quota/period pair: without it the CPU limit was lost on every recreation.
+	config['nano_cpus'] = _get_val(host_config, 'NanoCpus')
 	config['cpu_quota'] = _get_val(host_config, 'CpuQuota')
 	config['cpu_period'] = _get_val(host_config, 'CpuPeriod')
 	config['cpu_shares'] = _get_val(host_config, 'CpuShares')
@@ -502,6 +587,7 @@ def _perform_update_locked(client, container, config, container_name, message, e
 				labels=config['labels'],
 				healthcheck=config['healthcheck'],
 				restart_policy=config['restart_policy'] if config['restart_policy'] else None,
+				nano_cpus=config['nano_cpus'],
 				cpu_quota=config['cpu_quota'],
 				cpu_period=config['cpu_period'],
 				cpu_shares=config['cpu_shares'],
@@ -538,7 +624,7 @@ def _perform_update_locked(client, container, config, container_name, message, e
 				userns_mode=config['userns_mode'],
 				cgroup_parent=config['cgroup_parent'],
 				cgroupns=config.get('cgroupns'),
-				init=config['init'],
+				init=config['init'] if config['init'] else None,
 				read_only=config['read_only'],
 				sysctls=config['sysctls'] if config['sysctls'] else None,
 				ulimits=config['ulimits'] if config['ulimits'] else None,
@@ -553,6 +639,9 @@ def _perform_update_locked(client, container, config, container_name, message, e
 		except Exception as create_error:
 			error_func(get_text_func("error_creating_container", container_name, str(create_error)))
 			raise Exception(f"Failed to create new container: {create_error}")
+
+		# Reattach any network beyond the primary one before starting
+		_connect_extra_networks(client, new_container, config, debug_func, error_func)
 
 		# Start new container only if original was running
 		if config['is_running']:
