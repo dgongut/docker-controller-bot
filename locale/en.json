@@ -36,6 +36,7 @@
   "change_tag_container": "⚙️ Click on a container to change its tag",
   "channel": "📰 <a href=\"https://t.me/dockercontrollerbotnews\">Changelog (in spanish)</a>",
   "check_for_updates": "Check for updates",
+  "multi_selection": "Multiple selection",
   "command_executed_without_output": "✅ Command executed successfully in container",
   "compose": "📃 The $1 docker-compose. Remember, this feature is in <i>experimental</i> phase",
   "confirm_change_tag": "⚠️ Are you sure you want to change the <b>$1</b>'s container tag to <code>$2</code>?",

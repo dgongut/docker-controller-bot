@@ -35,11 +35,12 @@ from port_manager import PortManager
 from logger import debug, error, warning
 from message_queue import MessageQueue
 
-VERSION = "4.1.4"
+VERSION = "4.2.0"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
 _cache_lock = threading.Lock()  # Lock for thread-safe cache operations
+_menu_refresh_lock = threading.Lock()  # Serialises multi-action menu repaints
 
 def sizeof_fmt(num, suffix="B"):
 	for unit in ("", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "Zi"):
@@ -125,7 +126,7 @@ if not os.path.exists(FULL_MUTE_FILE_PATH):
 		mute_file.write("0")
 
 # Instantiate the bot
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
+bot = telebot.TeleBot(TELEGRAM_TOKEN, num_threads=8)
 
 # Instantiate the ScheduleManager
 schedule_manager = ScheduleManager(SCHEDULE_PATH, SCHEDULE_JSON_FILE)
@@ -1905,6 +1906,9 @@ def command_controller(message):
 			# Save container cache for standalone containers
 			if sent_message and standalone_containers:
 				save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
+			# Keep this menu open so several containers can be picked in a row
+			if sent_message and MULTI_SELECTION:
+				save_multi_action(sent_message.chat.id, sent_message.message_id, "Run")
 	elif comando in ('/stop', f'/stop@{bot.get_me().username}'):
 		if container_id:
 			stop(container_id, container_name)
@@ -1927,6 +1931,9 @@ def command_controller(message):
 			# Save container cache for standalone containers
 			if sent_message and standalone_containers:
 				save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
+			# Keep this menu open so several containers can be picked in a row
+			if sent_message and MULTI_SELECTION:
+				save_multi_action(sent_message.chat.id, sent_message.message_id, "Stop")
 	elif comando in ('/restart', f'/restart@{bot.get_me().username}'):
 		if container_id:
 			restart(container_id, container_name)
@@ -1943,6 +1950,9 @@ def command_controller(message):
 			# Save container cache for standalone containers
 			if sent_message and standalone_containers:
 				save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
+			# Keep this menu open so several containers can be picked in a row
+			if sent_message and MULTI_SELECTION:
+				save_multi_action(sent_message.chat.id, sent_message.message_id, "Restart")
 	elif comando in ('/logs', f'/logs@{bot.get_me().username}'):
 		if container_id:
 			logs(container_id, container_name)
@@ -2243,7 +2253,7 @@ def button_controller(call):
 		if containerId and not containerName:
 			containerName = get_container_name(chatId, messageId, containerId)
 			if not containerName:
-				delete_message(messageId)
+				close_multi_action_menu(chatId, messageId)
 				send_message(message=get_text("container_does_not_exist", containerId))
 				debug(f"Container {containerId} not found in cache or Docker")
 				return
@@ -2259,7 +2269,7 @@ def button_controller(call):
 					debug(f"Resolved stale id {containerId} to current id {current_id} via name {containerName}")
 					containerId = current_id
 			else:
-				delete_message(messageId)
+				close_multi_action_menu(chatId, messageId)
 				send_message(message=get_text("container_does_not_exist", containerName))
 				debug(f"Container {containerName} (stale id {containerId}) not found in Docker")
 				return
@@ -2275,6 +2285,10 @@ def button_controller(call):
 				return
 			containerName = resolved
 
+		# A /run, /stop or /restart menu left open for multi-selection: the message
+		# survives this press and its keyboard is rebuilt once the action is done
+		multiAction = load_multi_action(chatId, messageId) if comando in MULTI_ACTION_COMMANDS else None
+
 		debug(f"BUTTON: {comando} | USER: {userId} | CHAT: {chatId}")
 	except Exception as e:
 		error(f"Error initializing callback: [{str(e)}]")
@@ -2286,7 +2300,7 @@ def button_controller(call):
 
 	try:
 		# Don't delete message for toggle actions and hierarchical navigation
-		if comando not in ["toggleUpdate", "toggleUpdateAll", "enterRestartProject", "backToRestartLevel1", "enterRunProject", "backToRunLevel1", "enterStopProject", "backToStopLevel1", "enterDeleteProject", "backToDeleteLevel1", "confirmDeleteWholeProject", "enterExecProject", "backToExecLevel1", "enterLogsProject", "backToLogsLevel1", "enterCheckUpdateProject", "backToCheckUpdateLevel1", "enterInfoProject", "showProjectInfo", "backToInfoLevel1", "enterChangeTagProject", "backToChangeTagLevel1", "enterLogfileProject", "backToLogfileLevel1", "enterComposeProject", "backToComposeLevel1"]:
+		if comando not in ["toggleUpdate", "toggleUpdateAll", "enterRestartProject", "backToRestartLevel1", "enterRunProject", "backToRunLevel1", "enterStopProject", "backToStopLevel1", "enterDeleteProject", "backToDeleteLevel1", "confirmDeleteWholeProject", "enterExecProject", "backToExecLevel1", "enterLogsProject", "backToLogsLevel1", "enterCheckUpdateProject", "backToCheckUpdateLevel1", "enterInfoProject", "showProjectInfo", "backToInfoLevel1", "enterChangeTagProject", "backToChangeTagLevel1", "enterLogfileProject", "backToLogfileLevel1", "enterComposeProject", "backToComposeLevel1"] and not multiAction:
 			delete_message(messageId)
 
 		if call.data == "cerrar":
@@ -2296,19 +2310,26 @@ def button_controller(call):
 				clear_update_data(chatId, messageId)
 			# Clean up container name cache
 			clear_container_cache(chatId, messageId)
+			clear_multi_action(chatId, messageId)
 			return
 
 		# RUN
 		if comando == "run":
-			run(containerId, containerName)
+			result = run(containerId, containerName)
+			if multiAction:
+				refresh_multi_action_menu(chatId, messageId, [containerName], succeeded=result is None)
 
 		# STOP
 		elif comando == "stop":
-			stop(containerId, containerName)
+			result = stop(containerId, containerName)
+			if multiAction:
+				refresh_multi_action_menu(chatId, messageId, [containerName], succeeded=result is None)
 
 		# RESTART
 		elif comando == "restart":
-			restart(containerId, containerName)
+			result = restart(containerId, containerName)
+			if multiAction:
+				refresh_multi_action_menu(chatId, messageId, [containerName], succeeded=result is None)
 
 		# LOGS
 		elif comando == "logs":
@@ -2479,51 +2500,54 @@ def button_controller(call):
 
 		# ENTER RESTART PROJECT (Level 2: show project containers)
 		elif comando == "enterRestartProject":
-			handle_enter_project_level2('Restart', containerName, chatId, messageId)
+			enter_project_multi_aware('Restart', containerName, chatId, messageId)
 
 		# BACK TO RESTART LEVEL 1
 		elif comando == "backToRestartLevel1":
-			result = build_back_to_level1_keyboard('Restart', chatId, messageId)
-			if result:
-				markup, message_key = result
-				edit_message_text(get_text(message_key), chatId, messageId, reply_markup=markup)
+			back_to_level1_multi_aware('Restart', chatId, messageId)
 
 		# RESTART WHOLE PROJECT
 		elif comando == "restartWholeProject":
 			project_name = containerName
+			# Captured before acting so every service can be marked as done
+			project_container_names = get_project_container_names(project_name) if multiAction else None
 			restart_compose_project(project_name)
+			if multiAction:
+				refresh_multi_action_menu(chatId, messageId, project_container_names)
 
 		# ENTER RUN PROJECT (Level 2: show project containers)
 		elif comando == "enterRunProject":
-			handle_enter_project_level2('Run', containerName, chatId, messageId)
+			enter_project_multi_aware('Run', containerName, chatId, messageId)
 
 		# BACK TO RUN LEVEL 1
 		elif comando == "backToRunLevel1":
-			result = build_back_to_level1_keyboard('Run', chatId, messageId)
-			if result:
-				markup, message_key = result
-				edit_message_text(get_text(message_key), chatId, messageId, reply_markup=markup)
+			back_to_level1_multi_aware('Run', chatId, messageId)
 
 		# RUN WHOLE PROJECT
 		elif comando == "runWholeProject":
 			project_name = containerName
+			# Captured before acting so every service can be marked as done
+			project_container_names = get_project_container_names(project_name) if multiAction else None
 			run_compose_project(project_name)
+			if multiAction:
+				refresh_multi_action_menu(chatId, messageId, project_container_names)
 
 		# ENTER STOP PROJECT (Level 2: show project containers)
 		elif comando == "enterStopProject":
-			handle_enter_project_level2('Stop', containerName, chatId, messageId)
+			enter_project_multi_aware('Stop', containerName, chatId, messageId)
 
 		# BACK TO STOP LEVEL 1
 		elif comando == "backToStopLevel1":
-			result = build_back_to_level1_keyboard('Stop', chatId, messageId)
-			if result:
-				markup, message_key = result
-				edit_message_text(get_text(message_key), chatId, messageId, reply_markup=markup)
+			back_to_level1_multi_aware('Stop', chatId, messageId)
 
 		# STOP WHOLE PROJECT
 		elif comando == "stopWholeProject":
 			project_name = containerName
+			# Captured before acting so every service can be marked as done
+			project_container_names = get_project_container_names(project_name) if multiAction else None
 			stop_compose_project(project_name)
+			if multiAction:
+				refresh_multi_action_menu(chatId, messageId, project_container_names)
 
 		# ENTER DELETE PROJECT (Level 2: show project containers)
 		elif comando == "enterDeleteProject":
@@ -2538,7 +2562,7 @@ def button_controller(call):
 
 		# ENTER EXEC PROJECT (Level 2: show project containers)
 		elif comando == "enterExecProject":
-			handle_enter_project_level2('Exec', containerName, chatId, messageId, filter_running_only=True)
+			handle_enter_project_level2('Exec', containerName, chatId, messageId)
 
 		# BACK TO EXEC LEVEL 1
 		elif comando == "backToExecLevel1":
@@ -3263,6 +3287,9 @@ def _execute_container_action(action, containerId, containerName, from_schedule=
 		containerId: Container ID
 		containerName: Container name
 		from_schedule: Whether called from schedule
+
+	Returns:
+		None on success, or the error message that was already sent to the user
 	"""
 	action_map = {
 		'run': {
@@ -3285,7 +3312,7 @@ def _execute_container_action(action, containerId, containerName, from_schedule=
 	config = action_map.get(action)
 	if not config:
 		error(f"Unknown action: {action}")
-		return
+		return f"Unknown action: {action}"
 
 	debug(f"Running command: {config['debug']} for container {containerName}")
 	x = send_message(message=get_text(config['message_key'], containerName))
@@ -3294,15 +3321,16 @@ def _execute_container_action(action, containerId, containerName, from_schedule=
 		delete_message(x.message_id)
 	if result:
 		send_message(message=result)
+	return result
 
 def run(containerId, containerName, from_schedule=False):
-	_execute_container_action('run', containerId, containerName, from_schedule)
+	return _execute_container_action('run', containerId, containerName, from_schedule)
 
 def stop(containerId, containerName, from_schedule=False):
-	_execute_container_action('stop', containerId, containerName, from_schedule)
+	return _execute_container_action('stop', containerId, containerName, from_schedule)
 
 def restart(containerId, containerName, from_schedule=False):
-	_execute_container_action('restart', containerId, containerName, from_schedule)
+	return _execute_container_action('restart', containerId, containerName, from_schedule)
 
 def _execute_compose_project_action(action, project_name, show_extended=True):
 	"""
@@ -4389,7 +4417,16 @@ def build_generic_keyboard(container_available, selected_containers, originalMes
 	markup.add(*fixed_buttons)
 	return markup
 
-def build_hierarchical_keyboard(containers, action_type, bot_container_name, filter_standalone_status=None, filter_projects_with_all_status=None):
+def count_actionable_buttons(markup):
+	"""
+	Number of container/project buttons in a menu keyboard, ignoring the last
+	row (which always holds the fixed cancel/close/back buttons). Zero means the
+	menu has nothing left to act on.
+	"""
+	rows = markup.keyboard or []
+	return sum(len(row) for row in rows[:-1])
+
+def build_hierarchical_keyboard(containers, action_type, bot_container_name, filter_standalone_status=None, filter_projects_with_all_status=None, marked_names=None):
 	"""
 	Build hierarchical keyboard with Compose projects and standalone containers.
 	Level 1: Shows projects (📦) and standalone containers (🐳)
@@ -4400,6 +4437,8 @@ def build_hierarchical_keyboard(containers, action_type, bot_container_name, fil
 		bot_container_name: Name of the bot container to exclude
 		filter_standalone_status: Optional list of statuses to filter standalone containers (e.g., ['running', 'restarting'])
 		filter_projects_with_all_status: Optional list of statuses - hide projects where ALL containers have these statuses
+		marked_names: Optional set of container names already acted upon in a
+			multi-action session; they show a check instead of their status emoji
 
 	Returns:
 		InlineKeyboardMarkup: Keyboard with projects and standalone containers
@@ -4485,8 +4524,12 @@ def build_hierarchical_keyboard(containers, action_type, bot_container_name, fil
 		if filter_standalone_status and container.status not in filter_standalone_status:
 			continue
 
-		# Get status emoji
-		status_emoji = get_status_emoji(container.status, container.name, container)
+		# Get status emoji. Containers already acted upon in a multi-action
+		# session show a check instead, so the list stays scannable
+		if marked_names and container.name in marked_names:
+			status_emoji = ICON_CONTAINER_ACTION_DONE
+		else:
+			status_emoji = get_status_emoji(container.status, container.name, container)
 
 		# Determine callback action based on action_type
 		action_lower = action_type.lower()
@@ -4509,30 +4552,41 @@ def build_hierarchical_keyboard(containers, action_type, bot_container_name, fil
 
 	markup.add(*botones)
 
-	# Add cancel button
-	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+	# Add cancel button. Once something has been acted upon there is nothing
+	# left to cancel, only to close
+	markup.add(InlineKeyboardButton(get_text("button_close" if marked_names else "button_cancel"), callback_data="cerrar"))
 
 	return markup, standalone_containers
 
-def handle_enter_project_level2(action_type, project_name, chatId, messageId, filter_running_only=False):
+# Status filters applied inside a Compose project (Level 2). They mirror the
+# Level 1 filters so the count on the project button and the list you get after
+# entering it always agree: /run only offers stopped services, /stop only
+# running ones. Actions missing here show every service in the project.
+PROJECT_LEVEL2_STATUS_FILTERS = {
+	'run': ['exited', 'stopped', 'paused', 'created'],
+	'stop': ['running', 'restarting'],
+	'exec': ['running', 'restarting'],
+}
+
+def build_project_level2_menu(action_type, project_name, chatId, messageId, marked_names=None):
 	"""
-	Generic function to handle "enter...Project" callbacks (Level 2).
+	Builds the Level 2 menu for a Compose project and refreshes the container
+	name cache attached to the message.
 
 	Args:
 		action_type: Type of action ('restart', 'run', 'stop', 'delete', 'exec', 'logs', 'logfile', 'checkupdate', 'info', 'changetag', 'compose')
 		project_name: Name of the project
 		chatId: Chat ID for saving cache
 		messageId: Message ID for saving cache
-		filter_running_only: If True, only show running/restarting containers
+		marked_names: Optional set of container names already acted upon
 
 	Returns:
-		None (sends message directly)
+		tuple: (markup, text) or None if the project does not exist
 	"""
 	project_info = docker_manager.get_project_info(project_name)
 
 	if not project_info:
-		send_message(message=get_text("error_project_not_found", project_name))
-		return
+		return None
 
 	# Configuration map for message keys
 	message_config = {
@@ -4551,21 +4605,123 @@ def handle_enter_project_level2(action_type, project_name, chatId, messageId, fi
 		project_name,
 		action_type.lower(),
 		f'backTo{action_type}Level1',  # Use action_type as-is (already has correct capitalization)
-		filter_running_only=filter_running_only
+		filter_status=PROJECT_LEVEL2_STATUS_FILTERS.get(action_type.lower()),
+		marked_names=marked_names
 	)
 
 	# Save container cache
 	save_container_cache(chatId, messageId, project_info.containers)
 
-	# Send message
-	edit_message_text(
-		get_text(message_key, project_name),
-		chatId,
-		messageId,
-		reply_markup=markup
-	)
+	return markup, get_text(message_key, project_name)
 
-def build_back_to_level1_keyboard(action_type, chatId, messageId, bot_container_name=CONTAINER_NAME):
+def handle_enter_project_level2(action_type, project_name, chatId, messageId, marked_names=None):
+	"""
+	Generic function to handle "enter...Project" callbacks (Level 2).
+
+	Args:
+		action_type: Type of action ('restart', 'run', 'stop', 'delete', 'exec', 'logs', 'logfile', 'checkupdate', 'info', 'changetag', 'compose')
+		project_name: Name of the project
+		chatId: Chat ID for saving cache
+		messageId: Message ID for saving cache
+		marked_names: Optional set of container names already acted upon
+
+	Returns:
+		None (sends message directly)
+	"""
+	menu = build_project_level2_menu(action_type, project_name, chatId, messageId, marked_names)
+
+	if not menu:
+		send_message(message=get_text("error_project_not_found", project_name))
+		return
+
+	markup, text = menu
+	edit_message_text(text, chatId, messageId, reply_markup=markup)
+
+def get_project_container_names(project_name):
+	"""Names of every container in a Compose project, empty when it is unknown."""
+	project_info = docker_manager.get_project_info(project_name)
+	return [c.name for c in project_info.containers] if project_info else []
+
+def enter_project_multi_aware(action_type, project_name, chatId, messageId):
+	"""
+	Enters a Compose project, pointing any multi-action session at it so later
+	repaints land on the project list instead of the top level.
+	"""
+	session = load_multi_action(chatId, messageId)
+	done = session["done"] if session else None
+	if session:
+		save_multi_action(chatId, messageId, session["action"], 2, project_name, done)
+	handle_enter_project_level2(action_type, project_name, chatId, messageId, marked_names=done)
+
+def back_to_level1_multi_aware(action_type, chatId, messageId):
+	"""Returns to the top-level list, keeping any multi-action session in sync."""
+	session = load_multi_action(chatId, messageId)
+	done = session["done"] if session else None
+	if session:
+		save_multi_action(chatId, messageId, session["action"], 1, None, done)
+	result = build_back_to_level1_keyboard(action_type, chatId, messageId, marked_names=done)
+	if result:
+		markup, message_key = result
+		edit_message_text(get_text(message_key), chatId, messageId, reply_markup=markup)
+
+def close_multi_action_menu(chatId, messageId):
+	"""Closes a multi-action menu and drops the state attached to its message."""
+	delete_message(messageId, chat_id=chatId)
+	clear_multi_action(chatId, messageId)
+	clear_container_cache(chatId, messageId)
+
+def refresh_multi_action_menu(chatId, messageId, container_names=None, succeeded=True):
+	"""
+	Repaints a /run, /stop or /restart menu after one of its buttons was pressed,
+	so the user can keep acting on more containers without reopening it.
+
+	The keyboard is rebuilt from the live Docker state, so this must run *after*
+	the Docker action has finished. Containers already acted upon are marked with
+	a check; for /run and /stop the status filters drop them from the list
+	altogether. A project list that runs out of services steps back to the top
+	level, and a top level with nothing left closes itself.
+
+	Args:
+		chatId: Chat ID
+		messageId: ID of the menu message
+		container_names: Names of the containers just acted upon, or None to
+			only repaint
+		succeeded: False when the action failed, so nothing is marked as done
+	"""
+	# Serialised: two presses landing at once must not build their keyboards from
+	# interleaved state and repaint out of order
+	with _menu_refresh_lock:
+		session = load_multi_action(chatId, messageId)
+		if not session:
+			return
+
+		action = session["action"]
+		done = session["done"]
+
+		if container_names and succeeded:
+			done.update(container_names)
+			save_multi_action(chatId, messageId, action, session["level"], session["project"], done)
+
+		# Level 2: repaint the project, or fall through to level 1 when it is empty
+		if session["level"] == 2 and session["project"]:
+			menu = build_project_level2_menu(action, session["project"], chatId, messageId, marked_names=done)
+			if menu and count_actionable_buttons(menu[0]):
+				markup, text = menu
+				edit_message_text(text, chatId, messageId, reply_markup=markup)
+				return
+			# Nothing left here (or the project is gone): go back to the top level
+			save_multi_action(chatId, messageId, action, 1, None, done)
+
+		# Level 1: repaint, or close the menu when there is nothing left to do
+		result = build_back_to_level1_keyboard(action, chatId, messageId, marked_names=done)
+		if not result or not count_actionable_buttons(result[0]):
+			close_multi_action_menu(chatId, messageId)
+			return
+
+		markup, message_key = result
+		edit_message_text(get_text(message_key), chatId, messageId, reply_markup=markup)
+
+def build_back_to_level1_keyboard(action_type, chatId, messageId, bot_container_name=CONTAINER_NAME, marked_names=None):
 	"""
 	Generic function to build "backTo...Level1" keyboards.
 
@@ -4574,6 +4730,7 @@ def build_back_to_level1_keyboard(action_type, chatId, messageId, bot_container_
 		chatId: Chat ID for saving cache
 		messageId: Message ID for saving cache
 		bot_container_name: Name of bot container to exclude (None to include all)
+		marked_names: Optional set of container names already acted upon
 
 	Returns:
 		tuple: (markup, message_key) or None if no containers
@@ -4692,7 +4849,8 @@ def build_back_to_level1_keyboard(action_type, chatId, messageId, bot_container_
 		action_type,
 		exclude_container,
 		filter_standalone_status=config['filter_standalone_status'],
-		filter_projects_with_all_status=config['filter_projects_with_all_status']
+		filter_projects_with_all_status=config['filter_projects_with_all_status'],
+		marked_names=marked_names
 	)
 
 	# Save container cache for standalone containers
@@ -4701,7 +4859,7 @@ def build_back_to_level1_keyboard(action_type, chatId, messageId, bot_container_
 
 	return markup, config['message_key']
 
-def build_compose_project_level2_keyboard(project_info, project_name, action_type, back_callback, filter_running_only=False):
+def build_compose_project_level2_keyboard(project_info, project_name, action_type, back_callback, filter_status=None, marked_names=None):
 	"""
 	Generic function to build Level 2 keyboard for Compose projects.
 
@@ -4710,7 +4868,9 @@ def build_compose_project_level2_keyboard(project_info, project_name, action_typ
 		project_name: Name of the project
 		action_type: Type of action ('restart', 'run', 'stop', 'delete', 'exec', 'logs', 'logfile', 'info', 'changetag', 'checkupdate', 'ports')
 		back_callback: Callback data for the back button
-		filter_running_only: If True, only show running/restarting containers
+		filter_status: Optional list of statuses to keep (see PROJECT_LEVEL2_STATUS_FILTERS)
+		marked_names: Optional set of container names already acted upon in a
+			multi-action session; they show a check instead of their status emoji
 
 	Returns:
 		InlineKeyboardMarkup: Configured keyboard
@@ -4739,12 +4899,15 @@ def build_compose_project_level2_keyboard(project_info, project_name, action_typ
 	for service_name in sort_project_services(project_info):
 		container = project_info.services[service_name]
 
-		# Filter running only if requested
-		if filter_running_only and container.status not in ['running', 'restarting']:
+		# Filter by status if requested
+		if filter_status and container.status not in filter_status:
 			continue
 
 		# Determine status indicator
-		if action_type.lower() == 'checkupdate':
+		if marked_names and container.name in marked_names:
+			# Already acted upon in a multi-action session
+			status_indicator = ICON_CONTAINER_ACTION_DONE
+		elif action_type.lower() == 'checkupdate':
 			# Special case: use update emoji for checkupdate
 			status_indicator = get_update_emoji(container.name)
 		elif config.get('use_emoji', False):
@@ -5402,6 +5565,56 @@ def clear_container_cache(chat_id, message_id):
 	"""Clears the container cache for a message"""
 	delete_cache_item(f"containers_{chat_id}_{message_id}")
 
+def save_multi_action(chat_id, message_id, action, level=1, project=None, done=None):
+	"""
+	Stores the multi-action session attached to a /run, /stop or /restart menu.
+
+	While this session exists the menu message is kept alive after every press:
+	the action runs, the keyboard is rebuilt from the real Docker state and the
+	containers already acted upon are marked with a check.
+
+	Args:
+		chat_id: Chat ID
+		message_id: ID of the menu message
+		action: 'Run', 'Stop' or 'Restart'
+		level: 1 for the top-level list, 2 for a Compose project list
+		project: Project name when level is 2
+		done: Set of container names already acted upon (successfully)
+	"""
+	from datetime import datetime
+	write_cache_item(f"multi_action_{chat_id}_{message_id}", {
+		"_timestamp": datetime.now().isoformat(),
+		"action": action,
+		"level": level,
+		"project": project,
+		"done": set(done) if done else set()
+	})
+
+def load_multi_action(chat_id, message_id):
+	"""Returns the multi-action session for a message, or None if absent/expired."""
+	from datetime import datetime, timedelta
+	data = read_cache_item(f"multi_action_{chat_id}_{message_id}")
+	if not isinstance(data, dict) or not data.get("action"):
+		return None
+
+	# Same 7 day expiry as the container name cache
+	timestamp = data.get("_timestamp")
+	if timestamp:
+		try:
+			if datetime.now() - datetime.fromisoformat(timestamp) > timedelta(days=7):
+				clear_multi_action(chat_id, message_id)
+				return None
+		except:
+			pass
+
+	if not isinstance(data.get("done"), set):
+		data["done"] = set(data.get("done") or [])
+	return data
+
+def clear_multi_action(chat_id, message_id):
+	"""Clears the multi-action session for a message"""
+	delete_cache_item(f"multi_action_{chat_id}_{message_id}")
+
 def get_container_name_by_id(container_id):
 	"""
 	Returns the name of a container by its ID from the Docker API
@@ -5515,11 +5728,23 @@ def _delete_message_direct(chat_id, message_id):
 		# Silently ignore errors when deleting messages (they may have been deleted already)
 		pass
 
+def _is_message_not_modified(exception):
+	"""
+	True when Telegram rejected an edit because the message is already exactly
+	what we are sending. It happens legitimately (e.g. re-restarting a container
+	that is already marked as done in a multi-action menu) and must not go
+	through the queue retry loop, which would stall every pending message.
+	"""
+	return "message is not modified" in str(exception).lower()
+
 def _edit_message_text_direct(chat_id, message_id, text, parse_mode, reply_markup):
 	"""Edits the text of a message directly without using the queue"""
 	try:
 		return bot.edit_message_text(text, chat_id, message_id, parse_mode=parse_mode, reply_markup=reply_markup)
 	except Exception as e:
+		if _is_message_not_modified(e):
+			debug(f"Message {message_id} already up to date, nothing to edit")
+			return None
 		debug(f"Could not edit message {message_id}: {e}")
 		raise
 
@@ -5528,6 +5753,9 @@ def _edit_message_reply_markup_direct(chat_id, message_id, reply_markup):
 	try:
 		return bot.edit_message_reply_markup(chat_id, message_id, reply_markup=reply_markup)
 	except Exception as e:
+		if _is_message_not_modified(e):
+			debug(f"Markup of message {message_id} already up to date, nothing to edit")
+			return None
 		debug(f"Could not edit markup of message {message_id}: {e}")
 		raise
 
@@ -5901,6 +6129,10 @@ if __name__ == '__main__':
 		starting_message += f"\n✅ {get_text('check_for_updates')}"
 	else:
 		starting_message += f"\n❌ {get_text('check_for_updates')}"
+	if MULTI_SELECTION:
+		starting_message += f"\n✅ {get_text('multi_selection')}"
+	else:
+		starting_message += f"\n❌ {get_text('multi_selection')}"
 	starting_message += f"\n<i>⚙️ v{VERSION}</i>"
 	starting_message += f"\n{get_text('channel')}"
 	send_message(message=starting_message)

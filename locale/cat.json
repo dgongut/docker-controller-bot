@@ -36,6 +36,7 @@
   "change_tag_container": "⚙️ Prem en un contenidor per canviar el seu tag",
   "channel": "📰 <a href=\"https://t.me/dockercontrollerbotnews\">Novetats</a>",
   "check_for_updates": "Comprovar actualitzacions",
+  "multi_selection": "Selecció múltiple",
   "command_executed_without_output": "✅ El comando s'ha executat correctament en el contenidor",
   "compose": "📃 El docker-compose de $1. Recorda, aquesta funció es troba en fase <i>experimental</i>",
   "confirm_change_tag": "⚠️ ¿Estàs segur de que vols canviar el tag del contenidor <b>$1</b> a <code>$2</code>?",

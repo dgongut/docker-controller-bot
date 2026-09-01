@@ -23,6 +23,7 @@ Have controll of your docker containers from one single place.
 
 - ✅ List containers
 - ✅ Start, stop and remove containers
+- ✅ Multi-selection on `/run`, `/stop` and `/restart`: the menu stays open and refreshes itself so you can chain several containers
 - ✅ Docker Compose project support with hierarchical navigation (project → containers)
 - ✅ Get logs directly on the chat or on a file
 - ✅ Extract the container's docker-compose
@@ -80,7 +81,7 @@ Most commands can be used in two ways: typing the command alone (`/run`) to let 
 
 If your containers were created with `docker compose`, the bot recognizes them automatically as a **project** and shows them grouped.
 
-Commands like `/run`, `/stop`, `/restart`, `/delete`, `/info` or `/compose` will show the project list first, and the containers when you pick a project. Start, stop, restart and delete actions can be applied to the **whole project** or to an individual container.
+Commands like `/run`, `/stop`, `/restart`, `/delete`, `/info` or `/compose` will show the project list first, and the containers when you pick a project. On `/run` and `/stop` only the services the action makes sense for are offered (stopped and running respectively), matching what the project button counter already showed. Start, stop, restart and delete actions can be applied to the **whole project** or to an individual container.
 
 ## Scheduled tasks (`/schedule`)
 
@@ -107,6 +108,7 @@ From `/schedule` you can create tasks that run on a cron schedule.
 |BUTTON_COLUMNS |❌| Number of column buttons on the list of containers. Default is 2 |
 |LANGUAGE |❌| Bot's language, it can be ES / EN / NL / DE / RU / GL / IT / CAT. Default is ES (Spanish) | 
 |EXTENDED_MESSAGES |❌| The bot will show more information messages. 0 no - 1 yes. Default is 0 |
+|MULTI_SELECTION |❌| Whether the `/run`, `/stop` and `/restart` menus stay open so you can act on several containers in a row. 0 no - 1 yes. Default is 1 |
 
 ## Anotations
 > [!WARNING]
@@ -134,6 +136,7 @@ services:
             #- BUTTON_COLUMNS=2
             #- LANGUAGE=ES
             #- EXTENDED_MESSAGES=0
+            #- MULTI_SELECTION=1
         volumes:
             - /var/run/docker.sock:/var/run/docker.sock # DON'T CHANGE
             - /path/to/save/the/schedule:/app/schedule # CHANGE THE LEFT PATH

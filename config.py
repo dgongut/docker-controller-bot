@@ -13,6 +13,7 @@ CONTAINER_NAME = os.environ.get("CONTAINER_NAME")
 LANGUAGE = os.environ.get("LANGUAGE", "ES")
 EXTENDED_MESSAGES = bool(int(os.environ.get("EXTENDED_MESSAGES", "0")))
 BUTTON_COLUMNS = int(os.environ.get("BUTTON_COLUMNS", "2"))
+MULTI_SELECTION = bool(int(os.environ.get("MULTI_SELECTION", "1")))
 
 # CONSTANTS
 UPDATER_IMAGE = "dgongut/docker-container-updater:latest"
@@ -27,6 +28,7 @@ FULL_MUTE_FILE_PATH = f'{SCHEDULE_PATH}/{MUTE_FILE}'
 DONORS_URL = "https://donate.dgongut.com/donors.json"
 ICON_CONTAINER_MARK_FOR_UPDATE = "➕"
 ICON_CONTAINER_MARKED_FOR_UPDATE = "✅"
+ICON_CONTAINER_ACTION_DONE = "✅"
 
 # LABELS
 LABEL_IGNORE_CHECK_UPDATES = "DCB-Ignore-Check-Updates"
@@ -138,6 +140,15 @@ PROJECT_COMMANDS = {
     "enterChangeTagProject",
     "enterLogfileProject",
     "enterComposeProject",
+}
+
+# Commands that act on a container from a /run, /stop or /restart menu that is
+# kept open for multi-selection: instead of closing, the menu is rebuilt from
+# the live Docker state after the action finishes.
+MULTI_ACTION_COMMANDS = {
+    "run", "runWholeProject",
+    "stop", "stopWholeProject",
+    "restart", "restartWholeProject",
 }
 
 # SCHEDULE COMMAND PATTERNS - Define required parameters for each schedule action

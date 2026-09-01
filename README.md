@@ -23,6 +23,7 @@ Lleva el control de tus contenedores docker desde un único lugar.
 
 - ✅ Listar contenedores
 - ✅ Arrancar, parar y eliminar contenedores
+- ✅ Selección múltiple en `/run`, `/stop` y `/restart`: el menú se queda abierto y se va actualizando para encadenar varios contenedores
 - ✅ Soporte para proyectos Docker Compose con navegación jerárquica (proyecto → contenedores)
 - ✅ Obtener los logs tanto de manera directa como a través de fichero
 - ✅ Extraer el docker-compose de tus contenedores
@@ -80,7 +81,7 @@ Casi todos los comandos pueden ejecutarse en dos modos: escribiendo el comando s
 
 Si tus contenedores fueron creados con `docker compose`, el bot los reconoce automáticamente como un **proyecto** y los presenta agrupados.
 
-En comandos como `/run`, `/stop`, `/restart`, `/delete`, `/info` o `/compose` verás primero la lista de proyectos y, al pulsar uno, sus contenedores. Las acciones de inicio, parada, reinicio y borrado se pueden aplicar al **proyecto entero** o a un contenedor individual.
+En comandos como `/run`, `/stop`, `/restart`, `/delete`, `/info` o `/compose` verás primero la lista de proyectos y, al pulsar uno, sus contenedores. En `/run` y `/stop` solo se ofrecen los servicios sobre los que la acción tiene sentido (parados y arrancados respectivamente), igual que ya indicaba el contador del botón del proyecto. Las acciones de inicio, parada, reinicio y borrado se pueden aplicar al **proyecto entero** o a un contenedor individual.
 
 ## Programaciones (`/schedule`)
 
@@ -107,6 +108,7 @@ Desde `/schedule` puedes crear tareas que se ejecuten en cron.
 |BUTTON_COLUMNS |❌| Numero de columnas de botones en las listas de contenedores. Por defecto 2 |
 |LANGUAGE |❌| Idioma, puede ser ES / EN / NL / DE / RU / GL / IT / CAT. Por defecto ES (Spanish) | 
 |EXTENDED_MESSAGES |❌| Si se desea que muestre más mensajes de información. 0 no - 1 sí. Por defecto 0 | 
+|MULTI_SELECTION |❌| Si en `/run`, `/stop` y `/restart` el menú se queda abierto para actuar sobre varios contenedores seguidos. 0 no - 1 sí. Por defecto 1 |
 
 ## Anotaciones
 > [!WARNING]
@@ -134,6 +136,7 @@ services:
             #- BUTTON_COLUMNS=2
             #- LANGUAGE=ES
             #- EXTENDED_MESSAGES=0
+            #- MULTI_SELECTION=1
         volumes:
             - /var/run/docker.sock:/var/run/docker.sock # NO CAMBIAR
             - /ruta/para/guardar/las/programaciones:/app/schedule # CAMBIAR LA PARTE IZQUIERDA
