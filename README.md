@@ -146,11 +146,54 @@ Con **un solo host** —el caso normal— nada de esto aparece: el bot se ve exa
 > [!WARNING]
 > `tcp://` sin TLS **no tiene autenticación de ningún tipo**: cualquiera que alcance ese puerto controla el Docker de esa máquina por completo, con permisos equivalentes a root. No lo expongas a internet.
 
-### `ssh://`, que es la vía cómoda
+### La prueba que lo decide
 
-La conexión la abre el cliente `ssh` del sistema, no una implementación propia. Eso significa que **si `ssh nas` te funciona en tu terminal, aquí también**, con la misma configuración y depurable de la misma forma: `~/.ssh/config`, `known_hosts`, alias de host, puertos e `IdentityFile`.
+Antes de configurar nada en el bot, comprueba desde una terminal **de la máquina donde corre el bot**:
 
-Para eso hay que mapear tu directorio `.ssh` al contenedor:
+```bash
+ssh usuario@maquina docker version
+```
+
+Si eso te devuelve las versiones de cliente y servidor, `ssh://usuario@maquina` va a funcionar. Si falla, el mensaje te dice exactamente qué arreglar y no hace falta tocar el bot para nada.
+
+El motivo es que el bot no habla un protocolo propio: abre una sesión ssh y ejecuta `docker system dial-stdio` en la máquina remota. Así que lo único que hace falta allí es que el usuario tenga el binario `docker` en su PATH y permiso sobre el socket.
+
+| Lo que ves | Qué falta |
+|:---|:---|
+| `Permission denied (publickey)` | La clave no está autorizada. Repite el `ssh-copy-id` |
+| `command not found: docker` | El `docker` no está en el PATH de ese usuario |
+| `permission denied ... /var/run/docker.sock` | El usuario no está en el grupo `docker` |
+| `Host key verification failed` | Falta la máquina en `known_hosts` |
+
+### Paso a paso con `ssh://`
+
+**1. Habilita SSH en la máquina remota.** En un Linux normal ya está. En un NAS suele ser un interruptor en su panel (ver más abajo).
+
+**2. Genera una clave sin passphrase** en la máquina donde corre el bot. Sin passphrase porque no va a haber nadie para teclearla:
+
+```bash
+ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519
+```
+
+**3. Autorízala en la máquina remota:**
+
+```bash
+ssh-copy-id -i ~/.ssh/id_ed25519.pub usuario@maquina
+```
+
+**4. Conéctate una vez a mano** para que quede en `known_hosts`, y aprovecha para hacer la prueba de arriba:
+
+```bash
+ssh usuario@maquina docker version
+```
+
+**5. Da acceso al socket al usuario remoto**, si el paso 4 se quejó de permisos:
+
+```bash
+sudo usermod -aG docker usuario   # y vuelve a entrar por ssh
+```
+
+**6. Mapea tu `.ssh` al contenedor** y reinicia el bot:
 
 ```yaml
 volumes:
@@ -159,11 +202,87 @@ volumes:
     - ~/.ssh:/root/.ssh:ro # Solo si vas a usar hosts ssh://
 ```
 
-Tres cosas a tener en cuenta:
+La conexión la abre el cliente `ssh` del sistema, no una implementación propia, así que se respeta tu `~/.ssh/config` entero: alias de host, puertos, `IdentityFile`, `User`. Si en tu config tienes un `Host nas`, la URL puede ser simplemente `ssh://nas`.
 
-- La clave **no puede tener passphrase**, o no habrá nadie para teclearla.
-- La máquina remota tiene que estar en `known_hosts`, o la conexión se rechazará. La forma más simple es conectarte una vez a mano desde el host antes de mapear el directorio.
-- El usuario remoto necesita permiso sobre el socket de Docker, normalmente estando en el grupo `docker`.
+### Paso a paso con `tcp://` + TLS
+
+Más trabajo, pero no depende de ssh. En la **máquina remota**:
+
+**1. Genera la CA y los certificados.** Sustituye `maquina.local` por el nombre o IP con el que el bot va a llamarla:
+
+```bash
+openssl genrsa -aes256 -out ca-key.pem 4096
+openssl req -new -x509 -days 3650 -key ca-key.pem -sha256 -out ca.pem
+
+openssl genrsa -out server-key.pem 4096
+openssl req -subj "/CN=maquina.local" -sha256 -new -key server-key.pem -out server.csr
+echo "subjectAltName = DNS:maquina.local,IP:192.168.1.50" > extfile.cnf
+echo "extendedKeyUsage = serverAuth" >> extfile.cnf
+openssl x509 -req -days 3650 -sha256 -in server.csr -CA ca.pem -CAkey ca-key.pem   -CAcreateserial -out server-cert.pem -extfile extfile.cnf
+
+openssl genrsa -out key.pem 4096
+openssl req -subj "/CN=client" -new -key key.pem -out client.csr
+echo "extendedKeyUsage = clientAuth" > extfile-client.cnf
+openssl x509 -req -days 3650 -sha256 -in client.csr -CA ca.pem -CAkey ca-key.pem   -CAcreateserial -out cert.pem -extfile extfile-client.cnf
+```
+
+**2. Configura el daemon** en `/etc/docker/daemon.json`:
+
+```json
+{
+  "tlsverify": true,
+  "tlscacert": "/etc/docker/certs/ca.pem",
+  "tlscert": "/etc/docker/certs/server-cert.pem",
+  "tlskey": "/etc/docker/certs/server-key.pem",
+  "hosts": ["unix:///var/run/docker.sock", "tcp://0.0.0.0:2376"]
+}
+```
+
+En systemd hay que quitar el `-H` que trae la unidad, o `dockerd` se queja de que el host está definido dos veces:
+
+```bash
+sudo mkdir -p /etc/systemd/system/docker.service.d
+printf '[Service]
+ExecStart=
+ExecStart=/usr/bin/dockerd
+' |   sudo tee /etc/systemd/system/docker.service.d/override.conf
+sudo systemctl daemon-reload && sudo systemctl restart docker
+```
+
+**3. Copia `ca.pem`, `cert.pem` y `key.pem`** a la máquina del bot y mapéalos:
+
+```yaml
+volumes:
+    - /ruta/a/los/certs:/certs:ro
+```
+
+**4. Comprueba antes de configurar el bot:**
+
+```bash
+docker --tlsverify --tlscacert=ca.pem --tlscert=cert.pem --tlskey=key.pem   -H tcp://maquina.local:2376 version
+```
+
+### Synology, UnRAID y otros NAS
+
+**Ninguno expone el puerto de Docker por defecto**, y es lo correcto: hacerlo sin TLS sería dejar la máquina abierta. Así que la vía es `ssh://` en los dos casos.
+
+**UnRAID** suele ser el fácil: el SSH viene habilitado, se entra como `root` y el `docker` está en el PATH. Normalmente basta con:
+
+```bash
+ssh root@unraid docker version
+```
+
+Si eso responde, tu URL es `ssh://root@unraid`.
+
+**Synology** es el incómodo, y cuánto depende de tu versión de DSM:
+
+1. Habilita SSH en *Panel de control → Terminal y SNMP → Activar servicio SSH*.
+2. Prueba `ssh tu_usuario@synology docker version`.
+
+Los dos tropiezos habituales son que el `docker` de Container Manager no está en el PATH de una sesión ssh, y que el socket es de `root` y tu usuario administrador no lo alcanza. En DSM moderno el login directo como root está deshabilitado, así que si te topas con eso las salidas prácticas son un contenedor **socket proxy** en el propio Synology (que además te deja limitar qué puede hacer el bot) o la vía `tcp://` + TLS de arriba.
+
+> [!TIP]
+> Si tienes tus máquinas en una red privada tipo Tailscale o WireGuard, `tcp://` a secas sobre esa red te evita tanto los certificados como el ssh, porque el cifrado y la autenticación los pone la malla. Es lo más cómodo cuando ya la tienes montada.
 
 ### Las credenciales nunca se guardan en los ajustes
 
