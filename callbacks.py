@@ -783,11 +783,7 @@ def cb_scheduleSelectAction(ctx):
 			core.save_schedule_state(ctx.userId, schedule_state)
 		elif ctx.action == "prune":
 			schedule_state["container"] = None  # Not applicable for prune
-			# With one host there is nothing to ask, so the flow is unchanged.
-			if core.host_registry.is_single_host():
-				core.ask_schedule_prune_type(ctx.userId, schedule_state)
-			else:
-				core.ask_schedule_prune_host(ctx.userId, schedule_state)
+			core.ask_schedule_prune_type(ctx.userId, schedule_state)
 		else:
 			# For run, stop, restart, exec - ask for container
 			# show_output will remain None until after container selection for exec
@@ -884,7 +880,7 @@ def cb_scheduleSelectHost(ctx):
 		core.send_message(message=get_text("error_invalid_selection"))
 		return
 	schedule_state["host"] = ctx.value
-	core.ask_schedule_prune_type(ctx.userId, schedule_state)
+	core.ask_schedule_prune_show_output(ctx.userId, schedule_state)
 
 
 @callback(
@@ -895,28 +891,11 @@ def cb_scheduleSelectPruneType(ctx):
 	schedule_state = core.load_schedule_state(ctx.userId)
 	if schedule_state:
 		schedule_state["prune_type"] = ctx.pruneType
-		schedule_state["step"] = "ask_show_output_prune"
-
-		# Delete previous message if exists
-		if schedule_state.get("last_message_id"):
-			try:
-				core.delete_message(schedule_state.get("last_message_id"))
-			except:
-				pass
-
-		# Build message with summary
-		message_text = core._build_schedule_summary(schedule_state)
-		message_text += f"\n\n{get_text('schedule_ask_show_output')}"
-
-		markup = InlineKeyboardMarkup(row_width=2)
-		markup.add(
-			InlineKeyboardButton(get_text("button_yes"), callback_data="scheduleSelectPruneShowOutput|yes"),
-			InlineKeyboardButton(get_text("button_no"), callback_data="scheduleSelectPruneShowOutput|no")
-		)
-		markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
-		msg = core.send_message(message=message_text, reply_markup=markup)
-		schedule_state["last_message_id"] = msg.message_id if msg else None
-		core.save_schedule_state(ctx.userId, schedule_state)
+		# With one host there is nothing to ask, so the flow is unchanged.
+		if core.host_registry.is_single_host():
+			core.ask_schedule_prune_show_output(ctx.userId, schedule_state)
+		else:
+			core.ask_schedule_prune_host(ctx.userId, schedule_state)
 
 @callback(
 	name='scheduleSelectPruneShowOutput',

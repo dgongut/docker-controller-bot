@@ -40,7 +40,7 @@ from i18n import get_text, language
 from logger import debug, error, warning
 from message_queue import MessageQueue
 
-VERSION = "5.0.0_fase1"
+VERSION = "5.0.0_fase2"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -1749,13 +1749,42 @@ def show_schedule_container_selection(user_id: int, action: str):
 		schedule_state["last_message_id"] = msg.message_id if msg else None
 		save_schedule_state(user_id, schedule_state)
 
+def ask_schedule_prune_show_output(user_id: int, state: dict):
+	"""Asks whether a scheduled prune should report what it removed."""
+	state["step"] = "ask_show_output_prune"
+	if state.get("last_message_id"):
+		try:
+			delete_message(state.get("last_message_id"))
+		except:
+			pass
+
+	message_text = _build_schedule_summary(state)
+	message_text += f"\n\n{get_text('schedule_ask_show_output')}"
+
+	markup = InlineKeyboardMarkup(row_width=2)
+	markup.add(
+		InlineKeyboardButton(get_text("button_yes"), callback_data="scheduleSelectPruneShowOutput|yes"),
+		InlineKeyboardButton(get_text("button_no"), callback_data="scheduleSelectPruneShowOutput|no")
+	)
+	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+
+	msg = send_message(message=message_text, reply_markup=markup)
+	state["last_message_id"] = msg.message_id if msg else None
+	save_schedule_state(user_id, state)
+
+
 def ask_schedule_prune_host(user_id: int, state: dict):
 	"""
 	Asks which host a scheduled prune will clean.
 
 	A prune task picks no container, so nothing else in the flow would say
-	where it runs. Interactive /prune asks the machine before the object type
-	and this follows it, for the same reason: it deletes things.
+	where it runs.
+
+	Asked after the object type, which is where the summary lists it. Matching
+	the order means the summary only ever grows downwards as the answers come
+	in, so the last thing answered is the last line. Interactive /prune asks
+	the machine first instead, because that one deletes on the spot; defining a
+	task deletes nothing until it runs, and the confirmation shows everything.
 	"""
 	state["step"] = "ask_prune_host"
 	if state.get("last_message_id"):

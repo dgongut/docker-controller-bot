@@ -1036,6 +1036,30 @@ def test_the_bot_is_never_offered_to_a_scheduled_task():
 		_restore_hosts()
 
 
+def test_the_flow_asks_in_the_order_the_summary_lists():
+	"""
+	So the summary only grows downwards as the answers come in and the last
+	thing answered is the last line, instead of appearing in the middle.
+	"""
+	order = ["name", "cron", "action", "container", "minutes", "prune_type",
+			"host", "show_output", "command"]
+	state = {key: "x" for key in order}
+	state["action"] = "prune"
+	state["show_output"] = True
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	try:
+		summary = dcb._build_schedule_summary(state)
+		labels = [
+			("prune_type", dcb.get_text("schedule_label_prune_type")),
+			("host", dcb.get_text("schedule_label_host")),
+			("show_output", dcb.get_text("schedule_label_show_output")),
+		]
+		positions = [summary.index(label) for _, label in labels]
+		assert positions == sorted(positions), summary
+	finally:
+		_restore_hosts()
+
+
 def test_a_scheduled_prune_is_asked_which_host():
 	"""
 	It picks no container, so nothing else in the flow would say where it runs.
