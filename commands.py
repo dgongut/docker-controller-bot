@@ -22,6 +22,7 @@ from telebot.types import InlineKeyboardMarkup
 from config import CONTAINER_ID_LENGTH, CONTAINER_NAME, ICON_CONTAINER_MARK_FOR_UPDATE
 from i18n import get_text
 from core import (
+	send_prune_menu,
 	send_picker, manager_for, ref_id,
 	register_command,
 	VERSION, ask_command, ask_text_input,
@@ -32,7 +33,7 @@ from core import (
 	mute, print_donors, restart,
 	run, save_container_cache, save_multi_action,
 	save_update_data, send_message, send_settings_menu,
-	show_container_ports, show_schedule_menu, sort_containers_by_priority,
+	send_ports_menu, show_schedule_menu, sort_containers_by_priority,
 	stop, update_available,
 )
 
@@ -151,15 +152,7 @@ def cmd_changetag(user_id=None, chat_id=None, container_id=None, container_name=
 	send_picker("ChangeTag")
 
 def cmd_prune(user_id=None, chat_id=None, container_id=None, container_name=None, argument=None):
-	markup = InlineKeyboardMarkup(row_width=button_columns())
-	botones = []
-	botones.append(InlineKeyboardButton(get_text("button_containers"), callback_data=f'prune|confirmPruneContainers'))
-	botones.append(InlineKeyboardButton(get_text("button_images"), callback_data=f'prune|confirmPruneImages'))
-	botones.append(InlineKeyboardButton(get_text("button_networks"), callback_data=f'prune|confirmPruneNetworks'))
-	botones.append(InlineKeyboardButton(get_text("button_volumes"), callback_data=f'prune|confirmPruneVolumes'))
-	markup.add(*botones)
-	markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
-	send_message(message=get_text("prune_system"), reply_markup=markup)
+	send_prune_menu()
 
 def cmd_version(user_id=None, chat_id=None, container_id=None, container_name=None, argument=None):
 	x = send_message(message=get_text("version", VERSION))
@@ -177,7 +170,7 @@ def cmd_donors(user_id=None, chat_id=None, container_id=None, container_name=Non
 	print_donors()
 
 def cmd_ports(user_id=None, chat_id=None, container_id=None, container_name=None, argument=None):
-	show_container_ports()
+	send_ports_menu()
 
 def cmd_mute(user_id=None, chat_id=None, container_id=None, container_name=None, argument=None):
 	"""

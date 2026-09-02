@@ -10,6 +10,7 @@ Running this again on an already-migrated install is safe: the seeding is
 skipped outright, and every other step is idempotent.
 """
 
+import json
 import os
 import shutil
 import time
@@ -52,6 +53,7 @@ def run():
 	host_id = _ensure_local_host()
 	_warn_deprecated_env(seeded)
 	_migrate_mute_file()
+	_migrate_schedules(host_id)
 	_discard_legacy_cache()
 	ask_for_language = seeded and not os.environ.get("LANGUAGE")
 	return MigrationResult(host_id=host_id, ask_for_language=ask_for_language)
@@ -172,6 +174,48 @@ def _migrate_mute_file():
 		os.remove(legacy_path)
 	except OSError as e:
 		warning(f"Could not remove the old mute file {legacy_path}: {e}")
+
+
+def _migrate_schedules(local_host_id):
+	"""
+	Stamps the local host onto tasks that predate hosts existing.
+
+	A task says which container to act on by name, and a name is only unique
+	within one daemon. Left blank it would be ambiguous the moment a second
+	host is added, so every existing task is pinned to the machine it was
+	created for, which is the local one.
+	"""
+	path = store.schedules_path()
+	if not os.path.isfile(path):
+		return
+
+	try:
+		with open(path, "r", encoding="utf-8") as handle:
+			document = json.load(handle)
+	except Exception as e:
+		warning(f"Could not read {path} to migrate schedules: {e}")
+		return
+
+	schedules = document.get("schedules")
+	if not isinstance(schedules, list):
+		return
+
+	stamped = 0
+	for schedule in schedules:
+		if isinstance(schedule, dict) and not schedule.get("host"):
+			schedule["host"] = local_host_id
+			stamped += 1
+	if not stamped:
+		return
+
+	temporary = f"{path}.tmp"
+	try:
+		with open(temporary, "w", encoding="utf-8") as handle:
+			json.dump(document, handle, indent=2, ensure_ascii=False)
+		os.replace(temporary, path)
+		debug(f"Pinned {stamped} existing schedules to the local host")
+	except Exception as e:
+		error(f"Could not write the migrated schedules to {path}: {e}")
 
 
 def _discard_legacy_cache():

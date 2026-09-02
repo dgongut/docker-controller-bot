@@ -777,6 +777,174 @@ def test_the_containers_it_offers_keep_their_host():
 
 
 # ---------------------------------------------------------------------------
+# Resolving a typed container name
+# ---------------------------------------------------------------------------
+
+def test_a_name_is_searched_on_every_host():
+	"""
+	What keeps a single-host bot feeling unchanged while a multi-host one needs
+	no extra typing.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": (
+		[_container("plex", "running")] if self.host_id == "h_nas" else [_container("nginx", "running")])
+	try:
+		ref, name, candidates = dcb.resolve_container_argument("plex")
+		assert candidates == []
+		assert dcb.ref_host(ref) == "h_nas", ref
+		assert name == "plex"
+
+		ref, name, candidates = dcb.resolve_container_argument("nginx")
+		assert dcb.ref_host(ref) == "h_local", ref
+	finally:
+		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
+def test_a_repeated_name_asks_instead_of_guessing():
+	"""
+	Guessing here would act on the wrong machine silently, which for /stop or
+	/delete is not recoverable.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": [_container("plex", "running")]
+	try:
+		ref, name, candidates = dcb.resolve_container_argument("plex")
+		assert ref is None, "no debe elegir por su cuenta"
+		assert name == "plex"
+		assert {entry["id"] for entry, _ in candidates} == {"h_local", "h_nas"}
+	finally:
+		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
+def test_the_host_prefix_shortcut():
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": [_container("plex", "running")]
+	try:
+		ref, name, candidates = dcb.resolve_container_argument("nas:plex")
+		assert candidates == []
+		assert dcb.ref_host(ref) == "h_nas", ref
+		assert name == "plex"
+
+		# An unknown prefix is part of the name, not a host.
+		ref, name, candidates = dcb.resolve_container_argument("noexiste:plex")
+		assert (ref, name, candidates) == (None, "noexiste:plex", [])
+	finally:
+		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
+def test_an_unknown_name_resolves_to_nothing():
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": [_container("nginx", "running")]
+	try:
+		assert dcb.resolve_container_argument("noexiste") == (None, "noexiste", [])
+		assert dcb.resolve_container_argument("") == (None, None, [])
+	finally:
+		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
+def test_the_disambiguation_buttons_are_the_ordinary_ones():
+	"""
+	So choosing a host goes through exactly the same path as picking the
+	container from a menu, with no second code path to keep in step.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": [_container("plex", "running")]
+	captured = {}
+
+	class Sent:
+		chat = type("Chat", (), {"id": 1})()
+		message_id = 2
+
+	original_send = dcb.send_message
+	dcb.send_message = lambda **kwargs: (captured.update(kwargs), Sent())[1]
+	try:
+		_, _, candidates = dcb.resolve_container_argument("plex")
+		dcb.send_container_disambiguation("Stop", "plex", candidates)
+		callbacks = harness.keyboard_callbacks(captured["reply_markup"])
+		assert any(c.startswith("stop|h_local:") for c in callbacks), callbacks
+		assert any(c.startswith("stop|h_nas:") for c in callbacks), callbacks
+		for data in callbacks:
+			if data != "cerrar":
+				callback_registry.parse(data)
+	finally:
+		dcb.send_message = original_send
+		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
+def test_every_command_with_a_picker_can_disambiguate():
+	"""A command that can take a name must know which button to offer."""
+	for command, action in dcb.COMMAND_PICKERS.items():
+		spec = dcb.PICKER_ACTIONS.get(action)
+		assert spec is not None, command
+		assert spec.get("container_callback"), (command, action)
+		assert callback_registry.get(spec["container_callback"]) is not None, spec
+
+
+def test_a_scheduled_task_resolves_on_its_own_host():
+	"""
+	A task names a container, and acting on a same-named container elsewhere
+	would be silent and, for stop or exec, destructive.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": [_container("plex", "running")]
+	try:
+		ref = dcb.schedule_container_ref("h_nas", "plex")
+		assert dcb.ref_host(ref) == "h_nas", ref
+		assert dcb.schedule_container_ref("h_nas", "noexiste") is None
+	finally:
+		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
+def test_prune_asks_which_host_when_there_are_several():
+	"""It deletes things, so knowing where is worth a tap."""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	captured = {}
+	original = dcb.send_message
+	dcb.send_message = lambda **kwargs: captured.update(kwargs)
+	try:
+		dcb.send_prune_menu()
+		callbacks = harness.keyboard_callbacks(captured["reply_markup"])
+		assert "pruneHost|h_local" in callbacks, callbacks
+		assert "pruneHost|h_nas" in callbacks, callbacks
+
+		# With one host it goes straight to the object types, as it always did.
+		captured.clear()
+		_with_hosts([HOST_FIXTURE[0]], unreachable=())
+		dcb.send_prune_menu()
+		callbacks = harness.keyboard_callbacks(captured["reply_markup"])
+		assert all(c.startswith("prune|") or c == "cerrar" for c in callbacks), callbacks
+	finally:
+		dcb.send_message = original
+		_restore_hosts()
+
+
+def test_the_prune_confirmation_names_the_host():
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	captured = {}
+	original = dcb.send_message
+	dcb.send_message = lambda **kwargs: captured.update(kwargs)
+	try:
+		dcb.confirm_prune("Images", "h_nas")
+		assert "nas" in captured["message"], captured["message"]
+		assert "prune|pruneImages|h_nas" in harness.keyboard_callbacks(captured["reply_markup"])
+	finally:
+		dcb.send_message = original
+		_restore_hosts()
+
+
+# ---------------------------------------------------------------------------
 # Managing hosts
 # ---------------------------------------------------------------------------
 

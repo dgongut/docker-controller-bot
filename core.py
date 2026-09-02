@@ -1072,111 +1072,129 @@ class DockerUpdateMonitor:
 			if cold_cache:
 				debug("Update cache is empty: this pass will fill it without notifying")
 
-			containers = self.client.containers.list(all=True)
-			# Sort containers: bot first, then running, then stopped (all alphabetically)
-			sorted_containers = sort_containers_by_priority(containers)
-			grouped_updates_containers = []  # list of [id, name] pairs
-			should_notify = False
-			for container in sorted_containers:
-				if (container.status == "exited" or container.status == "dead") and not store.get("bot.check_update_stopped_containers"):
-					debug(f"Ignoring update check for container {container.name} (stopped)")
-					continue
-
-				labels = container.labels
-				if LABEL_IGNORE_CHECK_UPDATES in labels:
-					debug(f"Ignoring update check for container {container.name} (label)")
-					continue
-
-				container_attrs = container.attrs['Config']
-				image_with_tag = container_attrs['Image']
+			# Every reachable host, in the order they are configured. One being
+			# down degrades its own check and nothing else.
+			for entry, owner, _ in hosts_with_containers():
 				try:
-					local_image = container.image.id
-					remote_image = self.client.images.pull(image_with_tag)
-					debug(f"Checking update: {container.name} ({image_with_tag}): LOCAL IMAGE [{local_image.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}] - REMOTE IMAGE [{remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}]")
-					if local_image != remote_image.id:
-						if LABEL_AUTO_UPDATE in labels:
-							if store.get("bot.extended_messages") and not is_muted():
-								send_message_to_notification_channel(message=get_text("auto_update", container.name))
-							debug(f"Auto-updating container {container.name}")
-							# Build a send_fn that routes to the notification channel,
-							# or silently swallows messages (with a debug trace) when muted.
-							if is_muted():
-								def _auto_update_send_fn(msg):
-									debug(f"Message [{msg}] omitted because muted")
-									return None
-							else:
-								def _auto_update_send_fn(msg):
-									return send_message_to_notification_channel(message=msg)
-							perform_container_update(container.id, container.name, send_fn=_auto_update_send_fn)
-							continue
-						old_has_update = read_container_update_status(image_with_tag, container.name)
-						has_update = True
-						# Keep the pulled image cached locally so the subsequent update
-						# operation does not need to re-download it.
-						debug(f"{container.name} update detected! Keeping downloaded image [{remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}] for upcoming update")
-
-						if container.name != CONTAINER_NAME:
-							grouped_updates_containers.append([container.id[:CONTAINER_ID_LENGTH], container.name])
-
-						if old_has_update is True:
-							debug("Update already notified")
-							continue
-
-						if container.name == CONTAINER_NAME:
-							markup = InlineKeyboardMarkup(row_width = 1)
-							markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{container.id[:CONTAINER_ID_LENGTH]}"))
-							if not is_muted() and not cold_cache:
-								sent_message = send_message(message=get_text("available_update", container.name), reply_markup=markup)
-								# Save container cache for this notification
-								if sent_message:
-									save_container_cache(sent_message.chat.id, sent_message.message_id, [container])
-							else:
-								debug(f"Message [{get_text('available_update', container.name)}] omitted because muted")
-							# Persist the "already notified" status so the bot is not spammed
-							# every cycle. Other containers reach the equivalent save below
-							# via the grouped-updates flow; the bot's self-update has its
-							# own dedicated message and would otherwise skip it.
-							save_container_update_status(image_with_tag, container.name, has_update)
-							continue
-
-						should_notify = not cold_cache
-					else: # Contenedor actualizado
-						has_update = False
+					self._check_host(entry, owner, cold_cache)
 				except Exception as e:
-					error(f"Could not check update: [{e}]")
-					has_update = None
-				save_container_update_status(image_with_tag, container.name, has_update)
-
-			if grouped_updates_containers and should_notify:
-				markup = InlineKeyboardMarkup(row_width=button_columns())
-				markup.add(*[
-					InlineKeyboardButton(f'{ICON_CONTAINER_MARK_FOR_UPDATE} {cname}', callback_data=f'toggleUpdate|{cid}')
-					for cid, cname in grouped_updates_containers
-				])
-				markup.add(
-					InlineKeyboardButton(get_text("button_update_all"), callback_data="toggleUpdateAll"),
-					InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar")
-				)
-				if not is_muted():
-					message = send_message(message=get_text("available_updates", len(grouped_updates_containers)), reply_markup=markup)
-					if message:
-						save_update_data(message.chat.id, message.message_id, grouped_updates_containers)
-						# Also populate the container name cache so the callback parser
-						# can resolve names from IDs without an extra Docker lookup.
-						_objs = []
-						for cid, _ in grouped_updates_containers:
-							try:
-								_objs.append(self.client.containers.get(cid))
-							except Exception as e:
-								debug(f"Could not fetch container {cid} for cache: {e}")
-						if _objs:
-							try:
-								save_container_cache(message.chat.id, message.message_id, _objs)
-							except Exception as e:
-								debug(f"Could not pre-populate container name cache: {e}")
-				else:
-					debug(f"Message [{get_text('available_updates', len(grouped_updates_containers))}] omitted because muted")
+					error(f"Update check failed on {entry.get('alias', entry['id'])}: [{e}]")
 			wait_for_next_update_check()
+
+	def _check_host(self, entry, owner, cold_cache):
+		"""
+		Checks one host for image updates and reports what it finds.
+
+		One host at a time, in sequence, rather than a thread each: the interval
+		is hours long so there is nothing to gain in parallel, and every host
+		pulling images at once would saturate the same network and disk.
+		"""
+		host_id = entry["id"]
+		containers = owner.client.containers.list(all=True)
+		# Sort containers: bot first, then running, then stopped (all alphabetically)
+		sorted_containers = sort_containers_by_priority(containers)
+		grouped_updates_containers = []  # list of [id, name] pairs
+		should_notify = False
+		for container in sorted_containers:
+			if (container.status == "exited" or container.status == "dead") and not store.get("bot.check_update_stopped_containers"):
+				debug(f"Ignoring update check for container {container.name} (stopped)")
+				continue
+
+			labels = container.labels
+			if LABEL_IGNORE_CHECK_UPDATES in labels:
+				debug(f"Ignoring update check for container {container.name} (label)")
+				continue
+
+			container_attrs = container.attrs['Config']
+			image_with_tag = container_attrs['Image']
+			try:
+				local_image = container.image.id
+				remote_image = owner.client.images.pull(image_with_tag)
+				debug(f"Checking update: {container.name} ({image_with_tag}): LOCAL IMAGE [{local_image.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}] - REMOTE IMAGE [{remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}]")
+				if local_image != remote_image.id:
+					if LABEL_AUTO_UPDATE in labels:
+						if store.get("bot.extended_messages") and not is_muted():
+							send_message_to_notification_channel(message=f'{host_label(host_id)}{get_text("auto_update", container.name)}')
+						debug(f"Auto-updating container {container.name}")
+						# Build a send_fn that routes to the notification channel,
+						# or silently swallows messages (with a debug trace) when muted.
+						if is_muted():
+							def _auto_update_send_fn(msg):
+								debug(f"Message [{msg}] omitted because muted")
+								return None
+						else:
+							def _auto_update_send_fn(msg):
+								return send_message_to_notification_channel(message=msg)
+						perform_container_update(container_ref(host_id, container), container.name, send_fn=_auto_update_send_fn)
+						continue
+					old_has_update = read_container_update_status(image_with_tag, container.name, host_id)
+					has_update = True
+					# Keep the pulled image cached locally so the subsequent update
+					# operation does not need to re-download it.
+					debug(f"{container.name} update detected! Keeping downloaded image [{remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}] for upcoming update")
+
+					if container.name != CONTAINER_NAME:
+						grouped_updates_containers.append([container_ref(host_id, container), container.name])
+
+					if old_has_update is True:
+						debug("Update already notified")
+						continue
+
+					if container.name == CONTAINER_NAME:
+						markup = InlineKeyboardMarkup(row_width = 1)
+						markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{container_ref(host_id, container)}"))
+						if not is_muted() and not cold_cache:
+							sent_message = send_message(message=f'{host_label(host_id)}{get_text("available_update", container.name)}', reply_markup=markup)
+							# Save container cache for this notification
+							if sent_message:
+								save_container_cache(sent_message.chat.id, sent_message.message_id, [container], host_id)
+						else:
+							debug(f"Message [{get_text('available_update', container.name)}] omitted because muted")
+						# Persist the "already notified" status so the bot is not spammed
+						# every cycle. Other containers reach the equivalent save below
+						# via the grouped-updates flow; the bot's self-update has its
+						# own dedicated message and would otherwise skip it.
+						save_container_update_status(image_with_tag, container.name, has_update, host_id)
+						continue
+
+					should_notify = not cold_cache
+				else: # Contenedor actualizado
+					has_update = False
+			except Exception as e:
+				error(f"Could not check update: [{e}]")
+				has_update = None
+			save_container_update_status(image_with_tag, container.name, has_update, host_id)
+
+		if grouped_updates_containers and should_notify:
+			markup = InlineKeyboardMarkup(row_width=button_columns())
+			markup.add(*[
+				InlineKeyboardButton(f'{ICON_CONTAINER_MARK_FOR_UPDATE} {cname}', callback_data=f'toggleUpdate|{cid}')
+				for cid, cname in grouped_updates_containers
+			])
+			markup.add(
+				InlineKeyboardButton(get_text("button_update_all"), callback_data="toggleUpdateAll"),
+				InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar")
+			)
+			if not is_muted():
+				message = send_message(message=f'{host_label(host_id)}{get_text("available_updates", len(grouped_updates_containers))}', reply_markup=markup)
+				if message:
+					save_update_data(message.chat.id, message.message_id, grouped_updates_containers)
+					# Also populate the container name cache so the callback parser
+					# can resolve names from IDs without an extra Docker lookup.
+					_objs = []
+					for cid, _ in grouped_updates_containers:
+						try:
+							_objs.append(owner.client.containers.get(ref_id(cid)))
+						except Exception as e:
+							debug(f"Could not fetch container {cid} for cache: {e}")
+					if _objs:
+						try:
+							save_container_cache(message.chat.id, message.message_id, _objs, host_id)
+						except Exception as e:
+							debug(f"Could not pre-populate container name cache: {e}")
+			else:
+				debug(f"Message [{get_text('available_updates', len(grouped_updates_containers))}] omitted because muted")
+
 
 	def demonio_update(self):
 		"""Start update daemon with limited retries to prevent infinite restart loops."""
@@ -1195,6 +1213,18 @@ class DockerUpdateMonitor:
 					return
 				error(f"Update daemon error (attempt {retry_count}/{max_retries}). Retrying in 5 seconds... Error: [{e}]")
 				time.sleep(5)
+
+def schedule_container_ref(host_id, container_name):
+	"""
+	The reference for a scheduled task's container, on its own host.
+
+	Resolved on that host and nowhere else: a task names a container, and
+	acting on a same-named container elsewhere would be both silent and, for
+	stop or exec, destructive.
+	"""
+	short_id = find_container_id_on_host(host_id, container_name)
+	return make_ref(host_id, short_id) if short_id else None
+
 
 class DockerScheduleMonitor:
 	def __init__(self):
@@ -1240,6 +1270,9 @@ class DockerScheduleMonitor:
 		try:
 			action = schedule.get("action", "").lower()
 			container = schedule.get("container", "")
+			# Tasks created before hosts existed carry none, and mean the local
+			# machine: that is where they were set up to run.
+			schedule_host = schedule.get("host") or host_registry.local_host_id()
 			minutes = schedule.get("minutes")
 			command = schedule.get("command", "")
 			show_output = bool(schedule.get("show_output", False))
@@ -1257,19 +1290,19 @@ class DockerScheduleMonitor:
 
 			# Execute action based on type
 			if action == "run":
-				containerId = get_container_id_by_name(container)
+				containerId = schedule_container_ref(schedule_host, container)
 				if not containerId:
 					return handle_error(f"Container {container} not found for action {action}")
 				run(containerId, container, from_schedule=True)
 
 			elif action == "stop":
-				containerId = get_container_id_by_name(container)
+				containerId = schedule_container_ref(schedule_host, container)
 				if not containerId:
 					return handle_error(f"Container {container} not found for action {action}")
 				stop(containerId, container, from_schedule=True)
 
 			elif action == "restart":
-				containerId = get_container_id_by_name(container)
+				containerId = schedule_container_ref(schedule_host, container)
 				if not containerId:
 					return handle_error(f"Container {container} not found for action {action}")
 				restart(containerId, container, from_schedule=True)
@@ -1284,7 +1317,7 @@ class DockerScheduleMonitor:
 					return handle_error(f"Invalid minutes value: {minutes}")
 
 			elif action == "exec":
-				containerId = get_container_id_by_name(container)
+				containerId = schedule_container_ref(schedule_host, container)
 				if not containerId:
 					return handle_error(f"Container {container} not found for action {action}")
 				execute_command(containerId, container, command, show_output)
@@ -2517,9 +2550,22 @@ def command_controller(message):
 	if not comando in ('/mute', f'/mute@{bot.get_me().username}'
 					,'/schedule', f'/schedule@{bot.get_me().username}'
 					,'/settings', f'/settings@{bot.get_me().username}'):
-		container_name = " ".join(message.text.split()[1:])
-		if container_name:
-			container_id = get_container_id_by_name(container_name, debugging=True)
+		argument = " ".join(message.text.split()[1:])
+		if argument:
+			# Searched across every host. Names rarely repeat between machines,
+			# and when they do the user is asked rather than guessed at.
+			container_id, container_name, candidates = resolve_container_argument(argument)
+			if candidates:
+				action_type = COMMAND_PICKERS.get(comando.split("@", 1)[0])
+				if action_type:
+					send_container_disambiguation(action_type, container_name, candidates)
+					return
+				# No picker for this command: fall back to the first match
+				# rather than refusing, which is what it did before hosts.
+				entry, container = candidates[0]
+				container_id = container_ref(entry["id"], container)
+			if container_id:
+				debug(f"Argument {argument!r} resolved to {container_id}")
 
 	message_thread_id = message.message_thread_id
 	if not message_thread_id:
@@ -3338,27 +3384,27 @@ def info(containerId, containerName):
 	markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
 	send_message(message=result, reply_markup=markup)
 
-def _confirm_prune_action(prune_type):
-	"""Generic function to confirm prune actions (containers, images, networks, volumes)"""
-	debug(f"Running command: confirm_prune_{prune_type}")
-	markup = InlineKeyboardMarkup(row_width = 1)
-	# Capitalize first letter for callback: containers -> Containers
-	callback_type = prune_type.capitalize()
-	markup.add(InlineKeyboardButton(get_text("button_confirm"), callback_data=f"prune|prune{callback_type}"))
+def _confirm_prune_action(prune_type, host_id=None):
+	"""
+	Asks for confirmation before pruning, naming the host when there is more
+	than one: this deletes things and there is no undo.
+	"""
+	host_id = host_id or host_registry.local_host_id()
+	# Callers pass either "images" or "Images"; the callback name is capitalised.
+	kind = prune_type.capitalize()
+	markup = InlineKeyboardMarkup(row_width=1)
+	markup.add(InlineKeyboardButton(get_text("button_confirm"),
+									callback_data=f"prune|prune{kind}|{host_id}"))
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
-	send_message(message=get_text(f"confirm_prune_{prune_type}"), reply_markup=markup)
+	question = get_text(f"confirm_prune_{kind.lower()}")
+	if not host_registry.is_single_host():
+		question = f'{get_text("list_host_header", host_registry.alias(host_id))}\n{question}'
+	send_message(message=question, reply_markup=markup)
 
-def confirm_prune_containers():
-	_confirm_prune_action('containers')
 
-def confirm_prune_images():
-	_confirm_prune_action('images')
-
-def confirm_prune_networks():
-	_confirm_prune_action('networks')
-
-def confirm_prune_volumes():
-	_confirm_prune_action('volumes')
+def confirm_prune(prune_type, host_id=None):
+	"""Asks for confirmation before pruning one kind of object on one host."""
+	_confirm_prune_action(prune_type, host_id)
 
 def confirm_delete(containerId, containerName):
 	debug(f"Running command: confirm_delete for container {containerName}")
@@ -4018,6 +4064,7 @@ def build_hierarchical_keyboard(containers, action_type, bot_container_name, fil
 # can look them up instead of carrying them in callback_data.
 PICKER_ACTIONS = {
 	"Run": {
+		"container_callback": "run",
 		"prompt_key": "start_a_container",
 		"empty_key": "no_containers_to_start",
 		"comando": "",
@@ -4027,6 +4074,7 @@ PICKER_ACTIONS = {
 		"multi_action": "Run",
 	},
 	"Stop": {
+		"container_callback": "stop",
 		"prompt_key": "stop_a_container",
 		"empty_key": "no_containers_to_stop",
 		"bot_container_name": CONTAINER_NAME,
@@ -4035,29 +4083,34 @@ PICKER_ACTIONS = {
 		"multi_action": "Stop",
 	},
 	"Restart": {
+		"container_callback": "restart",
 		"prompt_key": "restart_a_container",
 		"empty_key": "no_containers_to_restart",
 		"bot_container_name": CONTAINER_NAME,
 		"multi_action": "Restart",
 	},
 	"Delete": {
+		"container_callback": "confirmDelete",
 		"prompt_key": "delete_container",
 		"empty_key": "no_containers_to_delete",
 		"bot_container_name": CONTAINER_NAME,
 	},
-	"Logs": {"prompt_key": "logs_command_container", "empty_key": "no_containers_for_logs"},
-	"Logfile": {"prompt_key": "show_logsfile", "empty_key": "no_containers_for_logs"},
-	"Info": {"prompt_key": "info_command_container", "empty_key": "no_containers_for_info"},
-	"Compose": {"prompt_key": "show_compose", "empty_key": "error_no_containers_available"},
+	"Logs": {"container_callback": "logs", "prompt_key": "logs_command_container", "empty_key": "no_containers_for_logs"},
+	"Logfile": {"container_callback": "logfile", "prompt_key": "show_logsfile", "empty_key": "no_containers_for_logs"},
+	"Info": {"container_callback": "info", "prompt_key": "info_command_container", "empty_key": "no_containers_for_info"},
+	"Compose": {"container_callback": "compose", "prompt_key": "show_compose", "empty_key": "error_no_containers_available"},
 	"CheckUpdate": {
+		"container_callback": "checkUpdate",
 		"prompt_key": "checkupdate_command_container",
 		"empty_key": "no_containers_for_checkupdate",
 	},
 	"ChangeTag": {
+		"container_callback": "changeTagContainer",
 		"prompt_key": "change_tag_container",
 		"empty_key": "error_no_containers_available",
 	},
 	"Exec": {
+		"container_callback": "askCommand",
 		"prompt_key": "exec_command_container",
 		"empty_key": "no_containers_for_exec",
 		"filter_standalone_status": ["running", "restarting"],
@@ -4078,6 +4131,161 @@ def send_picker(action_type):
 		filter_standalone_status=spec.get("filter_standalone_status"),
 		filter_projects_with_all_status=spec.get("filter_projects_with_all_status"),
 		multi_action=spec.get("multi_action"))
+
+
+# Which action each command opens a picker for, so a typed argument and a
+# button end up in the same place.
+COMMAND_PICKERS = {
+	"/run": "Run", "/stop": "Stop", "/restart": "Restart", "/delete": "Delete",
+	"/logs": "Logs", "/logfile": "Logfile", "/info": "Info", "/compose": "Compose",
+	"/checkupdate": "CheckUpdate", "/changetag": "ChangeTag", "/exec": "Exec",
+}
+
+
+def find_containers_by_name(container_name, host_id=None):
+	"""
+	Every container with this name, as (host_entry, container).
+
+	Names are unique within a daemon but not between them, so this can return
+	more than one and the caller has to decide what that means. `host_id`
+	restricts the search to one machine.
+	"""
+	matches = []
+	for entry in host_registry.hosts():
+		if host_id and entry["id"] != host_id:
+			continue
+		try:
+			owner = manager(entry["id"])
+			containers = owner.list_containers()
+		except host_registry.HostUnavailable as e:
+			debug(f"Skipping {entry.get('alias', entry['id'])} while looking for {container_name}: {e.reason}")
+			continue
+		except Exception as e:
+			debug(f"Could not search {entry.get('alias', entry['id'])}: {e}")
+			continue
+		for container in containers:
+			if container.name == container_name:
+				matches.append((entry, container))
+	return matches
+
+
+def resolve_container_argument(argument):
+	"""
+	Turns what someone typed after a command into a container reference.
+
+	Accepts a bare name, searched across every host, and "ganimedes:plex" to
+	name the host outright. Returns (ref, name, candidates):
+
+	  - ref and name when exactly one host has it
+	  - candidates, as [(host_entry, container)], when several do
+	  - all empty when nothing matches
+
+	Searching everywhere by default is what keeps a single-host bot feeling
+	unchanged while a multi-host one needs no extra typing: names rarely repeat
+	between machines, and when they do the caller asks instead of guessing.
+	"""
+	text = (argument or "").strip()
+	if not text:
+		return None, None, []
+
+	host_id = None
+	if CONTAINER_REF_SEPARATOR in text:
+		prefix, _, remainder = text.partition(CONTAINER_REF_SEPARATOR)
+		host = host_registry.find_by_alias(prefix)
+		if host is not None and remainder:
+			host_id, text = host["id"], remainder.strip()
+
+	matches = find_containers_by_name(text, host_id)
+	if not matches:
+		return None, text, []
+	if len(matches) == 1:
+		entry, container = matches[0]
+		return container_ref(entry["id"], container), container.name, []
+	return None, text, matches
+
+
+def send_container_disambiguation(action_type, container_name, candidates):
+	"""
+	Asks which host was meant, offering only the ones that have that name.
+
+	The buttons are the action's ordinary container buttons, so choosing one
+	goes through exactly the same path as picking it from a menu.
+	"""
+	spec = PICKER_ACTIONS.get(action_type)
+	if spec is None or not spec.get("container_callback"):
+		warning(f"No container callback for action {action_type}")
+		return
+	markup = InlineKeyboardMarkup(row_width=1)
+	for entry, container in candidates:
+		markup.add(InlineKeyboardButton(
+			f'🖥️ {entry.get("alias", entry["id"])}  ·  {get_status_emoji(container.status, container.name, container)}',
+			callback_data=f'{spec["container_callback"]}|{container_ref(entry["id"], container)}'))
+	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+
+	sent = send_message(message=get_text("container_on_several_hosts", container_name), reply_markup=markup)
+	if sent:
+		# One entry per candidate, each with its own host: they come from
+		# different machines, so a single host id would mislabel all but one.
+		save_container_refs(sent.chat.id, sent.message_id, [
+			(container_ref(entry["id"], container), container.name)
+			for entry, container in candidates
+		])
+	return sent
+
+
+PRUNE_TYPES = (
+	("Containers", "button_containers"),
+	("Images", "button_images"),
+	("Networks", "button_networks"),
+	("Volumes", "button_volumes"),
+)
+
+
+def send_prune_menu():
+	"""
+	Opens /prune, asking which host first when there is more than one.
+
+	The machine before the object type on purpose: this deletes things, and
+	knowing where you are about to delete them is worth a tap.
+	"""
+	if host_registry.is_single_host():
+		send_prune_types(host_registry.local_host_id())
+		return
+
+	markup = InlineKeyboardMarkup(row_width=1)
+	for entry in host_registry.hosts():
+		markup.add(InlineKeyboardButton(
+			f'🖥️ {entry.get("alias", entry["id"])}',
+			callback_data=f'pruneHost|{entry["id"]}'))
+	markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
+	send_message(message=get_text("pick_a_host", get_text("prune_system")), reply_markup=markup)
+
+
+def prune_types_keyboard(host_id):
+	"""The object-type keyboard for one host."""
+	markup = InlineKeyboardMarkup(row_width=button_columns())
+	markup.add(*[
+		InlineKeyboardButton(get_text(label), callback_data=f"prune|confirmPrune{kind}|{host_id}")
+		for kind, label in PRUNE_TYPES
+	])
+	markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
+	return markup
+
+
+def prune_prompt(host_id):
+	"""The /prune prompt, naming the host when there is more than one."""
+	if host_registry.is_single_host():
+		return get_text("prune_system")
+	return f'{get_text("list_host_header", host_registry.alias(host_id))}\n{get_text("prune_system")}'
+
+
+def send_prune_types(host_id):
+	send_message(message=prune_prompt(host_id), reply_markup=prune_types_keyboard(host_id))
+
+
+def render_prune_types(chat_id, message_id, host_id):
+	edit_message_text(prune_prompt(host_id), chat_id, message_id,
+					reply_markup=prune_types_keyboard(host_id))
 
 
 def _picker_has_anything(containers, bot_container_name, filter_standalone_status,
@@ -4585,7 +4793,7 @@ def build_compose_project_level2_keyboard(project_info, project_name, action_typ
 			status_indicator = ICON_CONTAINER_ACTION_DONE
 		elif action_type.lower() == 'checkupdate':
 			# Special case: use update emoji for checkupdate
-			status_indicator = get_update_emoji(container.name)
+			status_indicator = get_update_emoji(container.name, host_id)
 		elif config.get('use_emoji', False):
 			status_indicator = get_status_emoji(container.status, container.name, container)
 		else:
@@ -4879,17 +5087,25 @@ def get_status_emoji(statusStr, containerName, container=None):
 		status = "👑"
 	return status
 
-def get_update_emoji(containerName):
-	status = "✅"
+def get_update_emoji(containerName, host_id=None):
+	"""
+	Whether a container has a pending update, as an emoji.
 
-	container_id = get_container_id_by_name(container_name=containerName)
+	`host_id` says which machine to ask. It defaults to the local one, but a
+	project list on a remote host has to pass it or it would read the local
+	cache for a container that is not there.
+	"""
+	status = "✅"
+	host_id = host_id or host_registry.local_host_id()
+
+	container_id = find_container_id_on_host(host_id, containerName)
 	if not container_id:
 		return status
 
 	try:
-		container = docker_manager.client.containers.get(container_id)
+		container = manager(host_id).client.containers.get(container_id)
 		image_with_tag = container.attrs['Config']['Image']
-		if read_container_update_status(image_with_tag, container.name) is True:
+		if read_container_update_status(image_with_tag, container.name, host_id) is True:
 			status = "⬆️"
 	except Exception as e:
 		error(f"Could not check update: [{e}]")
@@ -4904,11 +5120,19 @@ def get_random_available_port():
 	"""
 	return port_manager.get_random_available_port()
 
-def show_container_ports():
+def show_container_ports(host_id=None):
 	"""
-	Show all ports used by containers
+	Show all ports used by containers on one host.
+
+	Per host rather than merged: a port is only in use or free on a given
+	machine, and a single list would suggest a conflict where there is none.
 	"""
-	containers = docker_manager.list_containers()
+	host_id = host_id or host_registry.local_host_id()
+	try:
+		containers = manager(host_id).list_containers()
+	except host_registry.HostUnavailable as e:
+		send_message(message=get_text("host_unreachable", host_registry.alias(host_id), e.reason))
+		return
 
 	# Sort containers: bot first, then running, then stopped (all alphabetically)
 	sorted_containers = sort_containers_by_priority(containers)
@@ -5012,6 +5236,26 @@ def ask_port_to_check(userId):
 	x = send_message(message=get_text("ports_ask_port"), reply_markup=markup)
 	if x:
 		save_port_check_request_state(userId, x.message_id)
+
+def send_ports_menu():
+	"""
+	Opens /ports, asking which host first when there is more than one.
+
+	A port being taken is a property of one machine, so the answer only means
+	anything once a host is chosen.
+	"""
+	if host_registry.is_single_host():
+		show_container_ports(host_registry.local_host_id())
+		return
+
+	markup = InlineKeyboardMarkup(row_width=1)
+	for entry in host_registry.hosts():
+		markup.add(InlineKeyboardButton(
+			f'🖥️ {entry.get("alias", entry["id"])}',
+			callback_data=f'portsHost|{entry["id"]}'))
+	markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
+	send_message(message=get_text("pick_a_host", get_text("menu_ports")), reply_markup=markup)
+
 
 def check_specific_port(port_number):
 	"""
@@ -5198,6 +5442,14 @@ def unreachable_hosts(sections):
 
 
 def get_container_id_by_name(container_name, debugging=False):
+	"""
+	The short id of a container by name, on the local host.
+
+	Deliberately local-only, and only used for the bot's own container and its
+	updater, which exist on exactly one machine. Anything that could be on
+	another host goes through find_container_id_on_host or
+	resolve_container_argument instead.
+	"""
 	if debugging:
 		debug(f"Finding container {container_name}")
 	containers = docker_manager.list_containers()
@@ -5386,6 +5638,20 @@ def load_port_check_request_state(user_id):
 
 def clear_port_check_request_state(user_id):
 	_clear_cache("pending_port_check", user_id)
+
+def save_container_refs(chat_id, message_id, pairs):
+	"""
+	Remembers a set of (reference, name) pairs for a message.
+
+	Used where the buttons on one message point at containers on different
+	hosts, which the per-host variant cannot express.
+	"""
+	from datetime import datetime
+	write_cache_item(f"containers_{chat_id}_{message_id}", {
+		"_timestamp": datetime.now().isoformat(),
+		"containers": {ref: name for ref, name in pairs},
+	})
+
 
 def save_container_cache(chat_id, message_id, containers, host_id=None):
 	"""

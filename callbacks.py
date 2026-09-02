@@ -104,7 +104,7 @@ def cb_confirmUpdate(ctx):
 	params=('containerId',),
 )
 def cb_checkUpdate(ctx):
-	core.docker_manager.force_check_update(ctx.containerId)
+	core.manager_for(ctx.containerId).force_check_update(core.ref_id(ctx.containerId))
 
 @callback(
 	name='update',
@@ -117,12 +117,17 @@ def cb_update(ctx):
 	name='updateAll',
 )
 def cb_updateAll(ctx):
-	containers = core.docker_manager.list_containers()
-	# Sort containers: bot first, then running, then stopped (all alphabetically)
-	sorted_containers = core.sort_containers_by_priority(containers)
-	for container in sorted_containers:
-		if core.update_available(container):
-			core.perform_container_update(container.id, container.name)
+	"""
+	Updates everything with a pending update, on every reachable host.
+
+	Host by host in sequence, because updating pulls images and doing several
+	machines at once would fight over the same network.
+	"""
+	for entry, owner, containers in core.hosts_with_containers():
+		for container in core.sort_containers_by_priority(containers):
+			if core.update_available(container, entry["id"]):
+				core.perform_container_update(
+					core.container_ref(entry["id"], container), container.name)
 
 @callback(
 	name='confirmDelete',
@@ -170,7 +175,8 @@ def cb_cancelExec(ctx):
 )
 def cb_delete(ctx):
 	x = core.send_message(message=get_text("deleting", ctx.containerName))
-	result = core.docker_manager.delete(container_id=ctx.containerId, container_name=ctx.containerName)
+	result = core.manager_for(ctx.containerId).delete(
+		container_id=core.ref_id(ctx.containerId), container_name=ctx.containerName)
 	core.delete_message(x.message_id)
 	core.send_message(message=result)
 
@@ -286,15 +292,16 @@ def cb_confirmUpdateSelected(ctx):
 )
 def cb_updateSelected(ctx):
 	containers, selected = core.load_update_data(ctx.chatId, ctx.originalMessageId)
-	for cid in selected:
-		try:
-			container = core.docker_manager.client.containers.get(cid)
-		except Exception:
-			core.send_message(message=get_text("container_does_not_exist", cid))
-			core.debug(f"Container {cid} not found")
+	for ref in selected:
+		# Each selection carries its own host: an /updateall list can span
+		# machines, so they cannot all be looked up on the local one.
+		owner, container = core.find_container(ref)
+		if container is None:
+			core.send_message(message=get_text("container_does_not_exist", core.ref_id(ref)))
+			core.debug(f"Container {ref} not found")
 			continue
-		if core.update_available(container):
-			core.perform_container_update(container.id, container.name)
+		if core.update_available(container, owner.host_id):
+			core.perform_container_update(core.container_ref(owner.host_id, container), container.name)
 	core.clear_update_data(ctx.chatId, ctx.originalMessageId)
 
 @callback(
@@ -347,7 +354,7 @@ def cb_stopWholeProject(ctx):
 )
 def cb_enterComposeProject(ctx):
 	project_name = ctx.containerName
-	project_info = core.docker_manager.get_project_info(project_name)
+	project_info = core.manager(ctx.hostId).get_project_info(project_name)
 
 	if not project_info:
 		core.send_message(message=get_text("error_project_not_found", project_name))
@@ -364,7 +371,7 @@ def cb_enterComposeProject(ctx):
 		botones.append(
 			InlineKeyboardButton(
 				f"{status_emoji} {service_name}",
-				callback_data=f"compose|{container.id[:CONTAINER_ID_LENGTH]}"
+				callback_data=f"compose|{core.container_ref(ctx.hostId, container)}"
 			)
 		)
 
@@ -379,7 +386,7 @@ def cb_enterComposeProject(ctx):
 	)
 
 	# Save container cache for this project
-	core.save_container_cache(ctx.chatId, ctx.messageId, project_info.containers)
+	core.save_container_cache(ctx.chatId, ctx.messageId, project_info.containers, ctx.hostId)
 
 	core.edit_message_text(
 		get_text("select_container_from_project", project_name),
@@ -398,7 +405,7 @@ def cb_showProjectInfo(ctx):
 	project_name = ctx.containerName
 
 	# Get formatted project info
-	info_text = core.docker_manager.get_project_info_formatted(project_name)
+	info_text = core.manager(ctx.hostId).get_project_info_formatted(project_name)
 
 	# Build keyboard with close button
 	markup = InlineKeyboardMarkup(row_width=1)
@@ -424,7 +431,7 @@ def cb_showProjectInfo(ctx):
 )
 def cb_confirmDeleteWholeProject(ctx):
 	project_name = ctx.containerName
-	project_info = core.docker_manager.get_project_info(project_name)
+	project_info = core.manager(ctx.hostId).get_project_info(project_name)
 
 	if not project_info:
 		core.send_message(message=get_text("error_project_not_found", project_name))
@@ -435,7 +442,7 @@ def cb_confirmDeleteWholeProject(ctx):
 	markup.add(
 		InlineKeyboardButton(
 			f"✅ {get_text('button_yes_delete')}",
-			callback_data=f"deleteWholeProject|{core.register_project_hash(project_name)}"
+			callback_data=f"deleteWholeProject|{core.register_project_hash(project_name, ctx.hostId)}"
 		),
 		InlineKeyboardButton(
 			get_text('button_cancel'),
@@ -458,54 +465,70 @@ def cb_deleteWholeProject(ctx):
 	project_name = ctx.containerName
 	core.delete_compose_project(project_name)
 
+@callback(name="portsHost", params=("value",))
+def cb_portsHost(ctx):
+	"""Shows one host's ports from the /ports host list."""
+	core.show_container_ports(ctx.value)
+
+
+@callback(name="pruneHost", params=("value",), keeps_message=True)
+def cb_pruneHost(ctx):
+	"""Steps into one host from the /prune host list."""
+	core.render_prune_types(ctx.chatId, ctx.messageId, ctx.value)
+
+
 @callback(
 	name='prune',
-	params=('action',),
+	params=('action', 'value'),
 )
 def cb_prune(ctx):
-	# PRUNE CONTAINERS
-	if ctx.action == "confirmPruneContainers":
-		core.confirm_prune_containers()
-	elif ctx.action == "pruneContainers":
-		result, data = core.docker_manager.prune_containers()
-		markup = core.create_simple_keyboard("button_delete")
-		fichero_temporal = core.get_temporal_file(data, get_text("button_containers"))
-		x = core.send_message(message=get_text("loading_file"))
-		core.send_document(document=fichero_temporal, reply_markup=markup, caption=result)
+	"""
+	Confirms and runs a prune on one host.
+
+	`action` is confirmPrune<Kind> or prune<Kind>, `value` is the host. Driving
+	the four object types off one table rather than four near-identical
+	branches, which is what this was.
+	"""
+	host_id = ctx.value or core.host_registry.local_host_id()
+	labels = {
+		"Containers": "button_containers",
+		"Images": "button_images",
+		"Networks": "button_networks",
+		"Volumes": "button_volumes",
+	}
+
+	if ctx.action.startswith("confirmPrune"):
+		kind = ctx.action[len("confirmPrune"):]
+		if kind not in labels:
+			core.warning(f"Unknown prune type: {ctx.action}")
+			return
+		core.confirm_prune(kind, host_id)
+		return
+
+	if not ctx.action.startswith("prune"):
+		core.warning(f"Unknown prune action: {ctx.action}")
+		return
+
+	kind = ctx.action[len("prune"):]
+	if kind not in labels:
+		core.warning(f"Unknown prune type: {ctx.action}")
+		return
+
+	try:
+		owner = core.manager(host_id)
+	except core.host_registry.HostUnavailable as e:
+		core.send_message(message=get_text("host_unreachable",
+										core.host_registry.alias(host_id), e.reason))
+		return
+
+	result, data = getattr(owner, f"prune_{kind.lower()}")()
+	markup = core.create_simple_keyboard("button_delete")
+	fichero_temporal = core.get_temporal_file(data, get_text(labels[kind]))
+	x = core.send_message(message=get_text("loading_file"))
+	core.send_document(document=fichero_temporal, reply_markup=markup, caption=result)
+	if x:
 		core.delete_message(x.message_id)
 
-	# PRUNE IMAGES
-	elif ctx.action == "confirmPruneImages":
-		core.confirm_prune_images()
-	elif ctx.action == "pruneImages":
-		result, data = core.docker_manager.prune_images()
-		markup = core.create_simple_keyboard("button_delete")
-		fichero_temporal = core.get_temporal_file(data, get_text("button_images"))
-		x = core.send_message(message=get_text("loading_file"))
-		core.send_document(document=fichero_temporal, reply_markup=markup, caption=result)
-		core.delete_message(x.message_id)
-
-	# PRUNE NETWORKS
-	elif ctx.action == "confirmPruneNetworks":
-		core.confirm_prune_networks()
-	elif ctx.action == "pruneNetworks":
-		result, data = core.docker_manager.prune_networks()
-		markup = core.create_simple_keyboard("button_delete")
-		fichero_temporal = core.get_temporal_file(data, get_text("button_networks"))
-		x = core.send_message(message=get_text("loading_file"))
-		core.send_document(document=fichero_temporal, reply_markup=markup, caption=result)
-		core.delete_message(x.message_id)
-
-	# PRUNE VOLUMES
-	elif ctx.action == "confirmPruneVolumes":
-		core.confirm_prune_volumes()
-	elif ctx.action == "pruneVolumes":
-		result, data = core.docker_manager.prune_volumes()
-		markup = core.create_simple_keyboard("button_delete")
-		fichero_temporal = core.get_temporal_file(data, get_text("button_volumes"))
-		x = core.send_message(message=get_text("loading_file"))
-		core.send_document(document=fichero_temporal, reply_markup=markup, caption=result)
-		core.delete_message(x.message_id)
 
 @callback(
 	name='generatePort',

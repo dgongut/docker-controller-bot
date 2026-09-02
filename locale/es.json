@@ -391,5 +391,6 @@
   "list_host_empty": "<i>Sin contenedores</i>",
   "list_host_unreachable": "🔴 <b>$1</b> no responde\n<i>$2</i>",
   "host_unreachable": "🔴 <b>$1</b> no responde\n<i>$2</i>",
-  "pick_a_host": "$1\n\n<i>¿En qué host?</i>"
+  "pick_a_host": "$1\n\n<i>¿En qué host?</i>",
+  "container_on_several_hosts": "Hay un contenedor llamado <b>$1</b> en varios hosts.\n\n<i>¿En cuál?</i>"
 }

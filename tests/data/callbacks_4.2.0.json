@@ -339,7 +339,8 @@
     },
     "prune": {
       "params": [
-        "action"
+        "action",
+        "value"
       ],
       "keeps_message": false,
       "project_arg": false,
@@ -552,5 +553,8 @@
       "project_arg": false,
       "multi_action": false
     }
+  },
+  "_deliberate_changes": {
+    "prune": "5.0.0 added a host argument: pruning is destructive and per host, so the callback has to say which machine it means. Was params=['action'], now ['action', 'value'] where value is the host id. Recorded here rather than silently updating the snapshot, so the change stays visible in review."
   }
 }

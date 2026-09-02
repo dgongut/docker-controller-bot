@@ -65,7 +65,7 @@ class ScheduleManager:
     
     def add_schedule(self, name: str, cron: str, action: str, container: str = None,
                      minutes: int = None, show_output: bool = False, command: str = None,
-                     prune_type: str = None) -> bool:
+                     prune_type: str = None, host: str = None) -> bool:
         """Add a new schedule. Returns True if successful, False if name already exists"""
         schedules = self._read_schedules()
 
@@ -83,6 +83,10 @@ class ScheduleManager:
             "show_output": show_output,
             "command": command,
             "prune_type": prune_type,
+            # Which Docker host the task runs against. A container name is only
+            # unique within one daemon, so without this a task would be
+            # ambiguous the moment a second host is added.
+            "host": host,
             "created_at": datetime.now().isoformat(),
             "enabled": True
         }
