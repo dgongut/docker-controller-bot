@@ -313,8 +313,8 @@ def cb_updateSelected(ctx):
 def cb_restartWholeProject(ctx):
 	project_name = ctx.containerName
 	# Captured before acting so every service can be marked as done
-	project_container_names = core.get_project_container_names(project_name) if ctx.multiAction else None
-	core.restart_compose_project(project_name)
+	project_container_names = core.get_project_container_names(project_name, ctx.hostId) if ctx.multiAction else None
+	core.restart_compose_project(project_name, ctx.hostId)
 	if ctx.multiAction:
 		core.refresh_multi_action_menu(ctx.chatId, ctx.messageId, project_container_names)
 
@@ -327,8 +327,8 @@ def cb_restartWholeProject(ctx):
 def cb_runWholeProject(ctx):
 	project_name = ctx.containerName
 	# Captured before acting so every service can be marked as done
-	project_container_names = core.get_project_container_names(project_name) if ctx.multiAction else None
-	core.run_compose_project(project_name)
+	project_container_names = core.get_project_container_names(project_name, ctx.hostId) if ctx.multiAction else None
+	core.run_compose_project(project_name, ctx.hostId)
 	if ctx.multiAction:
 		core.refresh_multi_action_menu(ctx.chatId, ctx.messageId, project_container_names)
 
@@ -341,8 +341,8 @@ def cb_runWholeProject(ctx):
 def cb_stopWholeProject(ctx):
 	project_name = ctx.containerName
 	# Captured before acting so every service can be marked as done
-	project_container_names = core.get_project_container_names(project_name) if ctx.multiAction else None
-	core.stop_compose_project(project_name)
+	project_container_names = core.get_project_container_names(project_name, ctx.hostId) if ctx.multiAction else None
+	core.stop_compose_project(project_name, ctx.hostId)
 	if ctx.multiAction:
 		core.refresh_multi_action_menu(ctx.chatId, ctx.messageId, project_container_names)
 
@@ -463,7 +463,7 @@ def cb_confirmDeleteWholeProject(ctx):
 )
 def cb_deleteWholeProject(ctx):
 	project_name = ctx.containerName
-	core.delete_compose_project(project_name)
+	core.delete_compose_project(project_name, ctx.hostId)
 
 @callback(name="portsHost", params=("value",))
 def cb_portsHost(ctx):
@@ -819,6 +819,9 @@ def cb_scheduleSelectContainer(ctx):
 		container_name = schedule_state.get(container_key)
 		if container_name:
 			schedule_state["container"] = container_name
+			# The host travels with the name: a task names a container, and a
+			# name is only unique within one daemon.
+			schedule_state["host"] = schedule_state.get(f"container_host_{ctx.containerIdx}")
 		else:
 			core.error(f"Container not found in state for key: {container_key}")
 			core.send_message(message=get_text("error_invalid_selection"))
@@ -949,7 +952,8 @@ def cb_scheduleConfirm(ctx):
 				minutes=schedule_state.get("minutes"),
 				show_output=schedule_state.get("show_output", False),
 				command=schedule_state.get("command"),
-				prune_type=schedule_state.get("prune_type")
+				prune_type=schedule_state.get("prune_type"),
+				host=schedule_state.get("host")
 			)
 			core.send_message(message=get_text("schedule_added_success", schedule_state["name"]))
 			core.clear_schedule_state(ctx.userId)

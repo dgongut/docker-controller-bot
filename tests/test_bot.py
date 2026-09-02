@@ -971,6 +971,121 @@ def test_the_prune_confirmation_names_the_host():
 
 
 # ---------------------------------------------------------------------------
+# Whole-project actions and scheduling across hosts
+# ---------------------------------------------------------------------------
+
+def test_a_project_action_runs_on_the_project_host():
+	"""
+	A project name is no more unique between machines than a container name,
+	so acting on one without saying where could restart the wrong stack.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	asked = []
+	original = dcb.DockerManager.get_project_info
+	dcb.DockerManager.get_project_info = lambda self, name: asked.append(self.host_id)
+	original_send = dcb.send_message
+	dcb.send_message = lambda *a, **kw: None
+	try:
+		dcb.run_compose_project("media", "h_nas")
+		assert asked == ["h_nas"], asked
+		asked.clear()
+		dcb.delete_compose_project("media", "h_nas")
+		assert asked == ["h_nas"], asked
+		asked.clear()
+		dcb.get_project_container_names("media", "h_nas")
+		assert asked == ["h_nas"], asked
+	finally:
+		dcb.DockerManager.get_project_info = original
+		dcb.send_message = original_send
+		_restore_hosts()
+
+
+def test_a_project_on_an_unreachable_host_gives_no_names():
+	"""Rather than raising into whatever was iterating over them."""
+	_with_hosts(HOST_FIXTURE)
+	try:
+		assert dcb.get_project_container_names("media", "h_nas") == []
+	finally:
+		_restore_hosts()
+
+
+def test_scheduling_offers_containers_from_every_host():
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": (
+		[_container("plex", "running")] if self.host_id == "h_nas" else [_container("nginx", "running")])
+	try:
+		available = dcb._get_available_containers()
+		assert {entry["id"] for entry, _ in available} == {"h_local", "h_nas"}
+		assert {container.name for _, container in available} == {"nginx", "plex"}
+	finally:
+		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
+def test_the_bot_is_never_offered_to_a_scheduled_task():
+	_with_hosts([HOST_FIXTURE[0]], unreachable=())
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": [
+		_container(dcb.CONTAINER_NAME, "running"), _container("nginx", "running")]
+	try:
+		names = {container.name for _, container in dcb._get_available_containers()}
+		assert names == {"nginx"}, names
+	finally:
+		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
+def test_the_schedule_summary_says_which_machine():
+	"""
+	A prune task picks no container, so nothing implies its host. Leaving it
+	blank and falling back silently is what this avoids.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	try:
+		summary = dcb._build_schedule_summary(
+			{"name": "nightly", "action": "prune", "prune_type": "images", "host": "h_nas"})
+		assert "nas" in summary, summary
+
+		# With one host the summary reads as it always did.
+		_with_hosts([HOST_FIXTURE[0]], unreachable=())
+		summary = dcb._build_schedule_summary(
+			{"name": "nightly", "action": "prune", "prune_type": "images"})
+		assert "casa" not in summary, summary
+	finally:
+		_restore_hosts()
+
+
+def test_the_start_header_counts_every_host():
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": (
+		[_container("plex", "running"), _container("tautulli", "exited")]
+		if self.host_id == "h_nas" else [_container("nginx", "running")])
+	try:
+		summary = dcb._start_summary()
+		assert "3" in summary, summary
+	finally:
+		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
+def test_the_start_header_says_nothing_when_no_host_answers():
+	"""
+	Zero containers would read as "everything is gone" rather than "I cannot
+	see anything".
+	"""
+	_with_hosts(HOST_FIXTURE)   # los dos con nas caído...
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": (_ for _ in ()).throw(Exception("down"))
+	try:
+		assert dcb._start_summary() is None
+	finally:
+		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
+# ---------------------------------------------------------------------------
 # Managing hosts
 # ---------------------------------------------------------------------------
 

@@ -392,5 +392,6 @@
   "list_host_unreachable": "🔴 <b>$1</b> no responde\n<i>$2</i>",
   "host_unreachable": "🔴 <b>$1</b> no responde\n<i>$2</i>",
   "pick_a_host": "¿En qué host?",
-  "container_on_several_hosts": "Hay un contenedor llamado <b>$1</b> en varios hosts.\n\n<i>¿En cuál?</i>"
+  "container_on_several_hosts": "Hay un contenedor llamado <b>$1</b> en varios hosts.\n\n<i>¿En cuál?</i>",
+  "schedule_label_host": "🖥️ Host"
 }

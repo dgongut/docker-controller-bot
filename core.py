@@ -1331,16 +1331,16 @@ class DockerScheduleMonitor:
 				prune_label = ""
 
 				if prune_type == "containers":
-					result_message, data = docker_manager.prune_containers()
+					result_message, data = manager(schedule_host).prune_containers()
 					prune_label = get_text("button_containers")
 				elif prune_type == "images":
-					result_message, data = docker_manager.prune_images()
+					result_message, data = manager(schedule_host).prune_images()
 					prune_label = get_text("button_images")
 				elif prune_type == "networks":
-					result_message, data = docker_manager.prune_networks()
+					result_message, data = manager(schedule_host).prune_networks()
 					prune_label = get_text("button_networks")
 				elif prune_type == "volumes":
-					result_message, data = docker_manager.prune_volumes()
+					result_message, data = manager(schedule_host).prune_volumes()
 					prune_label = get_text("button_volumes")
 				else:
 					return handle_error(f"Unknown prune type: {prune_type}")
@@ -1474,6 +1474,11 @@ def _build_schedule_summary(state: dict) -> str:
 		lines.append(f"<b>{get_text('schedule_label_minutes')}:</b> {state.get('minutes')}")
 	if state.get("prune_type"):
 		lines.append(f"<b>{get_text('schedule_label_prune_type')}:</b> {state.get('prune_type')}")
+	# Which machine the task will run on. Shown for every task once there is
+	# more than one host, including a prune, which has no container to imply it.
+	if not host_registry.is_single_host():
+		task_host = state.get("host") or host_registry.local_host_id()
+		lines.append(f"<b>{get_text('schedule_label_host')}:</b> {host_registry.alias(task_host)}")
 	# Only show show_output if action is exec or prune and show_output is not None
 	if state.get("action") in ("exec", "prune") and state.get("show_output") is not None:
 		lines.append(f"<b>{get_text('schedule_label_show_output')}:</b> {get_text('schedule_yes') if state.get('show_output') else get_text('schedule_no')}")
@@ -1484,14 +1489,21 @@ def _build_schedule_summary(state: dict) -> str:
 
 def _validate_containers_available() -> bool:
 	"""Check if there are containers available (excluding bot container)"""
-	containers = docker_manager.list_containers()
-	available = [c for c in containers if c.name != CONTAINER_NAME]
-	return len(available) > 0
+	return len(_get_available_containers()) > 0
 
 def _get_available_containers() -> list:
-	"""Get list of available containers (excluding bot container)"""
-	containers = docker_manager.list_containers()
-	return [c for c in containers if c.name != CONTAINER_NAME]
+	"""
+	The containers a scheduled task can act on, as (host_entry, container).
+
+	Across every reachable host: a task pinned to one machine would otherwise
+	only ever be offered the local one's containers.
+	"""
+	available = []
+	for entry, _, containers in hosts_with_containers():
+		for container in containers:
+			if container.name != CONTAINER_NAME:
+				available.append((entry, container))
+	return available
 
 def show_schedule_menu(user_id: int, chat_id: int):
 	"""Show the main schedule menu - Optimized with caching and efficient string building"""
@@ -1715,10 +1727,16 @@ def show_schedule_container_selection(user_id: int, action: str):
 		message_text += f"\n\n{get_text('schedule_ask_container')}"
 
 		markup = InlineKeyboardMarkup(row_width=2)
-		# Store container mapping in state to avoid callback length issues (64 char limit)
-		for idx, container in enumerate(available_containers):
-			markup.add(InlineKeyboardButton(container.name, callback_data=f"scheduleSelectContainer|{idx}"))
+		# The choice travels as an index, with the name and the host kept in the
+		# state: a reference plus a name would not fit in 64 bytes of
+		# callback_data for every container someone might have.
+		for idx, (entry, container) in enumerate(available_containers):
+			label = container.name
+			if not host_registry.is_single_host():
+				label = f'{container.name} · {entry.get("alias", entry["id"])}'
+			markup.add(InlineKeyboardButton(label, callback_data=f"scheduleSelectContainer|{idx}"))
 			schedule_state[f"container_{idx}"] = container.name
+			schedule_state[f"container_host_{idx}"] = entry["id"]
 		markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 		msg = send_message(message=message_text, reply_markup=markup)
 		schedule_state["last_message_id"] = msg.message_id if msg else None
@@ -1733,6 +1751,12 @@ def is_valid_cron(cron_expr: str) -> bool:
 		return False
 
 def confirm_schedule_creation(user_id: int, state: dict):
+	# A prune task picks no container, so nothing has set its host. Recording
+	# the local one explicitly beats leaving it blank and having the executor
+	# fall back silently: the confirmation then says which machine it means.
+	if state.get("action") == "prune" and not state.get("host"):
+		state["host"] = host_registry.local_host_id()
+		save_schedule_state(user_id, state)
 	"""Show confirmation of schedule creation"""
 	# Delete previous message if exists
 	if state.get("last_message_id"):
@@ -2465,9 +2489,18 @@ START_ROOT = (
 )
 
 def _start_summary():
-	"""Container counts for the header, or None when Docker cannot be reached."""
+	"""
+	Container counts for the header, across every reachable host.
+
+	None when nothing answers at all: a header claiming zero containers would
+	read as "everything is gone" rather than "I cannot see anything".
+	"""
 	try:
-		containers = docker_manager.list_containers()
+		containers = [container
+					for _, _, host_containers in hosts_with_containers()
+					for container in host_containers]
+		if not containers and host_registry.hosts():
+			return None
 	except Exception as e:
 		debug(f"Could not count containers for the start menu: {e}")
 		return None
@@ -2853,7 +2886,7 @@ def stop(containerId, containerName, from_schedule=False):
 def restart(containerId, containerName, from_schedule=False):
 	return _execute_container_action('restart', containerId, containerName, from_schedule)
 
-def _execute_compose_project_action(action, project_name, show_extended=True):
+def _execute_compose_project_action(action, project_name, show_extended=True, host_id=None):
 	"""
 	Generic function to execute compose project actions (run, stop, restart).
 
@@ -2864,15 +2897,21 @@ def _execute_compose_project_action(action, project_name, show_extended=True):
 	"""
 	debug(f"Running command: {action}_compose_project for project {project_name}")
 
-	# Get project information
-	project_info = docker_manager.get_project_info(project_name)
+	# Get project information, on the host the project lives on. A broad except
+	# because a host can build its client and fail on the next call.
+	try:
+		owner = manager(host_id or host_registry.local_host_id())
+		project_info = owner.get_project_info(project_name)
+	except Exception as e:
+		debug(f"Could not read project {project_name}: {e}")
+		project_info = None
 	if not project_info:
 		send_message(message=get_text("error_project_not_found", project_name))
 		return
 
 	# Get containers sorted by dependencies
 	containers = project_info.containers
-	sorted_containers = docker_manager.compose_manager.sort_containers_by_dependencies(containers)
+	sorted_containers = owner.compose_manager.sort_containers_by_dependencies(containers)
 
 	# Per-action configuration
 	if action == 'restart':
@@ -2931,9 +2970,9 @@ def _execute_compose_project_action(action, project_name, show_extended=True):
 					send_message(message=get_text("error_stopping_service", service_name))
 		send_message(message=get_text("project_stopped_success", project_name))
 
-def restart_compose_project(project_name):
+def restart_compose_project(project_name, host_id=None):
 	"""Restarts a complete Docker Compose project respecting dependency order."""
-	_execute_compose_project_action('restart', project_name)
+	_execute_compose_project_action('restart', project_name, host_id=host_id)
 
 def _container_has_healthcheck(container):
 	"""True if `container` has a non-NONE healthcheck configured."""
@@ -3025,7 +3064,7 @@ def _compute_namespace_overrides(dep_container, old_parent_id, new_parent_id):
 	return overrides
 
 
-def restart_dependents_after_update(project_name, updated_service_name, new_parent_container=None, old_parent_id=None, send_fn=None):
+def restart_dependents_after_update(project_name, updated_service_name, new_parent_container=None, old_parent_id=None, send_fn=None, host_id=None):
 	"""
 	Restarts only the services that depend (directly or transitively) on the
 	updated service. Services unrelated to the updated one are left untouched.
@@ -3061,14 +3100,15 @@ def restart_dependents_after_update(project_name, updated_service_name, new_pare
 
 	debug(f"Restarting dependents of service {updated_service_name} in project {project_name}")
 
-	# Get project information
-	project_info = docker_manager.get_project_info(project_name)
+	# Get project information, on the host the updated container lives on
+	owner = manager(host_id or host_registry.local_host_id())
+	project_info = owner.get_project_info(project_name)
 	if not project_info:
 		send_fn(get_text("error_project_not_found", project_name))
 		return
 
 	# Get only the transitive dependents of the updated service
-	dependents = docker_manager.compose_manager.get_transitive_dependents(
+	dependents = owner.compose_manager.get_transitive_dependents(
 		project_info.containers, updated_service_name
 	)
 
@@ -3118,7 +3158,7 @@ def restart_dependents_after_update(project_name, updated_service_name, new_pare
 	needs_healthy = False
 	needs_completed = False
 	for container in dependents:
-		cond = docker_manager.compose_manager.get_dependency_condition(container, updated_service_name)
+		cond = owner.compose_manager.get_dependency_condition(container, updated_service_name)
 		if cond == 'service_healthy':
 			needs_healthy = True
 		elif cond == 'service_completed_successfully':
@@ -3158,7 +3198,7 @@ def restart_dependents_after_update(project_name, updated_service_name, new_pare
 			if store.get("bot.extended_messages"):
 				send_fn(get_text("recreating_namespace_dependent", container.name))
 			try:
-				docker_manager.recreate_with_overrides(container.id, container.name, overrides)
+				owner.recreate_with_overrides(container.id, container.name, overrides)
 			except Exception as e:
 				debug(f"Error recreating {service_name}: {e}")
 				if store.get("bot.extended_messages"):
@@ -3203,8 +3243,13 @@ def perform_container_update(container_id, container_name, tag=None, send_fn=Non
 	project_name = None
 	updated_service_name = None
 	old_parent_id = None
+	# The host comes from the reference and is used for everything below: the
+	# container, its update and its project's dependents all live on the same
+	# machine, and resolving it once keeps them from drifting apart.
+	host_id = ref_host(container_id)
+	owner = manager(host_id)
 	try:
-		container_obj = docker_manager.client.containers.get(container_id)
+		container_obj = owner.client.containers.get(ref_id(container_id))
 		project_name = ComposeDetector.get_project_name(container_obj)
 		updated_service_name = ComposeDetector.get_service_name(container_obj)
 		old_parent_id = container_obj.id
@@ -3215,7 +3260,7 @@ def perform_container_update(container_id, container_name, tag=None, send_fn=Non
 	x = send_fn(get_text("updating", container_name))
 
 	# Perform the actual update
-	result = docker_manager.update(container_id=container_id, container_name=container_name, message=x, bot=bot, tag=tag)
+	result = owner.update(container_id=ref_id(container_id), container_name=container_name, message=x, bot=bot, tag=tag)
 
 	# Remove the progress message and send the final result. The chat is taken
 	# from the sent message itself: send_fn may target the notification channel
@@ -3231,7 +3276,7 @@ def perform_container_update(container_id, container_name, tag=None, send_fn=Non
 	if project_name and updated_service_name:
 		new_parent_container = None
 		try:
-			new_parent_container = docker_manager.client.containers.get(container_name)
+			new_parent_container = owner.client.containers.get(container_name)
 		except Exception as e:
 			debug(f"Could not fetch new container after update for {container_name}: {e}")
 		restart_dependents_after_update(
@@ -3240,17 +3285,18 @@ def perform_container_update(container_id, container_name, tag=None, send_fn=Non
 			new_parent_container=new_parent_container,
 			old_parent_id=old_parent_id,
 			send_fn=send_fn,
+			host_id=host_id,
 		)
 
-def run_compose_project(project_name):
+def run_compose_project(project_name, host_id=None):
 	"""Starts a complete Docker Compose project respecting dependency order."""
-	_execute_compose_project_action('run', project_name)
+	_execute_compose_project_action('run', project_name, host_id=host_id)
 
-def stop_compose_project(project_name):
+def stop_compose_project(project_name, host_id=None):
 	"""Stops a complete Docker Compose project respecting dependency order."""
-	_execute_compose_project_action('stop', project_name)
+	_execute_compose_project_action('stop', project_name, host_id=host_id)
 
-def delete_compose_project(project_name):
+def delete_compose_project(project_name, host_id=None):
 	"""
 	Deletes a complete Docker Compose project.
 
@@ -3259,8 +3305,12 @@ def delete_compose_project(project_name):
 	"""
 	debug(f"Running command: delete_compose_project for project {project_name}")
 
-	# Get project information
-	project_info = docker_manager.get_project_info(project_name)
+	# Get project information, on the host the project lives on
+	try:
+		project_info = manager(host_id or host_registry.local_host_id()).get_project_info(project_name)
+	except Exception as e:
+		debug(f"Could not read project {project_name}: {e}")
+		project_info = None
 	if not project_info:
 		send_message(message=get_text("error_project_not_found", project_name))
 		return
@@ -3542,7 +3592,7 @@ def confirm_change_tag(containerId, containerName, tag):
 def change_tag_container(containerId, containerName):
 	try:
 		markup = InlineKeyboardMarkup(row_width=button_columns())
-		container = docker_manager.client.containers.get(containerId)
+		container = manager_for(containerId).client.containers.get(ref_id(containerId))
 		repo = container.attrs['Config']['Image'].split(":")[0]
 		tags = get_docker_tags(repo)
 
@@ -3579,7 +3629,8 @@ def get_image_comparison(containerId, containerName, new_tag=None):
 		dict with comparison information or None if error
 	"""
 	try:
-		container = docker_manager.client.containers.get(containerId)
+		owner = manager_for(containerId)
+		container = owner.client.containers.get(ref_id(containerId))
 		current_image = container.image
 		current_tag = container.attrs['Config']['Image']
 
@@ -3599,7 +3650,7 @@ def get_image_comparison(containerId, containerName, new_tag=None):
 
 		# Pull new image (without applying to container)
 		debug(f"Pulling image {tag_to_pull} for comparison")
-		new_image = docker_manager.client.images.pull(tag_to_pull)
+		new_image = owner.client.images.pull(tag_to_pull)
 
 		# New image info
 		new_digest = new_image.id.replace('sha256:', '')[:12]
@@ -4546,9 +4597,20 @@ def handle_enter_project_level2(action_type, project_name, chatId, messageId, ma
 	markup, text = menu
 	edit_message_text(text, chatId, messageId, reply_markup=markup)
 
-def get_project_container_names(project_name):
-	"""Names of every container in a Compose project, empty when it is unknown."""
-	project_info = docker_manager.get_project_info(project_name)
+def get_project_container_names(project_name, host_id=None):
+	"""
+	Names of every container in a Compose project, empty when it is unknown or
+	its host cannot be reached.
+
+	Broad except on purpose: a host can build its client and fail on the very
+	next call, and get_project_info does not absorb that. Raising here would
+	take down whatever was iterating over projects.
+	"""
+	try:
+		project_info = manager(host_id or host_registry.local_host_id()).get_project_info(project_name)
+	except Exception as e:
+		debug(f"Could not read project {project_name} on {host_id}: {e}")
+		return []
 	return [c.name for c in project_info.containers] if project_info else []
 
 def enter_project_multi_aware(action_type, project_name, chatId, messageId, host_id=None):
