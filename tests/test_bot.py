@@ -907,6 +907,32 @@ def test_a_scheduled_task_resolves_on_its_own_host():
 		_restore_hosts()
 
 
+def test_a_host_screen_asks_only_for_the_host():
+	"""
+	It used to borrow the action's own prompt, so /prune asked for an object
+	type and for a host in the same message, and /stop said "press a project
+	or container" above a list of hosts.
+	"""
+	for action in list(dcb.PICKER_ACTIONS) + ["prune", "ports"]:
+		text = dcb.host_question(action)
+		assert dcb.get_text("pick_a_host") in text, (action, text)
+		assert " - " not in text, f"{action}: el separador de botón se cuela en el título"
+		assert len(text.strip().split("\n")) <= 3, (action, text)
+
+	# And no instruction from the screen that comes after.
+	stop = dcb.host_question("Stop")
+	assert dcb.get_text("stop_a_container") not in stop, stop
+	prune = dcb.host_question("prune")
+	assert dcb.get_text("prune_system") not in prune, prune
+
+
+def test_every_host_screen_has_its_title():
+	"""A missing key would show the raw key name where the action should be."""
+	for action in list(dcb.PICKER_ACTIONS) + ["prune", "ports"]:
+		for locale in ("es", "en"):
+			assert f"start_cmd_{action.lower()}" in i18n.load_locale(locale), (action, locale)
+
+
 def test_prune_asks_which_host_when_there_are_several():
 	"""It deletes things, so knowing where is worth a tap."""
 	_with_hosts(HOST_FIXTURE, unreachable=())

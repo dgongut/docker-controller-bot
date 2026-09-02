@@ -4241,6 +4241,23 @@ PRUNE_TYPES = (
 )
 
 
+def host_question(action_type):
+	"""
+	The text of a host-selection screen: what is about to happen, and the
+	question.
+
+	Reusing an action's own prompt put its instruction in here too, so /prune
+	asked for an object type and for a host in the same message, and /stop said
+	"press a project or container" above a list of hosts. The instruction
+	belongs on the next screen, where it is actionable.
+
+	The titles are the short labels the /start menu already uses, so this needs
+	no strings of its own.
+	"""
+	title = get_text(f"start_cmd_{action_type.lower()}").replace(" - ", " ", 1)
+	return f'{title}\n\n<i>{get_text("pick_a_host")}</i>'
+
+
 def send_prune_menu():
 	"""
 	Opens /prune, asking which host first when there is more than one.
@@ -4258,7 +4275,7 @@ def send_prune_menu():
 			f'🖥️ {entry.get("alias", entry["id"])}',
 			callback_data=f'pruneHost|{entry["id"]}'))
 	markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
-	send_message(message=get_text("pick_a_host", get_text("prune_system")), reply_markup=markup)
+	send_message(message=host_question("prune"), reply_markup=markup)
 
 
 def prune_types_keyboard(host_id):
@@ -4354,7 +4371,7 @@ def send_container_picker(action_type, prompt_key, empty_key, comando="",
 
 	# No session yet: which host the menu is showing is only decided once one
 	# is picked, and that is where the session is opened.
-	return send_message(message=get_text("pick_a_host", get_text(prompt_key)), reply_markup=markup)
+	return send_message(message=host_question(action_type), reply_markup=markup)
 
 
 def _send_picker_for_host(entry, containers, action_type, prompt_key, bot_container_name,
@@ -5254,7 +5271,7 @@ def send_ports_menu():
 			f'🖥️ {entry.get("alias", entry["id"])}',
 			callback_data=f'portsHost|{entry["id"]}'))
 	markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
-	send_message(message=get_text("pick_a_host", get_text("menu_ports")), reply_markup=markup)
+	send_message(message=host_question("ports"), reply_markup=markup)
 
 
 def check_specific_port(port_number):
