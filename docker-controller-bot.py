@@ -36,6 +36,7 @@ from schedule_flow import (
 from port_manager import PortManager
 import callback_registry
 from callback_registry import callback, register as register_callback
+from i18n import get_text, language, load_locale
 from logger import debug, error, warning
 from message_queue import MessageQueue
 
@@ -58,74 +59,6 @@ def sizeof_fmt(num, suffix="B"):
 		num /= 1024.0
 	return f"{num:.1f}Yi{suffix}"
 
-# MODULO DE TRADUCCIONES
-# Cache for locale files to avoid repeated file I/O
-_locale_cache = {}
-
-def language():
-	"""
-	Locale in use, lowercased.
-
-	Read on every call rather than captured once, so changing the language from
-	/settings takes effect without restarting the container. The locale files
-	themselves stay cached, so this costs a dictionary lookup.
-	"""
-	configured = str(store.get("bot.language") or "ES").lower()
-	if configured not in [supported.lower() for supported in SUPPORTED_LANGUAGES]:
-		warning(f"Unsupported language {configured}, falling back to ES")
-		return "es"
-	return configured
-
-# Resolved from this file's own location rather than hardcoded to /app, so the
-# bot also runs straight from a checkout.
-LOCALE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "locale")
-
-def load_locale(locale):
-	"""Load locale with caching to avoid repeated file I/O"""
-	if locale not in _locale_cache:
-		with open(os.path.join(LOCALE_DIR, f"{locale}.json"), "r", encoding="utf-8") as file:
-			_locale_cache[locale] = json.load(file)
-	return _locale_cache[locale]
-
-def button_columns():
-	"""
-	How many buttons per row the container lists use.
-
-	Clamped to what Telegram accepts, so a hand-edited settings file cannot
-	produce a keyboard the API rejects.
-	"""
-	try:
-		columns = int(store.get("bot.button_columns"))
-	except (TypeError, ValueError):
-		columns = 2
-	return max(1, min(columns, 8))
-
-def notification_channel():
-	"""Chat id container status notifications go to, or None when unset."""
-	configured = str(store.get("bot.notification_channel") or "").strip()
-	return configured or None
-
-def get_text(key, *args):
-	"""Get translated text with caching"""
-	locale = language()
-	messages = load_locale(locale)
-	if key in messages:
-		translated_text = messages[key]
-	else:
-		messages_en = load_locale("en")
-		if key in messages_en:
-			warning(f"key ['{key}'] is not in locale {locale}")
-			translated_text = messages_en[key]
-		else:
-			error(f"key ['{key}'] is not in locale {locale} or EN")
-			return f"key ['{key}'] is not in locale {locale} or EN"
-
-	# Replace placeholders efficiently
-	if args:
-		for i, arg in enumerate(args, start=1):
-			translated_text = translated_text.replace(f"${i}", str(arg))
-
-	return translated_text
 
 
 # Initial variable validation
@@ -159,6 +92,24 @@ except:
 # the value they keep.
 _migration = migration.run()
 LOCAL_HOST_ID = _migration.host_id
+
+def button_columns():
+	"""
+	How many buttons per row the container lists use.
+
+	Clamped to what Telegram accepts, so a hand-edited settings file cannot
+	produce a keyboard the API rejects.
+	"""
+	try:
+		columns = int(store.get("bot.button_columns"))
+	except (TypeError, ValueError):
+		columns = 2
+	return max(1, min(columns, 8))
+
+def notification_channel():
+	"""Chat id container status notifications go to, or None when unset."""
+	configured = str(store.get("bot.notification_channel") or "").strip()
+	return configured or None
 
 # Instantiate the bot
 bot = telebot.TeleBot(TELEGRAM_TOKEN, num_threads=8)
