@@ -181,6 +181,9 @@ ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519
 ssh-copy-id -i ~/.ssh/id_ed25519.pub user@machine
 ```
 
+> [!TIP]
+> **The second server does not need another key.** The same one works for all of them: just repeat step 3 pointing at the new machine. Steps 2 and 6 are done once.
+
 **4. Connect once by hand** so it lands in `known_hosts`, and take the chance to run the check above:
 
 ```bash
@@ -203,6 +206,54 @@ volumes:
 ```
 
 The connection is opened by the system `ssh` client, not by an implementation of our own, so your whole `~/.ssh/config` applies: host aliases, ports, `IdentityFile`, `User`. If your config has a `Host nas`, the URL can simply be `ssh://nas`.
+
+### Several servers
+
+Adding the second and the third is repeating step 3 for each. One key authorises on as many machines as you like, and that is what I would do on a home network: fewer files to manage and fewer places to get it wrong.
+
+```bash
+ssh-copy-id -i ~/.ssh/id_ed25519.pub root@unraid
+ssh-copy-id -i ~/.ssh/id_ed25519.pub admin@synology
+```
+
+Then check each one before adding it to the bot:
+
+```bash
+ssh root@unraid docker version
+ssh admin@synology docker version
+```
+
+#### A separate key per server
+
+Worth it if you want a compromised key not to open every machine you have, or if one of them belongs to somebody else and you would rather be able to revoke it on its own. Generate one per machine:
+
+```bash
+ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_unraid   -C "dcb-unraid"
+ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_synology -C "dcb-synology"
+
+ssh-copy-id -i ~/.ssh/id_unraid.pub   root@unraid
+ssh-copy-id -i ~/.ssh/id_synology.pub admin@synology
+```
+
+And tell `ssh` which one to use for each, in `~/.ssh/config`:
+
+```
+Host unraid
+    HostName unraid.lan
+    User root
+    IdentityFile ~/.ssh/id_unraid
+
+Host synology
+    HostName 192.168.1.20
+    User admin
+    Port 2222
+    IdentityFile ~/.ssh/id_synology
+```
+
+That buys two things beyond the keys. The URLs become plain **`ssh://unraid`** and **`ssh://synology`** — the user, the port and the key all come from the config. And `ssh unraid docker version` is still the check, so what you verify in the terminal is exactly what the bot will do.
+
+> [!NOTE]
+> `~/.ssh/config` is mapped into the container too, since you are already mapping the whole directory. Nothing to add to the docker-compose.
 
 ### Step by step with `tcp://` + TLS
 

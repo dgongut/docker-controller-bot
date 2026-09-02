@@ -181,6 +181,9 @@ ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519
 ssh-copy-id -i ~/.ssh/id_ed25519.pub usuario@maquina
 ```
 
+> [!TIP]
+> **Para el segundo servidor no hace falta otra clave.** La misma vale para todos: repite solo este paso 3 apuntando a la máquina nueva. Los pasos 2 y 6 se hacen una vez y ya está.
+
 **4. Conéctate una vez a mano** para que quede en `known_hosts`, y aprovecha para hacer la prueba de arriba:
 
 ```bash
@@ -203,6 +206,54 @@ volumes:
 ```
 
 La conexión la abre el cliente `ssh` del sistema, no una implementación propia, así que se respeta tu `~/.ssh/config` entero: alias de host, puertos, `IdentityFile`, `User`. Si en tu config tienes un `Host nas`, la URL puede ser simplemente `ssh://nas`.
+
+### Varios servidores
+
+Añadir el segundo y el tercero es repetir el paso 3 con cada uno. Una sola clave autoriza en todas las máquinas que quieras, y es lo que yo haría en una red doméstica: menos ficheros que gestionar y menos sitios donde equivocarse.
+
+```bash
+ssh-copy-id -i ~/.ssh/id_ed25519.pub root@unraid
+ssh-copy-id -i ~/.ssh/id_ed25519.pub admin@synology
+```
+
+Y compruebas cada uno antes de añadirlo al bot:
+
+```bash
+ssh root@unraid docker version
+ssh admin@synology docker version
+```
+
+#### Una clave distinta por servidor
+
+Merece la pena si quieres que una clave comprometida no abra todas tus máquinas, o si alguna es de otra persona y prefieres poder revocarla por separado. Generas una por máquina:
+
+```bash
+ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_unraid   -C "dcb-unraid"
+ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_synology -C "dcb-synology"
+
+ssh-copy-id -i ~/.ssh/id_unraid.pub   root@unraid
+ssh-copy-id -i ~/.ssh/id_synology.pub admin@synology
+```
+
+Y le dices a `ssh` cuál usar con cada una, en `~/.ssh/config`:
+
+```
+Host unraid
+    HostName unraid.lan
+    User root
+    IdentityFile ~/.ssh/id_unraid
+
+Host synology
+    HostName 192.168.1.20
+    User admin
+    Port 2222
+    IdentityFile ~/.ssh/id_synology
+```
+
+Eso tiene dos ventajas más allá de las claves. La primera es que las URLs se quedan en **`ssh://unraid`** y **`ssh://synology`** a secas: el usuario, el puerto y la clave los pone la config. La segunda es que `ssh unraid docker version` sigue siendo la prueba, así que lo que verificas en la terminal es exactamente lo que va a hacer el bot.
+
+> [!NOTE]
+> El fichero `~/.ssh/config` también se mapea al contenedor, porque ya estás mapeando el directorio entero. No hace falta añadir nada al docker-compose.
 
 ### Paso a paso con `tcp://` + TLS
 
