@@ -7,6 +7,9 @@ services:
         volumes:
           - /var/run/docker.sock:/var/run/docker.sock # NO CAMBIAR
           - ./:/app # CAMBIAR LA PARTE IZQUIERDA
+          # Solo si se van a probar hosts ssh://. En solo lectura: el bot no
+          # tiene por qué escribir en known_hosts, y así no puede.
+          - ~/.ssh:/root/.ssh:ro
         build:
           context: .
           dockerfile: ./Dockerfile_local

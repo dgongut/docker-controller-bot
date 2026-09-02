@@ -103,3 +103,80 @@ def test_the_registrars_are_the_ones_the_tests_load():
 	imported = {line.split()[1] for line in source.split("\n")
 				if line.startswith("import ") and not line.startswith("import core")}
 	assert set(harness.REGISTRARS) == imported, (harness.REGISTRARS, imported)
+
+# Characters that are emoji but default to a text presentation: without U+FE0F
+# after them, platforms are free to draw them as a monochrome glyph, and some
+# draw nothing at all. Every emoji the project already used carried the
+# selector, so this keeps new strings to that convention.
+TEXT_DEFAULT_EMOJI = {
+	"\u23f1": "stopwatch",
+	"\u23f9": "stop button",
+	"\u23fa": "record button",
+	"\u2b06": "up arrow",
+	"\u2b07": "down arrow",
+	"\u2699": "gear",
+	"\u2139": "information",
+	"\u2764": "heart",
+	"\u26a0": "warning",
+	"\u2714": "check mark",
+	"\u2716": "multiplication",
+	"\u2712": "pen",
+	"\U0001f5d1": "wastebasket",
+	"\U0001f3f7": "label",
+	"\U0001f5a5": "desktop computer",
+	"\U0001f5b1": "mouse",
+	"\U0001f5a8": "printer",
+	"\U0001f570": "mantelpiece clock",
+	"\U0001f579": "joystick",
+	"\u2328": "keyboard",
+}
+
+# Characters with no emoji presentation at all in common fonts. No selector
+# saves these: they have to be replaced with something else that means the
+# same thing. \ud83d\udda7 is the one that caught us out, showing as an empty box in
+# Telegram while looking perfectly fine in the editor.
+NO_EMOJI_FORM = {
+	"\U0001f5a7": "networked computers",
+}
+
+
+def _locale_strings():
+	import glob
+	import json
+
+	for path in sorted(glob.glob(os.path.join(harness.REPO, "locale", "*.json"))):
+		with io.open(path, encoding="utf-8") as handle:
+			for key, value in json.load(handle).items():
+				if isinstance(value, str):
+					yield os.path.basename(path), key, value
+
+
+def test_emoji_carry_their_variation_selector():
+	"""
+	An emoji drawn as a monochrome glyph — or as an empty box — is invisible in
+	the interface and impossible to spot from the source, since the character
+	is right there and looks fine in an editor.
+	"""
+	problems = []
+	for filename, key, value in _locale_strings():
+		for char, name in TEXT_DEFAULT_EMOJI.items():
+			index = value.find(char)
+			while index != -1:
+				following = value[index + len(char):index + len(char) + 1]
+				if following != "\ufe0f":
+					problems.append(f"  {filename}: {key} usa {name} sin U+FE0F")
+					break
+				index = value.find(char, index + 1)
+
+	assert not problems, "emoji sin selector de variación:\n" + "\n".join(sorted(set(problems)))
+
+
+def test_no_string_uses_a_character_with_no_emoji_form():
+	"""These render as a box on most platforms, selector or not."""
+	problems = []
+	for filename, key, value in _locale_strings():
+		for char, name in NO_EMOJI_FORM.items():
+			if char in value:
+				problems.append(f"  {filename}: {key} usa {name}")
+
+	assert not problems, "caracteres sin forma emoji:\n" + "\n".join(sorted(set(problems)))
