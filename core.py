@@ -655,7 +655,7 @@ class DockerManager:
 				if not remote_image or not remote_image.id:
 					error(f"Failed to pull image {image_with_tag}. Verify that the image exists in the registry.")
 					has_update = None
-					save_container_update_status(image_with_tag, container.name, has_update)
+					save_container_update_status(image_with_tag, container.name, has_update, self.host_id)
 					if loading_msg:
 						delete_message(loading_msg.message_id)
 						loading_msg = None
@@ -664,7 +664,7 @@ class DockerManager:
 			except docker.errors.ImageNotFound:
 				error(f"Image {image_with_tag} not found in registry. Check the image name.")
 				has_update = None
-				save_container_update_status(image_with_tag, container.name, has_update)
+				save_container_update_status(image_with_tag, container.name, has_update, self.host_id)
 				if loading_msg:
 					delete_message(loading_msg.message_id)
 					loading_msg = None
@@ -673,7 +673,7 @@ class DockerManager:
 			except docker.errors.APIError as e:
 				error(f"Error pulling image {image_with_tag}. Error: [{e}]")
 				has_update = None
-				save_container_update_status(image_with_tag, container.name, has_update)
+				save_container_update_status(image_with_tag, container.name, has_update, self.host_id)
 				if loading_msg:
 					delete_message(loading_msg.message_id)
 					loading_msg = None
@@ -694,15 +694,17 @@ class DockerManager:
 				# operation does not need to re-download it.
 				debug(f"{container.name} update detected! Keeping downloaded image [{remote_image_normalized[:CONTAINER_ID_LENGTH]}] for upcoming update")
 				markup = InlineKeyboardMarkup(row_width = 1)
-				markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{container.id[:CONTAINER_ID_LENGTH]}"))
+				markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{container_ref(self.host_id, container)}"))
 				has_update = True
-				sent_message = send_message(message=get_text("available_update", container.name), reply_markup=markup)
+				sent_message = send_message(
+					message=f'{host_label(self.host_id)}{get_text("available_update", container.name)}',
+					reply_markup=markup)
 				# Save container cache for this notification
 				if sent_message:
-					save_container_cache(sent_message.chat.id, sent_message.message_id, [container])
+					save_container_cache(sent_message.chat.id, sent_message.message_id, [container], self.host_id)
 			else:
 				has_update = False
-				send_message(message=get_text("already_updated", container.name))
+				send_message(message=f'{host_label(self.host_id)}{get_text("already_updated", container.name)}')
 		except Exception as e:
 			error(f"Could not check update: [{e}]")
 			has_update = None
@@ -713,7 +715,7 @@ class DockerManager:
 					pass
 
 		if image_with_tag and container is not None and getattr(container, 'name', None):
-			save_container_update_status(image_with_tag, container.name, has_update)
+			save_container_update_status(image_with_tag, container.name, has_update, self.host_id)
 
 	def delete(self, container_id, container_name):
 		try:

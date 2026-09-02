@@ -104,6 +104,7 @@ def test_the_registrars_are_the_ones_the_tests_load():
 				if line.startswith("import ") and not line.startswith("import core")}
 	assert set(harness.REGISTRARS) == imported, (harness.REGISTRARS, imported)
 
+
 # Characters that are emoji but default to a text presentation: without U+FE0F
 # after them, platforms are free to draw them as a monochrome glyph, and some
 # draw nothing at all. Every emoji the project already used carried the
@@ -180,3 +181,49 @@ def test_no_string_uses_a_character_with_no_emoji_form():
 				problems.append(f"  {filename}: {key} usa {name}")
 
 	assert not problems, "caracteres sin forma emoji:\n" + "\n".join(sorted(set(problems)))
+
+
+# Callbacks whose argument is a container. Their buttons have to carry a
+# reference, not a bare short id: five hex characters name a different
+# container on another host, so a bare id resolves against the local machine
+# and the press fails with "container does not exist".
+CONTAINER_CALLBACKS = (
+	"run", "stop", "restart", "confirmDelete", "delete", "logs", "logfile",
+	"info", "compose", "checkUpdate", "confirmUpdate", "update",
+	"changeTagContainer", "changeTag", "askCommand", "exec", "cancelExec",
+)
+
+# How a reference is built. Anything interpolated into a container callback
+# has to come from one of these, or already be a reference.
+REFERENCE_BUILDERS = ("container_ref(", "make_ref(", "_ref(")
+
+
+def test_container_buttons_never_carry_a_bare_id():
+	"""
+	The mistake this catches shipped three times: a button built with
+	`container.id[:CONTAINER_ID_LENGTH]` works on the local host and fails on
+	every other one, which is invisible until somebody presses it.
+	"""
+	import re
+
+	problems = []
+	pattern = re.compile(r'callback_data=f?"([^"]*)"')
+	for filename in ("core.py", "commands.py", "callbacks.py"):
+		path = os.path.join(harness.REPO, filename)
+		for line_number, line in enumerate(io.open(path, encoding="utf-8"), start=1):
+			for data in pattern.findall(line):
+				name = data.split("|", 1)[0]
+				if name not in CONTAINER_CALLBACKS:
+					continue
+				if "{" not in data:
+					continue
+				if any(builder in line for builder in REFERENCE_BUILDERS):
+					continue
+				# A plain {containerId} or {cid} is already a reference: it came
+				# from a callback the dispatcher resolved.
+				if re.search(r"\{(containerId|cid|container_id|ref)\}", data):
+					continue
+				problems.append(f"  {filename}:{line_number}  {line.strip()}")
+
+	assert not problems, (
+		"botones de contenedor con id suelto en vez de referencia:\n" + "\n".join(problems))
