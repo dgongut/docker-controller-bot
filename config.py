@@ -1,30 +1,69 @@
 import os
 
 # DOCKER ENVIRONMENT VARIABLES
+#
+# Only what the bot needs before it can read its own settings file lives here:
+# how to reach Telegram, who is allowed to talk to it, and which container it
+# is. Everything else is a setting, managed from /settings. The dividing line
+# is that a wrong value in any of these can lock you out of the bot, and you
+# cannot fix from the chat what stops the chat from working.
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_ADMIN = os.environ.get("TELEGRAM_ADMIN")
 TELEGRAM_GROUP = os.environ.get("TELEGRAM_GROUP")
-TELEGRAM_NOTIFICATION_CHANNEL = os.environ.get("TELEGRAM_NOTIFICATION_CHANNEL")
 TELEGRAM_THREAD = os.environ.get("TELEGRAM_THREAD", "1")
-CHECK_UPDATES = bool(int(os.environ.get("CHECK_UPDATES", "1")))
-CHECK_UPDATE_EVERY_HOURS = float(os.environ.get("CHECK_UPDATE_EVERY_HOURS", "4"))
-CHECK_UPDATE_STOPPED_CONTAINERS = bool(int(os.environ.get("CHECK_UPDATE_STOPPED_CONTAINERS", "1")))
 CONTAINER_NAME = os.environ.get("CONTAINER_NAME")
-LANGUAGE = os.environ.get("LANGUAGE", "ES")
-EXTENDED_MESSAGES = bool(int(os.environ.get("EXTENDED_MESSAGES", "0")))
-BUTTON_COLUMNS = int(os.environ.get("BUTTON_COLUMNS", "2"))
-MULTI_SELECTION = bool(int(os.environ.get("MULTI_SELECTION", "1")))
+
+def _as_bool(raw):
+    """Reads the 0/1 flags the bot has always used, tolerating true/false too."""
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+def _as_language(raw):
+    """
+    Normalises a language code to the casing used everywhere else.
+
+    The variable was accepted in any case, and storing it verbatim would leave
+    the settings file holding "es" for someone upgrading and "ES" for someone
+    who picked it from the menu.
+    """
+    code = str(raw).strip().upper()
+    return code if code in SUPPORTED_LANGUAGES else "ES"
+
+SUPPORTED_LANGUAGES = ("ES", "EN", "NL", "DE", "RU", "GL", "IT", "CAT")
+
+# Variables that became settings in 5.0.0, mapped to their key in the settings
+# file. On the first run they seed it, so updating from 4.x keeps every value
+# the user had. From then on the settings file is the only source and a
+# variable still present in the compose only earns a deprecation warning:
+# letting it win would mean a change made in /settings silently reverts on the
+# next restart.
+SETTINGS_FROM_ENV = {
+    "LANGUAGE": ("bot.language", _as_language),
+    "BUTTON_COLUMNS": ("bot.button_columns", int),
+    "EXTENDED_MESSAGES": ("bot.extended_messages", _as_bool),
+    "MULTI_SELECTION": ("bot.multi_selection", _as_bool),
+    "TELEGRAM_NOTIFICATION_CHANNEL": ("bot.notification_channel", str),
+    "CHECK_UPDATES": ("bot.check_updates", _as_bool),
+    "CHECK_UPDATE_EVERY_HOURS": ("bot.check_update_every_hours", float),
+    "CHECK_UPDATE_STOPPED_CONTAINERS": ("bot.check_update_stopped_containers", _as_bool),
+}
 
 # CONSTANTS
 UPDATER_IMAGE = "dgongut/docker-container-updater:latest"
 UPDATER_CONTAINER_NAME = "UPDATER-Docker-Controler-Bot"
 CONTAINER_ID_LENGTH = 5
 ANONYMOUS_USER_ID = "1087968824"
-SCHEDULE_PATH = "/app/schedule"
-SCHEDULE_JSON_FILE = "schedules.json"
-MUTE_FILE = ".muted_until"
-FULL_SCHEDULE_JSON_PATH = f'{SCHEDULE_PATH}/{SCHEDULE_JSON_FILE}'
-FULL_MUTE_FILE_PATH = f'{SCHEDULE_PATH}/{MUTE_FILE}'
+# Shown in the language picker. Each language is named in itself, which is what
+# someone looking for their own language actually scans for.
+LANGUAGE_NAMES = {
+    "ES": "Español",
+    "EN": "English",
+    "NL": "Nederlands",
+    "DE": "Deutsch",
+    "RU": "Русский",
+    "GL": "Galego",
+    "IT": "Italiano",
+    "CAT": "Català",
+}
 DONORS_URL = "https://donate.dgongut.com/donors.json"
 ICON_CONTAINER_MARK_FOR_UPDATE = "➕"
 ICON_CONTAINER_MARKED_FOR_UPDATE = "✅"
@@ -45,110 +84,6 @@ docker_architectures = {
     "ppc64le": "ppc64le",
     "s390x": "s390x",
     "unknown": "unknown",
-}
-
-CALL_PATTERNS = {
-    "askCommand": ["containerId"],
-    "cancelAskCommand": [],
-    "cancelCheckPort": [],
-    "cancelExec": ["commandId"],
-    "changeTag": ["containerId", "tag"],
-    "changeTagContainer": ["containerId"],
-    "cerrar": [],
-    "checkPort": [],
-    "checkUpdate": ["containerId"],
-    "compose": ["containerId"],
-    "confirmChangeTag": ["containerId", "tag"],
-    "confirmDelete": ["containerId"],
-    "confirmExec": ["containerId", "commandId"],
-    "confirmUpdate": ["containerId"],
-    "confirmUpdateAll": [],
-    "confirmUpdateSelected": ["originalMessageId"],
-    "delete": ["containerId"],
-    "deleteSchedule": ["scheduleHash"],
-    "exec": ["containerId", "commandId"],
-    "generatePort": [],
-    "info": ["containerId"],
-    "logfile": ["containerId"],
-    "logs": ["containerId"],
-    "toggleUpdate": ["containerId"],
-    "toggleUpdateAll": [],
-    "prune": ["action"],
-    "restart": ["containerId"],
-    "run": ["containerId"],
-    "stop": ["containerId"],
-    "update": ["containerId"],
-    "updateAll": [],
-    "updateSelected": ["originalMessageId"],
-    "enterRestartProject": ["containerName"],
-    "backToRestartLevel1": [],
-    "restartWholeProject": ["containerName"],
-    "enterRunProject": ["containerName"],
-    "backToRunLevel1": [],
-    "runWholeProject": ["containerName"],
-    "enterStopProject": ["containerName"],
-    "backToStopLevel1": [],
-    "stopWholeProject": ["containerName"],
-    "enterDeleteProject": ["containerName"],
-    "backToDeleteLevel1": [],
-    "confirmDeleteWholeProject": ["containerName"],
-    "deleteWholeProject": ["containerName"],
-    "enterExecProject": ["containerName"],
-    "backToExecLevel1": [],
-    "enterLogsProject": ["containerName"],
-    "backToLogsLevel1": [],
-    "enterCheckUpdateProject": ["containerName"],
-    "backToCheckUpdateLevel1": [],
-    "enterInfoProject": ["containerName"],
-    "showProjectInfo": ["containerName"],
-    "backToInfoLevel1": [],
-    "enterChangeTagProject": ["containerName"],
-    "backToChangeTagLevel1": [],
-    "enterLogfileProject": ["containerName"],
-    "backToLogfileLevel1": [],
-    "enterComposeProject": ["containerName"],
-    "backToComposeLevel1": [],
-    "scheduleMenu": [],
-    "scheduleAdd": [],
-    "scheduleEdit": [],
-    "scheduleSelectEdit": ["action"],
-    "scheduleEditField": ["field", "scheduleId"],
-    "scheduleEditValue": ["field", "scheduleId", "value"],
-    "scheduleEditStatus": ["scheduleId"],
-    "scheduleDelete": [],
-    "scheduleSelectDelete": ["scheduleHash"],
-    "scheduleSelectToggle": ["scheduleHash"],
-    "scheduleSelectAction": ["action"],
-    "scheduleSelectContainer": ["containerIdx"],
-    "scheduleSelectShowOutput": ["action"],
-    "scheduleSelectPruneType": ["pruneType"],
-    "scheduleSelectPruneShowOutput": ["action"],
-    "scheduleConfirm": [],
-}
-
-# Commands whose `containerName` arg actually carries a short hash of the
-# project name (to keep callback_data under Telegram's 64-byte limit).
-PROJECT_COMMANDS = {
-    "enterRestartProject", "restartWholeProject",
-    "enterRunProject", "runWholeProject",
-    "enterStopProject", "stopWholeProject",
-    "enterDeleteProject", "confirmDeleteWholeProject", "deleteWholeProject",
-    "enterExecProject",
-    "enterLogsProject",
-    "enterCheckUpdateProject",
-    "enterInfoProject", "showProjectInfo",
-    "enterChangeTagProject",
-    "enterLogfileProject",
-    "enterComposeProject",
-}
-
-# Commands that act on a container from a /run, /stop or /restart menu that is
-# kept open for multi-selection: instead of closing, the menu is rebuilt from
-# the live Docker state after the action finishes.
-MULTI_ACTION_COMMANDS = {
-    "run", "runWholeProject",
-    "stop", "stopWholeProject",
-    "restart", "restartWholeProject",
 }
 
 # SCHEDULE COMMAND PATTERNS - Define required parameters for each schedule action

@@ -109,7 +109,6 @@
   "ports_used_by_system": "❌ <b>Poort $1 is in gebruik</b>\n\nDeze poort wordt gebruikt binnen de bot-container",
   "loading_file": "<i>Bestand wordt geladen... Even geduld</i>",
   "logs": "📃 $1 logs",
-  "menu": "<b>🫡 Docker Controller Bot tot uw dienst</b>\nBeschikbare commando's:\n · /list Volledige lijst van containers.\n · /run Start een container.\n · /stop Stopt een container.\n · /restart Start een container opnieuw.\n · /exec Voer een commando uit in een container.\n · /delete Verwijdert een container.\n · /checkupdate Een container updaten.\n · /updateall Werk alle containers bij.\n · /changetag Wijzig container tag.\n · /logs Toont de laatste logs van een container.\n · /logfile Toont de laatste logs van een container in bestandsformaat.\n · /schedule Planningsmodule.\n · /compose Haalt de docker-compose van een container op. ⚠️\n· /prune Ruim ongebruikte objecten op het systeem op.\n  · /mute &lt;minuten&gt; Meldingen dempen.\n · /info Toont informatie over een container.\n · /ports Toon poorten gebruikt door containers.\n · /version Toont de huidige versie.\n · /donate Doneer aan de ontwikkelaar.\n · /donors Helden van Docker-Controller-Bot\n\n⚠️ Deze functie is in <i>experimentele</i> fase.",
   "menu_change_tag": "Wijzig container tag",
   "menu_compose": "Haal docker-compose van een container op",
   "menu_delete": "Een container verwijderen",
@@ -262,7 +261,6 @@
   "schedule_cron_help_reboot": "@reboot - Eenmaal bij het opstarten van het systeem uitvoeren (aangepaste verwerking)",
   "updating_stopping": "<i>Stop</i> <b>$1</b> voor update",
   "error_bot_container_name": "De naam van de container moet worden ingesteld in de CONTAINER_NAME variabele",
-
   "error_deleting_container_with_error": "Kon container $1 niet verwijderen. Fout: [$2]",
   "error_creating_container": "Kon container $1 niet aanmaken. Fout: [$2]",
   "error_updating_container_with_error": "Kon container $1 niet bijwerken. Fout: [$2]",
@@ -313,5 +311,6 @@
   "update_no_description": "Geen beschrijving beschikbaar",
   "update_date_unknown": "Onbekend",
   "update_no_size_change": "Geen wijzigingen",
-  "fetching_image_data": "<i>⏳ Image downloaden...</i>"
+  "fetching_image_data": "<i>⏳ Image downloaden...</i>",
+  "menu_settings": "Botinstellingen"
 }

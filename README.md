@@ -36,6 +36,8 @@ Lleva el control de tus contenedores docker desde un único lugar.
 - ✅ Visualiza puertos usados por contenedores, comprueba si un puerto concreto está libre y genera puertos aleatorios disponibles
 - ✅ Muestra información detallada de un contenedor o de un proyecto Compose completo
 - ✅ Programación de tareas con expresiones cron: run, stop, restart, exec, prune y mute
+- ✅ Ajustes editables desde el propio bot con `/settings`, sin tocar el docker-compose ni reiniciar
+- ✅ Menú principal por botones en `/start`, agrupado en categorías; los comandos escritos siguen funcionando igual
 - ✅ Silencia las notificaciones de forma temporal
 - ✅ Imagen multiarquitectura (amd64, arm64, armv7…) compatible con Raspberry Pi, NAS y servidores estándar
 - ✅ Soporte de idiomas (Spanish, English, Dutch, German, Russian, Galician, Italian, Catalan)
@@ -58,9 +60,11 @@ Antes de levantar el contenedor necesitas un bot propio en Telegram y conocer tu
 
 Casi todos los comandos pueden ejecutarse en dos modos: escribiendo el comando solo (`/run`) para que el bot muestre un menú interactivo con botones, o pasando directamente el nombre del contenedor (`/run nginx`) para actuar sin menús.
 
+`/start` abre el menú principal, con los comandos agrupados en categorías (Contenedores, Diagnóstico, Actualizaciones, Sistema, Automatización, Ajustes y Acerca de). Pulsar un botón hace exactamente lo mismo que escribir el comando a secas, así que puedes usar el menú o teclear, como prefieras.
+
 | Comando | Descripción |
 |---|---|
-| `/start` | Menú principal con la lista de comandos |
+| `/start` | Menú principal con botones, agrupados por tipo de acción |
 | `/list` | Listado completo de contenedores |
 | `/run` `/stop` `/restart` | Arranca / detiene / reinicia un contenedor o un proyecto Compose entero |
 | `/delete` | Elimina un contenedor o un proyecto Compose entero |
@@ -75,6 +79,7 @@ Casi todos los comandos pueden ejecutarse en dos modos: escribiendo el comando s
 | `/prune` | Limpia contenedores, imágenes, redes o volúmenes no usados |
 | `/mute <minutos>` | Silencia las notificaciones durante X minutos |
 | `/schedule` | Menú para crear, editar y borrar tareas programadas |
+| `/settings` | Ajustes del bot: idioma, columnas, comprobación de actualizaciones y canal de notificaciones |
 | `/version` `/donate` `/donors` | Versión actual / donar / lista de donantes |
 
 ## Soporte para Docker Compose
@@ -89,7 +94,7 @@ Desde `/schedule` puedes crear tareas que se ejecuten en cron.
 
 - Acciones soportadas: `run`, `stop`, `restart`, `exec`, `prune` y `mute`.
 - Acepta expresiones cron estándar (`0 */4 * * *`) y atajos: `@yearly`, `@monthly`, `@weekly`, `@daily`, `@hourly` y `@reboot`.
-- Las programaciones se persisten en `/app/schedule` (recuerda mapear ese volumen).
+- Las programaciones se persisten en `/app/config` (recuerda mapear ese volumen).
 
 ## Configuración en las variables del Docker Compose
 
@@ -99,20 +104,37 @@ Desde `/schedule` puedes crear tareas que se ejecuten en cron.
 |TELEGRAM_ADMIN |✅| ChatId del administrador (se puede obtener hablándole al bot [Rose](https://t.me/MissRose_bot) escribiendo /id). Admite múltiples administradores separados por comas. Por ejemplo 12345,54431,55944 |
 |TELEGRAM_GROUP |❌| ChatId del grupo. Si este bot va a formar parte de un grupo, es necesario especificar el chatId de dicho grupo. Es necesario que el bot sea administrador del grupo |
 |TELEGRAM_THREAD |❌| Thread del tema dentro de un supergrupo; valor numérico (2,3,4..). Por defecto 1. Se utiliza en conjunción con la variable TELEGRAM_GROUP |
-|TELEGRAM_NOTIFICATION_CHANNEL |❌| Canal donde se publicarán exclusivamente los cambios de estado de los contenedores (arranque, parada, creación y actualizaciones automáticas). La gestión se sigue haciendo desde el chat privado con el bot o desde TELEGRAM_GROUP |
 |CONTAINER_NAME |✅| Nombre del contenedor, lo que se le ponga en container_name en el docker-compose ha de ir aquí también |
 |TZ |✅| Timezone (Por ejemplo Europe/Madrid) |
-|CHECK_UPDATES |❌| Si se desea que compruebe actualizaciones. 0 no - 1 sí. Por defecto 1|
-|CHECK_UPDATE_EVERY_HOURS |❌| Tiempo de espera en horas entre chequeo de actualizaciones. Por defecto 4 |
-|CHECK_UPDATE_STOPPED_CONTAINERS |❌| Si se desea que compruebe las actualizaciones de los contenedores detenidos. 0 no - 1 sí. Por defecto 1 |
-|BUTTON_COLUMNS |❌| Numero de columnas de botones en las listas de contenedores. Por defecto 2 |
-|LANGUAGE |❌| Idioma, puede ser ES / EN / NL / DE / RU / GL / IT / CAT. Por defecto ES (Spanish) | 
-|EXTENDED_MESSAGES |❌| Si se desea que muestre más mensajes de información. 0 no - 1 sí. Por defecto 0 | 
-|MULTI_SELECTION |❌| Si en `/run`, `/stop` y `/restart` el menú se queda abierto para actuar sobre varios contenedores seguidos. 0 no - 1 sí. Por defecto 1 |
+
+Aquí solo quedan las variables que el bot necesita **antes** de poder leer sus propios ajustes: cómo llegar a Telegram, quién puede hablarle y qué contenedor es. La regla es sencilla: si ponerla mal te puede dejar sin acceso al bot, va en el docker-compose, porque lo que impide que el chat funcione no se puede arreglar desde el chat.
+
+### Ajustes (`/settings`)
+
+Todo lo demás se configura desde el propio bot y se guarda en `settings.json`, dentro del volumen mapeado:
+
+| AJUSTE | VALOR |
+|:------------- | :-------------|
+|Idioma| ES / EN / NL / DE / RU / GL / IT / CAT. Por defecto ES |
+|Columnas de botones| Número de columnas en las listas de contenedores. Por defecto 2 |
+|Mensajes ampliados| Muestra más mensajes de información. Por defecto desactivado |
+|Selección múltiple| En `/run`, `/stop` y `/restart` el menú se queda abierto para actuar sobre varios contenedores seguidos. Por defecto activado |
+|Comprobar actualizaciones| Por defecto activado |
+|Intervalo de comprobación| Horas entre comprobaciones. Acepta decimales. Por defecto 4 |
+|Contenedores parados| Si comprueba también las actualizaciones de los contenedores detenidos. Por defecto activado |
+|Canal de notificaciones| Canal donde se publicarán exclusivamente los cambios de estado de los contenedores (arranque, parada, creación y actualizaciones automáticas). La gestión se sigue haciendo desde el chat privado con el bot o desde TELEGRAM_GROUP. El bot comprueba que puede publicar ahí antes de guardarlo |
+
+Los cambios hechos desde `/settings` se aplican al momento, sin reiniciar el contenedor. Si prefieres editar `settings.json` a mano, hará falta reiniciar para que los lea.
+
+> [!NOTE]
+> Si vienes de la 4.x no tienes que hacer nada: en el primer arranque el bot importa los valores de tus variables de entorno a `settings.json` y los conserva tal cual. A partir de ahí manda `settings.json`, y esas variables ya no se leen; el log te avisa de las que puedes borrar del docker-compose.
 
 ## Anotaciones
 > [!WARNING]
-> Será necesario mapear un volumen para almacenar lo que el bot escribe en /app/schedule
+> Será necesario mapear un volumen para almacenar lo que el bot escribe en /app/config (ajustes, programaciones y caché de actualizaciones)
+
+> [!NOTE]
+> Si tu docker-compose mapea `/app/schedule` (la ruta que se usaba hasta la 4.x) el bot lo detecta y sigue usándolo, así que actualizar no requiere cambiar nada. Puedes pasarlo a `/app/config` cuando te venga bien.
 
 > [!NOTE]
 > Si se requiere tener la sesión iniciada en algún registro como DockerHub, GitHub Registry o alguno privado (docker login) es posible trasladar ese login al contenedor mapeando el `~/.docker/config.json` a `/root/.docker/config.json`
@@ -129,17 +151,9 @@ services:
             - TZ=Europe/Madrid
             #- TELEGRAM_GROUP=
             #- TELEGRAM_THREAD=1
-            #- TELEGRAM_NOTIFICATION_CHANNEL=
-            #- CHECK_UPDATES=1
-            #- CHECK_UPDATE_EVERY_HOURS=4
-            #- CHECK_UPDATE_STOPPED_CONTAINERS=1
-            #- BUTTON_COLUMNS=2
-            #- LANGUAGE=ES
-            #- EXTENDED_MESSAGES=0
-            #- MULTI_SELECTION=1
         volumes:
             - /var/run/docker.sock:/var/run/docker.sock # NO CAMBIAR
-            - /ruta/para/guardar/las/programaciones:/app/schedule # CAMBIAR LA PARTE IZQUIERDA
+            - /ruta/para/guardar/la/configuracion:/app/config # CAMBIAR LA PARTE IZQUIERDA
             #- ~/.docker/config.json:/root/.docker/config.json # Solo si se requiere iniciar sesión en algún registro
         image: dgongut/docker-controller-bot:latest
         container_name: docker-controller-bot
@@ -241,7 +255,7 @@ Las acciones globales (arrancar, parar, reiniciar o eliminar el proyecto entero)
 </details>
 
 <details>
-<summary>📢 Si configuro <code>TELEGRAM_NOTIFICATION_CHANNEL</code>, ¿se duplican las notificaciones?</summary>
+<summary>📢 Si configuro el canal de notificaciones, ¿se duplican las notificaciones?</summary>
 
 No. Cuando se define ese canal, los avisos de cambio de estado de los contenedores (arranque, parada, caída y actualizaciones automáticas) van **solo** a ese canal y dejan de aparecer en el chat principal.
 
@@ -253,7 +267,7 @@ El resto de mensajes (resultados de comandos, menús interactivos, avisos de act
 
 Desde el chat privado con el bot y desde el grupo (o el tema concreto del supergrupo) que hayas configurado en `TELEGRAM_GROUP` y `TELEGRAM_THREAD`.
 
-El bot contesta siempre donde le has escrito: si lanzas `/list` en el privado, la lista aparece en el privado; si lo lanzas en el tema del grupo, aparece en ese tema. `TELEGRAM_NOTIFICATION_CHANNEL` solo recibe las alertas de cambio de estado.
+El bot contesta siempre donde le has escrito: si lanzas `/list` en el privado, la lista aparece en el privado; si lo lanzas en el tema del grupo, aparece en ese tema. El canal de notificaciones solo recibe las alertas de cambio de estado.
 
 Cualquier otro chat se ignora: si el bot está metido en otro grupo, ahí no responde ni ejecuta nada, aunque quien escriba sea administrador. Ser administrador no basta, el chat también tiene que ser el privado del propio administrador o `TELEGRAM_GROUP`.
 </details>

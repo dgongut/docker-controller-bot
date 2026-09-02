@@ -738,9 +738,11 @@ def _perform_update_locked(client, container, config, container_name, message, e
 			except Exception as e:
 				debug_func(f"[DELETE_IMAGE] Warning: Could not delete old image: {e}")
 
-		# Save status
+		# The container now runs the image it was just updated to, so it is up
+		# to date. The status is stored as a boolean and rendered for display
+		# later, in whichever language is configured at that point.
 		debug_func(f"[UPDATE_SUCCESS] ✅ Update completed successfully for {container_name}")
-		save_status_func(config['image'], container_name, get_text_func("UPDATED_CONTAINER_TEXT"))
+		save_status_func(config['image'], container_name, False)
 		return get_text_func("updated_container", container_name)
 
 	except Exception as e:

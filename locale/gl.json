@@ -109,7 +109,6 @@
   "ports_used_by_system": "❌ <b>O porto $1 está en uso</b>\n\nEste porto está sendo usado dentro do contedor do bot",
   "loading_file": "<i>Cargando arquivo... Espera, por favor</i>",
   "logs": "📃 Logs de $1",
-  "menu": "<b>🫡 Docker Controller Bot ao seu servizo</b>\n\nComandos dispoñibles:\n\n · /list Listado completo dos contedores.\n · /run Inicia un contedor.\n · /stop Detén un contedor.\n · /restart Reinicia un contedor.\n · /exec Executa un comando nun contedor.\n · /delete Elimina un contedor.\n · /checkupdate Actualiza un contedor.\n · /updateall Actualiza todos os contenedores.\n · /changetag Cambia a tag dun contedor.\n · /logs Mostra os últimos logs dun contedor.\n · /logfile Mostra os últimos logs dun contedor en formato ficheiro.\n · /schedule Módulo de programacións\n · /compose Extrae o docker-compose dun contedor. ⚠️\n · /prune Limpia obxectos non utilizados no sistema.\n· /mute &lt;minutos&gt; Silencia as notificacións un tempo.\n · /info Mostra información dun contedor.\n · /ports Mostra os portos usados polos contedores.\n · /version Mostra a versión actual.\n · /donate Doa ao desenvolvedor.\n · /donors Héroes de Docker-Controller-Bot\n\n⚠️ Esta función encóntrase en fase <i>experimental</i>.",
   "menu_change_tag": "Cambia a tag dun contedor",
   "menu_compose": "Extrae o docker-compose dun contedor",
   "menu_delete": "Elimina un contedor",
@@ -262,7 +261,6 @@
   "schedule_cron_help_reboot": "@reboot - Executar unha vez ao iniciar o sistema (manejo personalizado)",
   "updating_stopping": "<i>Detendo</i> <b>$1</b> para actualizar",
   "error_bot_container_name": "Hai que configurar o nome do contedor na variable CONTAINER_NAME",
-
   "error_deleting_container_with_error": "Non se puido eliminar o contedor $1. Erro: [$2]",
   "error_creating_container": "Non se puido crear o contedor $1. Erro: [$2]",
   "updating_creating": "<i>Actualizando</i> <b>$1</b>...\nCreando contedor...",
@@ -313,5 +311,6 @@
   "update_no_description": "Sen descrición dispoñible",
   "update_date_unknown": "Descoñecida",
   "update_no_size_change": "Sen cambios",
-  "fetching_image_data": "<i>⏳ Descargando imaxe...</i>"
+  "fetching_image_data": "<i>⏳ Descargando imaxe...</i>",
+  "menu_settings": "Axustes do bot"
 }

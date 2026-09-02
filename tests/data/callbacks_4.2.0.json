@@ -1,0 +1,556 @@
+{
+  "_comment": "Frozen snapshot of every inline-button callback in v4.2.0 and the metadata the dispatcher used for it, taken from CALL_PATTERNS / PROJECT_COMMANDS / MULTI_ACTION_COMMANDS in config.py and from the message-deletion exclusion list that used to be inline in button_controller. The callback registry is checked against this so a refactor cannot quietly change how a button behaves.",
+  "_dead_in_4_2_0": [
+    "confirmExec",
+    "confirmUpdateAll",
+    "scheduleMenu"
+  ],
+  "callbacks": {
+    "askCommand": {
+      "params": [
+        "containerId"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "backToChangeTagLevel1": {
+      "params": [],
+      "keeps_message": true,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "backToCheckUpdateLevel1": {
+      "params": [],
+      "keeps_message": true,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "backToComposeLevel1": {
+      "params": [],
+      "keeps_message": true,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "backToDeleteLevel1": {
+      "params": [],
+      "keeps_message": true,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "backToExecLevel1": {
+      "params": [],
+      "keeps_message": true,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "backToInfoLevel1": {
+      "params": [],
+      "keeps_message": true,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "backToLogfileLevel1": {
+      "params": [],
+      "keeps_message": true,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "backToLogsLevel1": {
+      "params": [],
+      "keeps_message": true,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "backToRestartLevel1": {
+      "params": [],
+      "keeps_message": true,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "backToRunLevel1": {
+      "params": [],
+      "keeps_message": true,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "backToStopLevel1": {
+      "params": [],
+      "keeps_message": true,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "cancelAskCommand": {
+      "params": [],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "cancelCheckPort": {
+      "params": [],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "cancelExec": {
+      "params": [
+        "commandId"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "cerrar": {
+      "params": [],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "changeTag": {
+      "params": [
+        "containerId",
+        "tag"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "changeTagContainer": {
+      "params": [
+        "containerId"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "checkPort": {
+      "params": [],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "checkUpdate": {
+      "params": [
+        "containerId"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "compose": {
+      "params": [
+        "containerId"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "confirmChangeTag": {
+      "params": [
+        "containerId",
+        "tag"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "confirmDelete": {
+      "params": [
+        "containerId"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "confirmDeleteWholeProject": {
+      "params": [
+        "containerName"
+      ],
+      "keeps_message": true,
+      "project_arg": true,
+      "multi_action": false
+    },
+    "confirmUpdate": {
+      "params": [
+        "containerId"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "confirmUpdateSelected": {
+      "params": [
+        "originalMessageId"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "delete": {
+      "params": [
+        "containerId"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "deleteSchedule": {
+      "params": [
+        "scheduleHash"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "deleteWholeProject": {
+      "params": [
+        "containerName"
+      ],
+      "keeps_message": false,
+      "project_arg": true,
+      "multi_action": false
+    },
+    "enterChangeTagProject": {
+      "params": [
+        "containerName"
+      ],
+      "keeps_message": true,
+      "project_arg": true,
+      "multi_action": false
+    },
+    "enterCheckUpdateProject": {
+      "params": [
+        "containerName"
+      ],
+      "keeps_message": true,
+      "project_arg": true,
+      "multi_action": false
+    },
+    "enterComposeProject": {
+      "params": [
+        "containerName"
+      ],
+      "keeps_message": true,
+      "project_arg": true,
+      "multi_action": false
+    },
+    "enterDeleteProject": {
+      "params": [
+        "containerName"
+      ],
+      "keeps_message": true,
+      "project_arg": true,
+      "multi_action": false
+    },
+    "enterExecProject": {
+      "params": [
+        "containerName"
+      ],
+      "keeps_message": true,
+      "project_arg": true,
+      "multi_action": false
+    },
+    "enterInfoProject": {
+      "params": [
+        "containerName"
+      ],
+      "keeps_message": true,
+      "project_arg": true,
+      "multi_action": false
+    },
+    "enterLogfileProject": {
+      "params": [
+        "containerName"
+      ],
+      "keeps_message": true,
+      "project_arg": true,
+      "multi_action": false
+    },
+    "enterLogsProject": {
+      "params": [
+        "containerName"
+      ],
+      "keeps_message": true,
+      "project_arg": true,
+      "multi_action": false
+    },
+    "enterRestartProject": {
+      "params": [
+        "containerName"
+      ],
+      "keeps_message": true,
+      "project_arg": true,
+      "multi_action": false
+    },
+    "enterRunProject": {
+      "params": [
+        "containerName"
+      ],
+      "keeps_message": true,
+      "project_arg": true,
+      "multi_action": false
+    },
+    "enterStopProject": {
+      "params": [
+        "containerName"
+      ],
+      "keeps_message": true,
+      "project_arg": true,
+      "multi_action": false
+    },
+    "exec": {
+      "params": [
+        "containerId",
+        "commandId"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "generatePort": {
+      "params": [],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "info": {
+      "params": [
+        "containerId"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "logfile": {
+      "params": [
+        "containerId"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "logs": {
+      "params": [
+        "containerId"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "prune": {
+      "params": [
+        "action"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "restart": {
+      "params": [
+        "containerId"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": true
+    },
+    "restartWholeProject": {
+      "params": [
+        "containerName"
+      ],
+      "keeps_message": false,
+      "project_arg": true,
+      "multi_action": true
+    },
+    "run": {
+      "params": [
+        "containerId"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": true
+    },
+    "runWholeProject": {
+      "params": [
+        "containerName"
+      ],
+      "keeps_message": false,
+      "project_arg": true,
+      "multi_action": true
+    },
+    "scheduleAdd": {
+      "params": [],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "scheduleConfirm": {
+      "params": [],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "scheduleDelete": {
+      "params": [],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "scheduleEdit": {
+      "params": [],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "scheduleEditField": {
+      "params": [
+        "field",
+        "scheduleId"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "scheduleEditStatus": {
+      "params": [
+        "scheduleId"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "scheduleEditValue": {
+      "params": [
+        "field",
+        "scheduleId",
+        "value"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "scheduleSelectAction": {
+      "params": [
+        "action"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "scheduleSelectContainer": {
+      "params": [
+        "containerIdx"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "scheduleSelectDelete": {
+      "params": [
+        "scheduleHash"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "scheduleSelectEdit": {
+      "params": [
+        "action"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "scheduleSelectPruneShowOutput": {
+      "params": [
+        "action"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "scheduleSelectPruneType": {
+      "params": [
+        "pruneType"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "scheduleSelectShowOutput": {
+      "params": [
+        "action"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "scheduleSelectToggle": {
+      "params": [
+        "scheduleHash"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "showProjectInfo": {
+      "params": [
+        "containerName"
+      ],
+      "keeps_message": true,
+      "project_arg": true,
+      "multi_action": false
+    },
+    "stop": {
+      "params": [
+        "containerId"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": true
+    },
+    "stopWholeProject": {
+      "params": [
+        "containerName"
+      ],
+      "keeps_message": false,
+      "project_arg": true,
+      "multi_action": true
+    },
+    "toggleUpdate": {
+      "params": [
+        "containerId"
+      ],
+      "keeps_message": true,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "toggleUpdateAll": {
+      "params": [],
+      "keeps_message": true,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "update": {
+      "params": [
+        "containerId"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "updateAll": {
+      "params": [],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    },
+    "updateSelected": {
+      "params": [
+        "originalMessageId"
+      ],
+      "keeps_message": false,
+      "project_arg": false,
+      "multi_action": false
+    }
+  }
+}

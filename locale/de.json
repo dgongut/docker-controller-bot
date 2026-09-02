@@ -109,7 +109,6 @@
   "ports_used_by_system": "❌ <b>Port $1 wird verwendet</b>\n\nDieser Port wird innerhalb des Bot-Containers verwendet",
   "loading_file": "<i>Datei wird geladen... Bitte warten</i>",
   "logs": "📃 $1 Logs",
-  "menu": "<b>🫡 Docker Controller Bot zu Diensten</b>\n\nVerfügbare Befehle:\n\n · /list Komplette Liste der Container.\n · /run Startet einen Container.\n · /stop Stoppt einen Container.\n · /restart Startet einen Container neu.\n · /exec Führe einen Befehl in einem Container aus.\n · /delete Löscht einen Container.\n · /checkupdate Aktualisiert einen Container.\n · /updateall Alle Container aktualisieren.\n · /changetag Ändert den Tag eines Containers.\n · /logs Zeigt die letzten Logs eines Containers an.\n · /logfile Zeigt die letzten Logs eines Containers im Dateiformat an.\n · /schedule Zeitplanmodul.\n · /compose Extrahiert das docker-compose eines Containers. ⚠️\n · /prune Bereinigt ungenutzte Objekte auf dem System.\n · /mute &lt;Minuten&gt; Benachrichtigungen stummschalten.\n · /info Zeigt Informationen zu einem Container an.\n · /ports Von Containern verwendete Ports anzeigen.\n · /version Zeigt die aktuelle Version an.\n · /donate Spenden an den Entwickler\n · /donors Helden von Docker-Controller-Bot\n\n⚠️ Diese Funktion befindet sich in der <i>experimentellen</i> Phase.",
   "menu_change_tag": "Container-Tag ändern",
   "menu_compose": "Docker-Compose aus einem Container extrahieren",
   "menu_delete": "Container löschen",
@@ -262,7 +261,6 @@
   "schedule_cron_help_reboot": "@reboot - Einmal beim Systemstart ausführen (benutzerdefinierte Behandlung)",
   "updating_stopping": "<i>Stoppe</i> <b>$1</b> zum Aktualisieren",
   "error_bot_container_name": "Der Containername muss in der Variable CONTAINER_NAME gesetzt werden",
-
   "error_deleting_container_with_error": "Konnte Container $1 nicht löschen. Fehler: [$2]",
   "error_creating_container": "Konnte Container $1 nicht erstellen. Fehler: [$2]",
   "error_updating_container_with_error": "Konnte Container $1 nicht aktualisieren. Fehler: [$2]",
@@ -313,5 +311,6 @@
   "update_no_description": "Keine Beschreibung verfügbar",
   "update_date_unknown": "Unbekannt",
   "update_no_size_change": "Keine Änderungen",
-  "fetching_image_data": "<i>⏳ Image wird heruntergeladen...</i>"
+  "fetching_image_data": "<i>⏳ Image wird heruntergeladen...</i>",
+  "menu_settings": "Bot-Einstellungen"
 }
