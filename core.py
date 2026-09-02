@@ -1478,7 +1478,8 @@ def _build_schedule_summary(state: dict) -> str:
 	# defaulted here: the step that asks for it renders this summary above the
 	# question, and a fallback would have it claiming a host while still
 	# asking which one.
-	if state.get("host") and not host_registry.is_single_host():
+	if (state.get("host") and not host_registry.is_single_host()
+			and state.get("action") in HOST_SCOPED_SCHEDULE_ACTIONS):
 		lines.append(f"<b>{get_text('schedule_label_host')}:</b> {host_registry.alias(state['host'])}")
 	# Only show show_output if action is exec or prune and show_output is not None
 	if state.get("action") in ("exec", "prune") and state.get("show_output") is not None:
@@ -1553,12 +1554,16 @@ def show_schedule_menu(user_id: int, chat_id: int):
 			lines.append(f"  {label_status}: <b>{status_icon} {status_text}</b>")
 			lines.append(f"  {label_cron}: <code>{cron}</code>")
 			lines.append(f"  {label_action}: <b>{action}</b>")
+
 			# Which machine the task runs on. A task names a container, and a
 			# name is only unique within one daemon, so with several hosts the
-			# listing is ambiguous without this.
-			if not host_registry.is_single_host():
+			# listing is ambiguous without this. Placed where the creation
+			# summary puts it — after what it acts on, before show_output — so
+			# both read the same way round.
+			host_line = None
+			if not host_registry.is_single_host() and action in HOST_SCOPED_SCHEDULE_ACTIONS:
 				task_host = sched.get("host") or host_registry.local_host_id()
-				lines.append(f"  {get_text('schedule_label_host')}: <b>{host_registry.alias(task_host)}</b>")
+				host_line = f"  {get_text('schedule_label_host')}: <b>{host_registry.alias(task_host)}</b>"
 
 			# Add action-specific details
 			if action == 'mute':
@@ -1566,14 +1571,20 @@ def show_schedule_menu(user_id: int, chat_id: int):
 			elif action == 'exec':
 				lines.append(f"  {label_container}: <b>{container}</b>")
 				lines.append(f"  {label_command}: <code>{command}</code>")
+				if host_line:
+					lines.append(host_line)
 				output_text = yes_text if show_output else no_text
 				lines.append(f"  {label_show_output}: <b>{output_text}</b>")
 			elif action == 'prune':
 				lines.append(f"  {label_prune_type}: <b>{prune_type}</b>")
+				if host_line:
+					lines.append(host_line)
 				output_text = yes_text if show_output else no_text
 				lines.append(f"  {label_show_output}: <b>{output_text}</b>")
 			elif action in ('run', 'stop', 'restart'):
 				lines.append(f"  {label_container}: <b>{container}</b>")
+				if host_line:
+					lines.append(host_line)
 
 			lines.append("")
 	else:
@@ -1657,18 +1668,28 @@ def show_schedule_edit_options(user_id: int, schedule_name: str):
 	message_text += f"<b>{get_text('schedule_label_status')}:</b> {status_icon} {status_text}\n"
 	message_text += f"<b>{get_text('schedule_label_cron')}:</b> <code>{cron}</code>\n"
 	message_text += f"<b>{get_text('schedule_label_action')}:</b> <b>{action}</b>\n"
+	# Which machine the task runs on, same rule and same position as the other
+	# two renderers: only with more than one host, only for actions that act on
+	# Docker, and after what the task acts on.
+	host_line = ""
+	if not host_registry.is_single_host() and action in HOST_SCOPED_SCHEDULE_ACTIONS:
+		task_host = schedule.get("host") or host_registry.local_host_id()
+		host_line = f"<b>{get_text('schedule_label_host')}:</b> <b>{host_registry.alias(task_host)}</b>\n"
 
 	if action == 'mute':
 		message_text += f"<b>{get_text('schedule_label_minutes')}:</b> <b>{minutes}</b>\n"
 	elif action == 'exec':
 		message_text += f"<b>{get_text('schedule_label_container')}:</b> <b>{container}</b>\n"
 		message_text += f"<b>{get_text('schedule_label_command')}:</b> <code>{command}</code>\n"
+		message_text += host_line
 		message_text += f"<b>{get_text('schedule_label_show_output')}:</b> <b>{get_text('schedule_yes') if show_output else get_text('schedule_no')}</b>\n"
 	elif action == 'prune':
 		message_text += f"<b>{get_text('schedule_label_prune_type')}:</b> <b>{prune_type}</b>\n"
+		message_text += host_line
 		message_text += f"<b>{get_text('schedule_label_show_output')}:</b> <b>{get_text('schedule_yes') if show_output else get_text('schedule_no')}</b>\n"
 	elif action in ('run', 'stop', 'restart'):
 		message_text += f"<b>{get_text('schedule_label_container')}:</b> <b>{container}</b>\n"
+		message_text += host_line
 
 	message_text += "\n" + get_text("schedule_edit_what") + "\n\n"
 
@@ -1842,10 +1863,14 @@ def is_valid_cron(cron_expr: str) -> bool:
 		return False
 
 def confirm_schedule_creation(user_id: int, state: dict):
-	# A prune task with a single host configured never got asked, so its host
-	# is recorded here rather than left blank for the executor to guess.
-	if not state.get("host"):
+	# A task that acts on Docker always ends up with a host, so the executor
+	# never has to guess: a prune on a single-host setup never got asked. A
+	# mute is the bot's own notifications and gets none.
+	if state.get("action") in HOST_SCOPED_SCHEDULE_ACTIONS and not state.get("host"):
 		state["host"] = host_registry.local_host_id()
+		save_schedule_state(user_id, state)
+	elif state.get("action") not in HOST_SCOPED_SCHEDULE_ACTIONS:
+		state["host"] = None
 		save_schedule_state(user_id, state)
 	"""Show confirmation of schedule creation"""
 	# Delete previous message if exists

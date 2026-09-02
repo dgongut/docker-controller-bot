@@ -18,7 +18,7 @@ import uuid
 from collections import namedtuple
 
 import store
-from config import SETTINGS_FROM_ENV
+from config import HOST_SCOPED_SCHEDULE_ACTIONS, SETTINGS_FROM_ENV
 from logger import debug, error, warning
 
 # Directory 4.x wrote its pickled update cache into, relative to the working
@@ -178,12 +178,17 @@ def _migrate_mute_file():
 
 def _migrate_schedules(local_host_id):
 	"""
-	Stamps the local host onto tasks that predate hosts existing.
+	Puts every task's host right.
 
-	A task says which container to act on by name, and a name is only unique
-	within one daemon. Left blank it would be ambiguous the moment a second
-	host is added, so every existing task is pinned to the machine it was
-	created for, which is the local one.
+	A task that acts on Docker says which container by name, and a name is
+	only unique within one daemon. Left blank it would be ambiguous the moment
+	a second host is added, so tasks that predate hosts are pinned to the
+	machine they were created for, which is the local one.
+
+	And it clears the host from a mute task. Muting is the bot's own
+	notifications, so it belongs to no machine — an earlier version of this
+	stamped one onto every task alike, and the listing then claimed a mute ran
+	somewhere in particular.
 	"""
 	path = store.schedules_path()
 	if not os.path.isfile(path):
@@ -200,12 +205,18 @@ def _migrate_schedules(local_host_id):
 	if not isinstance(schedules, list):
 		return
 
-	stamped = 0
+	stamped = cleared = 0
 	for schedule in schedules:
-		if isinstance(schedule, dict) and not schedule.get("host"):
+		if not isinstance(schedule, dict):
+			continue
+		host_scoped = schedule.get("action") in HOST_SCOPED_SCHEDULE_ACTIONS
+		if host_scoped and not schedule.get("host"):
 			schedule["host"] = local_host_id
 			stamped += 1
-	if not stamped:
+		elif not host_scoped and schedule.get("host"):
+			schedule["host"] = None
+			cleared += 1
+	if not stamped and not cleared:
 		return
 
 	temporary = f"{path}.tmp"
@@ -213,7 +224,10 @@ def _migrate_schedules(local_host_id):
 		with open(temporary, "w", encoding="utf-8") as handle:
 			json.dump(document, handle, indent=2, ensure_ascii=False)
 		os.replace(temporary, path)
-		debug(f"Pinned {stamped} existing schedules to the local host")
+		if stamped:
+			debug(f"Pinned {stamped} existing schedules to the local host")
+		if cleared:
+			debug(f"Cleared the host from {cleared} schedules that do not act on a host")
 	except Exception as e:
 		error(f"Could not write the migrated schedules to {path}: {e}")
 

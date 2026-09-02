@@ -86,6 +86,11 @@ docker_architectures = {
     "unknown": "unknown",
 }
 
+# Scheduled actions that act on Docker, and so belong to one host. Muting is
+# the bot's own notifications: it belongs to no machine, and showing it a host
+# would be claiming something that means nothing.
+HOST_SCOPED_SCHEDULE_ACTIONS = frozenset({"run", "stop", "restart", "exec", "prune"})
+
 # SCHEDULE COMMAND PATTERNS - Define required parameters for each schedule action
 # Format: "action": {
 #     "params": ["param1", "param2", ...],  # Required parameters

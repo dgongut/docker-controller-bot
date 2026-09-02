@@ -6,6 +6,7 @@ their compose set is the value they keep, and it only moves house. These tests
 are the proof of that promise.
 """
 
+import json
 import os
 import shutil
 import sys
@@ -148,3 +149,32 @@ def test_an_expired_or_absent_mute_is_dropped():
 		migration.run()
 		assert store_.state_get("mute_until") == 0, f"con .muted_until={value!r}"
 		shutil.rmtree(root, ignore_errors=True)
+
+def test_a_mute_task_is_not_pinned_to_a_host():
+	"""
+	The first version of this stamped the local host onto every task alike, so
+	a mute — which is the bot's own notifications — claimed to run on a
+	particular machine. Existing files are cleaned up on the next start.
+	"""
+	store_, root = harness.temp_storage(legacy=True, seed_files={
+		"schedules.json": (
+			'{"schedules": ['
+			'{"name": "silencio", "action": "mute", "minutes": 30, "host": "h_stale"},'
+			'{"name": "limpieza", "action": "prune", "prune_type": "images"}'
+			']}'),
+	})
+	result = migration.run()
+
+	with open(store_.schedules_path(), encoding="utf-8") as handle:
+		schedules = json.load(handle)["schedules"]
+	by_name = {schedule["name"]: schedule for schedule in schedules}
+
+	assert by_name["silencio"]["host"] is None, by_name["silencio"]
+	assert by_name["limpieza"]["host"] == result.host_id, by_name["limpieza"]
+
+	migration.run()  # idempotente
+	with open(store_.schedules_path(), encoding="utf-8") as handle:
+		again = {s["name"]: s for s in json.load(handle)["schedules"]}
+	assert again["silencio"]["host"] is None
+	assert again["limpieza"]["host"] == result.host_id
+	shutil.rmtree(root, ignore_errors=True)

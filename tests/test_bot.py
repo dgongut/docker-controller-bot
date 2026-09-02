@@ -1036,6 +1036,91 @@ def test_the_bot_is_never_offered_to_a_scheduled_task():
 		_restore_hosts()
 
 
+def test_the_three_renderers_put_the_host_in_the_same_place():
+	"""
+	The creation summary, the listing and the edit screen each build their own
+	text. With the host in a different position in each, the same task read
+	three different ways round.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	task = {"id": 1, "name": "Limpieza", "cron": "@hourly", "action": "prune",
+			"prune_type": "images", "show_output": False, "host": "h_nas",
+			"enabled": True}
+	captured = {}
+	original = dcb.send_message
+	dcb.send_message = lambda **kwargs: captured.update(kwargs)
+	original_all = dcb.schedule_manager.get_all_schedules
+	dcb.schedule_manager.get_all_schedules = lambda: [task]
+	original_get = dcb.schedule_manager.get_schedule
+	dcb.schedule_manager.get_schedule = lambda _name: task
+	try:
+		texts = {}
+		texts["summary"] = dcb._build_schedule_summary(task)
+		dcb.show_schedule_menu(1, 1)
+		texts["listing"] = captured["message"]
+		captured.clear()
+		dcb.show_schedule_edit_options(1, "Limpieza")
+		texts["edit"] = captured.get("message", "")
+
+		prune_label = dcb.get_text("schedule_label_prune_type")
+		host_label_text = dcb.get_text("schedule_label_host")
+		output_label = dcb.get_text("schedule_label_show_output")
+		for where, text in texts.items():
+			assert host_label_text in text, (where, text)
+			positions = [text.index(prune_label), text.index(host_label_text),
+						text.index(output_label)]
+			assert positions == sorted(positions), (where, text)
+	finally:
+		dcb.send_message = original
+		dcb.schedule_manager.get_all_schedules = original_all
+		dcb.schedule_manager.get_schedule = original_get
+		_restore_hosts()
+
+
+def test_a_mute_task_belongs_to_no_host():
+	"""
+	Muting silences the bot's own notifications. Showing it a host would be
+	claiming something that means nothing, and the first version of this
+	stamped one onto every task alike.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	original = dcb.send_message
+	dcb.send_message = lambda *a, **kw: None
+	original_save = dcb.save_schedule_state
+	dcb.save_schedule_state = lambda *a, **k: None
+	try:
+		# Even with one stored, the summary does not show it.
+		summary = dcb._build_schedule_summary(
+			{"name": "silencio", "action": "mute", "minutes": 30, "host": "h_nas"})
+		assert dcb.get_text("schedule_label_host") not in summary, summary
+
+		# And confirming clears it rather than pinning the local one.
+		state = {"name": "silencio", "action": "mute", "minutes": 30}
+		dcb.confirm_schedule_creation(1, state)
+		assert state["host"] is None, state
+
+		# While a task that does act on Docker still gets one.
+		state = {"name": "limpieza", "action": "prune", "prune_type": "images"}
+		dcb.confirm_schedule_creation(1, state)
+		assert state["host"] == "h_local", state
+	finally:
+		dcb.send_message = original
+		dcb.save_schedule_state = original_save
+		_restore_hosts()
+
+
+def test_every_schedule_action_is_classified():
+	"""
+	A new action missing from the set would silently be treated as belonging
+	to no host, and its task would run wherever the executor guessed.
+	"""
+	from config import HOST_SCOPED_SCHEDULE_ACTIONS, SCHEDULE_PATTERNS
+
+	unclassified = set(SCHEDULE_PATTERNS) - HOST_SCOPED_SCHEDULE_ACTIONS - {"mute"}
+	assert not unclassified, f"acciones sin clasificar: {sorted(unclassified)}"
+	assert HOST_SCOPED_SCHEDULE_ACTIONS <= set(SCHEDULE_PATTERNS)
+
+
 def test_the_flow_asks_in_the_order_the_summary_lists():
 	"""
 	So the summary only grows downwards as the answers come in and the last
