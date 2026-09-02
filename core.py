@@ -35,6 +35,7 @@ from schedule_flow import (
 )
 from port_manager import PortManager
 import callback_registry
+import host_registry
 from i18n import get_text, language
 from logger import debug, error, warning
 from message_queue import MessageQueue
@@ -198,9 +199,24 @@ def with_reply_context(handler):
 	return wrapper
 
 class DockerManager:
-	def __init__(self):
-		self.client = docker.from_env()
+	"""
+	Every Docker operation, against one host.
+
+	One instance per host. The client is resolved through the registry rather
+	than from the environment, so which machine an operation lands on is a
+	property of the manager and never something a caller has to remember to
+	pass along.
+	"""
+
+	def __init__(self, host_id=None):
+		self.host_id = host_id or host_registry.local_host_id()
+		self.client = host_registry.client(self.host_id)
 		self.compose_manager = ComposeProjectManager(self.client)
+
+	@property
+	def alias(self):
+		"""The host's display name, for messages that have to say where."""
+		return host_registry.alias(self.host_id)
 
 	def list_containers(self, comando=""):
 		comando = comando.split('@', 1)[0]
@@ -533,13 +549,20 @@ class DockerManager:
 		"""
 		try:
 			if CONTAINER_NAME == container_name:
-				# Self-update: use updater container
+				# Self-update: hand the job to the updater container.
+				#
+				# Always on the local socket, never on self.client: the bot's
+				# own container exists on exactly one host, so running the
+				# updater anywhere else would look for a container that is not
+				# there. Reaching this from another host's menu is possible,
+				# because the bot appears in its own listing.
+				local = host_registry.client(host_registry.local_host_id())
 				if not tag:
 					container_environment = {'CONTAINER_NAME': container_name}
 				else:
 					container_environment = {'CONTAINER_NAME': container_name, 'TAG': tag}
 				container_volumes = {'/var/run/docker.sock': {'bind': '/var/run/docker.sock', 'mode': 'rw'}}
-				new_container = self.client.containers.run(
+				new_container = local.containers.run(
 					UPDATER_IMAGE,
 					name=UPDATER_CONTAINER_NAME,
 					environment=container_environment,
@@ -788,6 +811,48 @@ class DockerManager:
 		return False
 
 # Instantiate the DockerManager
+# Managers are cached per host: each one holds a connection, so rebuilding it
+# on every command would mean reconnecting constantly.
+_managers = {}
+_managers_lock = threading.Lock()
+
+
+def manager(host_id=None):
+	"""
+	The manager for one host, building it on first use.
+
+	Raises host_registry.HostUnavailable when the host cannot be reached, which
+	callers sweeping several hosts catch to skip the ones that are down.
+	"""
+	host_id = host_id or host_registry.local_host_id()
+	with _managers_lock:
+		existing = _managers.get(host_id)
+		if existing is not None and existing.client is host_registry.client(host_id):
+			return existing
+		built = DockerManager(host_id)
+		_managers[host_id] = built
+		return built
+
+
+def managers():
+	"""A manager per reachable host, skipping the ones that do not answer."""
+	built = []
+	for entry, _ in host_registry.reachable_hosts():
+		try:
+			built.append(manager(entry["id"]))
+		except host_registry.HostUnavailable as e:
+			warning(str(e))
+	return built
+
+
+def forget_managers():
+	"""Drops the cached managers, so the next use reconnects."""
+	with _managers_lock:
+		_managers.clear()
+
+
+# The local host's manager. Most of the bot still goes through this one, and
+# with a single host configured it is the only one there is.
 docker_manager = DockerManager()
 
 # Instantiate the PortManager

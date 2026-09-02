@@ -95,7 +95,13 @@ def load_bot(env=None):
 	store, root = temp_storage(env)
 
 	import docker
+	# Both entry points the bot uses: from_env for anything still resolving the
+	# environment, DockerClient for the host registry.
 	docker.from_env = lambda *args, **kwargs: MagicMock()
+	docker.DockerClient = lambda *args, **kwargs: MagicMock()
+
+	import host_registry
+	host_registry.reset()
 
 	core = _import("core")
 	for name in REGISTRARS:
