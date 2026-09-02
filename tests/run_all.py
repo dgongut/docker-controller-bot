@@ -20,7 +20,7 @@ REPO = os.path.dirname(HERE)
 
 # test_store and test_migration expect a clean import; test_bot loads the bot
 # module, which is global state, so it goes last.
-MODULES = ("test_lint", "test_store", "test_migration", "test_hosts", "test_bot")
+MODULES = ("test_lint", "test_store", "test_migration", "test_hosts", "test_bot", "test_monitors")
 
 
 def load(name):

@@ -84,14 +84,27 @@ def temp_storage(env=None, legacy=False, seed_files=None):
 REGISTRARS = ("commands", "callbacks")
 
 
+_loaded = None
+
+
 def load_bot(env=None):
 	"""
 	Imports the core module under a temporary storage root, followed by
 	whatever registers commands and callbacks.
 
+	Cached, and deliberately so: there is one bot per process. Importing it
+	twice would hit the callback registry's duplicate check, which is there to
+	stop two handlers claiming one button. `env` therefore only applies to the
+	first call, which is why anything asserting on start-up values snapshots
+	them instead of reading them live.
+
 	Docker is stubbed rather than mocked selectively: the core builds a
 	DockerManager at import time, and no test here needs a real daemon.
 	"""
+	global _loaded
+	if _loaded is not None:
+		return _loaded
+
 	store, root = temp_storage(env)
 
 	import docker
@@ -106,7 +119,8 @@ def load_bot(env=None):
 	core = _import("core")
 	for name in REGISTRARS:
 		_import(name)
-	return core, store, root
+	_loaded = (core, store, root)
+	return _loaded
 
 
 def _import(name):

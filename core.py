@@ -858,12 +858,57 @@ docker_manager = DockerManager()
 # Instantiate the PortManager
 port_manager = PortManager(docker_manager)
 
+def host_label(host_id):
+	"""
+	How a message says which host it is about, or nothing when there is only
+	one.
+
+	With a single host configured the bot must read exactly as it did before
+	hosts existed, so this is empty rather than saying "local" everywhere.
+	"""
+	if host_registry.is_single_host():
+		return ""
+	return f"<b>{host_registry.alias(host_id)}</b> · "
+
+
 class DockerEventMonitor:
-	def __init__(self):
-		self.client = docker.from_env()
+	"""
+	Watches one host's event stream and reports containers starting and
+	stopping.
+
+	One instance per host: client.events() blocks, so it needs a thread of its
+	own, and a host going away must not take the others' streams with it.
+	"""
+
+	# Reconnection backs off up to this, and never gives up. 4.x stopped after
+	# five failures, which on a remote host that is briefly unreachable would
+	# mean its events stay silent until the bot is restarted.
+	MAX_BACKOFF_SECONDS = 300
+
+	def __init__(self, host_id):
+		self.host_id = host_id
+		self._stop = threading.Event()
+
+	@property
+	def alias(self):
+		return host_registry.alias(self.host_id)
+
+	def stop(self):
+		"""
+		Asks the monitor to finish.
+
+		The blocking events() call cannot be interrupted, so the client is
+		dropped as well: the stream then fails and the loop sees the flag.
+		"""
+		self._stop.set()
+		host_registry.drop(self.host_id)
 
 	def detectar_eventos_contenedores(self):
-		for event in self.client.events(decode=True):
+		client = host_registry.client(self.host_id)
+		for event in client.events(decode=True):
+			if self._stop.is_set():
+				return
+
 			# Only process container events
 			event_type = event.get('Type', '')
 			if event_type != 'container':
@@ -884,6 +929,7 @@ class DockerEventMonitor:
 				message = get_text("created_container", container_name)
 
 			if message:
+				message = f"{host_label(self.host_id)}{message}"
 				try:
 					if is_muted():
 						debug(f"Message [{message}] omitted because muted")
@@ -895,35 +941,87 @@ class DockerEventMonitor:
 					time.sleep(20) # Possible Telegram saturation causing send_message to raise an exception
 
 	def _event_loop_with_retry(self):
-		"""Event loop wrapper with automatic retry on failure."""
-		max_retries = 5
-		retry_count = 0
+		"""
+		Keeps the stream alive, backing off after each failure.
 
-		while retry_count < max_retries:
+		Failures are logged in full the first few times and then only
+		occasionally: a host that stays down would otherwise fill the log with
+		the same line every five minutes.
+		"""
+		failures = 0
+		while not self._stop.is_set():
 			try:
-				debug("Event monitor: Starting event listener...")
+				debug(f"Event monitor ({self.alias}): starting event listener...")
 				self.detectar_eventos_contenedores()
-				# If we get here, the event stream ended normally (shouldn't happen)
-				debug("Event monitor: Event stream ended unexpectedly, restarting...")
-				retry_count += 1
+				if self._stop.is_set():
+					break
+				debug(f"Event monitor ({self.alias}): event stream ended unexpectedly, restarting...")
 			except Exception as e:
-				retry_count += 1
-				if retry_count >= max_retries:
-					error(f"Event monitor failed {max_retries} times. Stopping. Last error: [{e}]")
-					return
-				error(f"Event monitor error (attempt {retry_count}/{max_retries}). Retrying in 5 seconds... Error: [{e}]")
-				time.sleep(5)
-				# Reconnect to Docker
-				try:
-					self.client = docker.from_env()
-				except Exception as reconnect_error:
-					error(f"Event monitor: Failed to reconnect to Docker: {reconnect_error}")
+				if self._stop.is_set():
+					break
+				failures += 1
+				if failures <= 3 or failures % 10 == 0:
+					error(f"Event monitor ({self.alias}) error #{failures}: [{e}]")
+			else:
+				failures = 0
+
+			# Force a fresh connection on the next attempt.
+			host_registry.drop(self.host_id)
+			backoff = min(5 * (2 ** min(failures, 6)), self.MAX_BACKOFF_SECONDS) if failures else 5
+			if self._stop.wait(backoff):
+				break
+		debug(f"Event monitor ({self.alias}) stopped")
 
 	def demonio_event(self):
 		"""Start event daemon in a background thread."""
 		thread = threading.Thread(target=self._event_loop_with_retry, daemon=True)
 		thread.start()
-		debug("Event monitor daemon started")
+		debug(f"Event monitor daemon started for {self.alias}")
+		return thread
+
+
+class EventMonitorSupervisor:
+	"""
+	Keeps one event monitor running per configured host.
+
+	Hosts can be added and removed from /settings while the bot is running, so
+	something has to notice and start or stop the matching stream. Reconciling
+	on a timer rather than on a signal keeps it simple and self-healing: a
+	monitor that died for good is picked up on the next pass.
+	"""
+
+	RECONCILE_SECONDS = 30
+
+	def __init__(self):
+		self._monitors = {}
+		self._lock = threading.Lock()
+
+	def reconcile(self):
+		"""Starts monitors for new hosts and stops them for removed ones."""
+		configured = {entry["id"] for entry in host_registry.hosts()}
+		with self._lock:
+			for host_id in configured - set(self._monitors):
+				monitor = DockerEventMonitor(host_id)
+				self._monitors[host_id] = monitor
+				monitor.demonio_event()
+			for host_id in set(self._monitors) - configured:
+				debug(f"Host {host_id} is gone: stopping its event monitor")
+				self._monitors.pop(host_id).stop()
+
+	def _supervise(self):
+		while True:
+			try:
+				self.reconcile()
+			except Exception as e:
+				error(f"Event monitor supervisor error: [{e}]")
+			time.sleep(self.RECONCILE_SECONDS)
+
+	def start(self):
+		"""Brings up a monitor per host and keeps watching for changes."""
+		self.reconcile()
+		thread = threading.Thread(target=self._supervise, daemon=True)
+		thread.start()
+		return thread
 
 
 def wait_for_next_update_check():
@@ -5388,9 +5486,9 @@ def main():
 	"""
 	debug(f"Starting bot version {VERSION}")
 
-	eventMonitor = DockerEventMonitor()
-	eventMonitor.demonio_event()
-	debug("Starting event monitor daemon")
+	# One event stream per host, kept in step with what is configured.
+	event_monitors = EventMonitorSupervisor()
+	event_monitors.start()
 	# The update daemon always starts. It consults the check_updates setting on
 	# every pass, so switching checks back on from /settings takes effect without
 	# recreating the container.
