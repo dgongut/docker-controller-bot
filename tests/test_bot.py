@@ -21,6 +21,7 @@ import harness
 import callback_registry
 
 dcb, store, _root = harness.load_bot(env={"LANGUAGE": "ES", "BUTTON_COLUMNS": "3"})
+import commands
 
 # What the seeding produced, captured before any test can change it: these
 # tests share one module instance on purpose, so nothing that asserts on
@@ -301,13 +302,15 @@ def test_every_language_has_a_name_of_its_own():
 
 def test_mute_asks_for_its_argument_when_pressed_as_a_button():
 	asked = {}
-	original = dcb.ask_text_input
-	dcb.ask_text_input = lambda user, field, prompt, back_to="main": asked.update(
+	# Patched on `commands`, not on `core`: the `from core import` binding is
+	# module-local, so replacing it on the core would not be seen here.
+	original = commands.ask_text_input
+	commands.ask_text_input = lambda user, field, prompt, back_to="main": asked.update(
 		field=field, back=back_to)
 	try:
-		dcb.cmd_mute(user_id=1)
+		commands.cmd_mute(user_id=1)
 	finally:
-		dcb.ask_text_input = original
+		commands.ask_text_input = original
 	assert asked == {"field": "mute_minutes", "back": None}, asked
 
 

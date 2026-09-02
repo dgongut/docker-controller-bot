@@ -81,7 +81,7 @@ def temp_storage(env=None, legacy=False, seed_files=None):
 
 # Modules that register commands or inline-button callbacks by being imported.
 # The entry point imports them in this order for the same reason.
-REGISTRARS = ()
+REGISTRARS = ("commands",)
 
 
 def load_bot(env=None):
