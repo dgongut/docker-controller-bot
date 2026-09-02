@@ -79,11 +79,17 @@ def temp_storage(env=None, legacy=False, seed_files=None):
 	return store, root
 
 
+# Modules that register commands or inline-button callbacks by being imported.
+# The entry point imports them in this order for the same reason.
+REGISTRARS = ()
+
+
 def load_bot(env=None):
 	"""
-	Imports the bot module under a temporary storage root.
+	Imports the core module under a temporary storage root, followed by
+	whatever registers commands and callbacks.
 
-	Docker is stubbed rather than mocked selectively: the module builds a
+	Docker is stubbed rather than mocked selectively: the core builds a
 	DockerManager at import time, and no test here needs a real daemon.
 	"""
 	store, root = temp_storage(env)
@@ -91,12 +97,18 @@ def load_bot(env=None):
 	import docker
 	docker.from_env = lambda *args, **kwargs: MagicMock()
 
-	spec = importlib.util.spec_from_file_location(
-		"dcb", os.path.join(REPO, "docker-controller-bot.py"))
+	core = _import("core")
+	for name in REGISTRARS:
+		_import(name)
+	return core, store, root
+
+
+def _import(name):
+	spec = importlib.util.spec_from_file_location(name, os.path.join(REPO, f"{name}.py"))
 	module = importlib.util.module_from_spec(spec)
-	sys.modules["dcb"] = module
+	sys.modules[name] = module
 	spec.loader.exec_module(module)
-	return module, store, root
+	return module
 
 
 def quiet(module):

@@ -11,6 +11,7 @@ RUN apk add --no-cache python3 py3-pip tzdata curl unzip && \
     curl -fsSL https://github.com/dgongut/docker-controller-bot/archive/refs/tags/v${VERSION}.zip -o /tmp/app.zip && \
     unzip -q /tmp/app.zip -d /tmp && \
     mv /tmp/docker-controller-bot-${VERSION}/docker-controller-bot.py /app && \
+    mv /tmp/docker-controller-bot-${VERSION}/core.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/config.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/store.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/migration.py /app && \

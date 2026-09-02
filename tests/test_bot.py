@@ -316,7 +316,8 @@ def test_mute_asks_for_its_argument_when_pressed_as_a_button():
 # ---------------------------------------------------------------------------
 
 def _registered_commands():
-	path = os.path.join(harness.REPO, "docker-controller-bot.py")
+	"""The command names the Telegram handler is subscribed to."""
+	path = os.path.join(harness.REPO, "core.py")
 	line = [l for l in io.open(path, encoding="utf-8")
 			if l.startswith("@bot.message_handler(commands=")][0]
 	return set(re.findall(r'"([a-z]+)"', line))
