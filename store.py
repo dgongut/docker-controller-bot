@@ -234,12 +234,20 @@ def _merge(base, stored):
 
 
 def _write_document(path, document):
-	"""Writes `document` atomically, creating the parent directory if needed."""
+	"""
+	Writes `document` atomically, creating the parent directory if needed.
+
+	The flush and fsync are what make the rename atomic in practice: without
+	them the metadata operation can reach the disk before the contents, and a
+	power cut in between leaves a settings file that exists and is empty.
+	"""
 	temporary = f"{path}.tmp"
 	try:
 		os.makedirs(os.path.dirname(path), exist_ok=True)
 		with open(temporary, "w", encoding="utf-8") as handle:
 			json.dump(document, handle, indent=4, ensure_ascii=False)
+			handle.flush()
+			os.fsync(handle.fileno())
 		os.replace(temporary, path)
 	except Exception as e:
 		error(f"Cannot write {path}: {e}")

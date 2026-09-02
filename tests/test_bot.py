@@ -159,12 +159,14 @@ def test_the_settings_body_repeats_nothing_from_its_buttons():
 
 	for label in labels:
 		name = label.split(" - ", 1)[-1].split(" · ", 1)[0].strip()
-		if name and name != "Cerrar":
+		if name and name not in ("Cerrar", "Volver"):
 			assert name not in text, f"'{name}' está en el texto y en un botón a la vez"
 
 	# One row per setting: a label carrying its value cannot share a line
-	# without Telegram truncating it.
-	assert all(len(row) == 1 for row in markup.keyboard)
+	# without Telegram truncating it. Only the navigation row pairs up, and it
+	# carries no value to truncate.
+	assert all(len(row) == 1 for row in markup.keyboard[:-1])
+	assert len(markup.keyboard[-1]) == 2
 
 
 def test_the_settings_body_is_only_the_title_unless_something_is_wrong():
@@ -199,6 +201,7 @@ def test_the_update_settings_live_on_their_own_screen():
 		"settingsAskInterval",
 		"settingsToggle|check_update_stopped_containers",
 		"settings",
+		"cerrar",
 	]
 
 
@@ -369,6 +372,47 @@ def test_categories_are_shown_once_and_none_is_orphaned():
 	assert set(categories) == set(dcb.START_CATEGORY_COMMANDS)
 
 
+def _locale_names():
+	return sorted(
+		name[:-len(".json")]
+		for name in os.listdir(os.path.join(os.path.dirname(dcb.__file__), "locale"))
+		if name.endswith(".json")
+	)
+
+
+def test_every_locale_has_every_key():
+	"""
+	A key missing from a locale falls back to English mid-message, so half the
+	interface changes language without warning. Nothing catches that at runtime.
+	"""
+	base = i18n.load_locale("en")
+	for locale in _locale_names():
+		keys = i18n.load_locale(locale)
+		missing = sorted(set(base) - set(keys))
+		assert not missing, f"{locale}: faltan {len(missing)} claves: {missing[:10]}"
+
+
+def test_no_locale_carries_keys_nobody_reads():
+	"""Left over from a text that was removed: dead weight nobody notices."""
+	base = i18n.load_locale("en")
+	for locale in _locale_names():
+		extra = sorted(set(i18n.load_locale(locale)) - set(base))
+		assert not extra, f"{locale}: sobran {extra}"
+
+
+def test_a_translation_keeps_the_placeholders_of_the_original():
+	"""
+	get_text substitutes $1, $2... positionally: a translation that drops one
+	silently loses the datum, and one that invents another prints it raw.
+	"""
+	base = i18n.load_locale("en")
+	placeholders = lambda text: sorted(set(re.findall(r"\$[0-9]", text)))
+	for locale in _locale_names():
+		keys = i18n.load_locale(locale)
+		for key, original in base.items():
+			assert placeholders(keys[key]) == placeholders(original), (locale, key)
+
+
 def test_every_menu_label_exists():
 	in_menu = set()
 	for kind, key in dcb.START_ROOT:
@@ -401,8 +445,28 @@ def test_every_submenu_has_a_way_back():
 		assert built, category
 		callbacks = harness.keyboard_callbacks(built[1])
 		assert "startMenu" in callbacks, f"{category} no tiene Volver"
-		assert len(callbacks) == len(commands) + 1, (category, callbacks)
+		assert "cerrar" in callbacks, f"{category} no tiene Cerrar"
+		assert len(callbacks) == len(commands) + 2, (category, callbacks)
 	assert dcb.build_start_category("does-not-exist") is None
+
+
+def test_every_settings_screen_offers_back_and_close():
+	"""
+	Half a navigation row is worse than none: a screen with only Volver leaves
+	the menu stuck open, and one with only Cerrar turns going up a level into
+	starting over from /start.
+	"""
+	screens = {
+		"settings": dcb.build_settings()[1],
+		"updates": dcb.build_settings_updates()[1],
+		"language": dcb.build_language_keyboard(),
+		"columns": harness.capture_edit(dcb, dcb.show_settings_columns, 1, 2)[1],
+	}
+	for name, markup in screens.items():
+		row = [button.callback_data for button in markup.keyboard[-1]]
+		assert len(row) == 2, (name, row)
+		assert row[1] == "cerrar", (name, row)
+		assert row[0] != "cerrar", (name, row)
 
 
 # ---------------------------------------------------------------------------
@@ -688,6 +752,69 @@ def test_an_unknown_picker_action_is_ignored():
 
 
 # ---------------------------------------------------------------------------
+# The session cache
+# ---------------------------------------------------------------------------
+
+def test_the_session_cache_is_json_and_keeps_its_sets():
+	"""
+	JSON and not pickle: the cache directory lives in the volume the user
+	mounts, and unpickling is running whatever is in the file. Sets do not
+	survive JSON on their own, and two entries here hold one.
+	"""
+	dcb.write_cache_item("probe_1", {"containers": [["a", "nginx"]], "selected": {"nginx"}})
+	path = dcb._cache_path("probe_1")
+	assert path.endswith(".json")
+	json.loads(open(path, encoding="utf-8").read())   # legible sin ejecutar nada
+
+	value = dcb.read_cache_item("probe_1")
+	assert value["selected"] == {"nginx"}
+	assert value["containers"] == [["a", "nginx"]]
+	dcb.delete_cache_item("probe_1")
+	assert dcb.read_cache_item("probe_1") is None
+
+
+def test_a_cache_entry_nobody_touches_expires():
+	"""
+	Interface state for menus nobody is looking at any more, sitting in the one
+	directory that survives every update.
+	"""
+	dcb.write_cache_item("probe_old", {"action": "Stop"})
+	stale = time.time() - dcb.CACHE_TTL_SECONDS - 60
+	os.utime(dcb._cache_path("probe_old"), (stale, stale))
+	assert dcb.read_cache_item("probe_old") is None
+	assert not os.path.exists(dcb._cache_path("probe_old"))
+
+
+def test_reading_an_entry_pushes_its_expiry_back():
+	"""A menu still in use must not stop working underneath someone."""
+	dcb.write_cache_item("probe_used", {"action": "Stop"})
+	nearly = time.time() - dcb.CACHE_TTL_SECONDS + 120
+	os.utime(dcb._cache_path("probe_used"), (nearly, nearly))
+	assert dcb.read_cache_item("probe_used") == {"action": "Stop"}
+	assert time.time() - os.path.getmtime(dcb._cache_path("probe_used")) < 5
+	dcb.delete_cache_item("probe_used")
+
+
+def test_the_sweep_clears_stale_entries_and_old_pickles():
+	"""
+	Without a sweep the directory only ever grows, one file per menu opened.
+	"""
+	dcb.write_cache_item("probe_fresh", {"action": "Stop"})
+	dcb.write_cache_item("probe_stale", {"action": "Stop"})
+	stale = time.time() - dcb.CACHE_TTL_SECONDS - 60
+	os.utime(dcb._cache_path("probe_stale"), (stale, stale))
+	leftover = os.path.join(dcb._cache_dir(), "update_data_1_2")
+	with open(leftover, "wb") as handle:
+		handle.write(b"pickled junk")
+
+	assert dcb.sweep_cache() >= 2
+	assert not os.path.exists(leftover)
+	assert dcb.read_cache_item("probe_stale") is None
+	assert dcb.read_cache_item("probe_fresh") == {"action": "Stop"}
+	dcb.delete_cache_item("probe_fresh")
+
+
+# ---------------------------------------------------------------------------
 # The multi-selection session
 # ---------------------------------------------------------------------------
 
@@ -896,14 +1023,15 @@ def test_a_scheduled_task_resolves_on_its_own_host():
 	would be silent and, for stop or exec, destructive.
 	"""
 	_with_hosts(HOST_FIXTURE, unreachable=())
-	original = dcb.DockerManager.list_containers
-	dcb.DockerManager.list_containers = lambda self, comando="": [_container("plex", "running")]
+	plex = _container("plex", "running")
+	original = dcb.DockerManager.container_named
+	dcb.DockerManager.container_named = lambda self, name: plex if name == "plex" else None
 	try:
 		ref = dcb.schedule_container_ref("h_nas", "plex")
 		assert dcb.ref_host(ref) == "h_nas", ref
 		assert dcb.schedule_container_ref("h_nas", "noexiste") is None
 	finally:
-		dcb.DockerManager.list_containers = original
+		dcb.DockerManager.container_named = original
 		_restore_hosts()
 
 
@@ -1240,6 +1368,39 @@ def test_the_start_header_counts_every_host():
 	try:
 		summary = dcb._start_summary()
 		assert "3" in summary, summary
+		# How many machines those containers came from, so the totals can be read.
+		assert "<b>2</b>" in summary, summary
+	finally:
+		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
+def test_the_start_header_keeps_quiet_about_servers_when_there_is_only_one():
+	"""Saying "servers: 1" is noise about a concept a single-host owner never had."""
+	_with_hosts([HOST_FIXTURE[0]], unreachable=())
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": [_container("nginx", "running")]
+	try:
+		summary = dcb._start_summary()
+		assert summary == dcb.get_text("start_summary", 1, 1, 0), summary
+	finally:
+		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
+def test_the_start_header_admits_a_host_it_could_not_reach():
+	"""
+	The counts are missing that machine's containers: a bare total would show a
+	partial count as the whole picture.
+	"""
+	_with_hosts(HOST_FIXTURE)   # nas caído
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": (
+		[_container("nginx", "running")] if self.host_id == "h_local"
+		else (_ for _ in ()).throw(Exception("no route to host")))
+	try:
+		summary = dcb._start_summary()
+		assert "1/2" in summary, summary
 	finally:
 		dcb.DockerManager.list_containers = original
 		_restore_hosts()
@@ -1257,6 +1418,30 @@ def test_the_start_header_says_nothing_when_no_host_answers():
 		assert dcb._start_summary() is None
 	finally:
 		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
+def test_container_output_does_not_break_the_log_message():
+	"""
+	The logs go inside <pre><code> in a message parsed as HTML, and what a
+	container prints is nobody's decision but its own: an unescaped "<" would
+	have Telegram reject the message and the user would be told the logs could
+	not be read, for a container that is working fine.
+	"""
+	_with_hosts([HOST_FIXTURE[0]], unreachable=())
+	manager = dcb.DockerManager("h_local")
+	noisy = MagicMock()
+	noisy.logs.return_value = b"<script>alert(1)</script> & </code></pre>"
+	manager.client = MagicMock()
+	manager.client.containers.get.return_value = noisy
+	try:
+		text = manager.show_logs("abc123", "plex")
+		assert "&lt;script&gt;" in text
+		assert "<script>" not in text
+		# The markup the template itself puts around the output stays.
+		assert text.count("<pre><code>") == 1
+		assert text.count("</code></pre>") == 1
+	finally:
 		_restore_hosts()
 
 
@@ -1319,6 +1504,62 @@ def _restore_hosts():
 	docker.DockerClient = lambda *a, **kw: MagicMock()
 	store.set("hosts", [HOST_FIXTURE[0]])
 	host_registry.reset()
+
+
+def test_asking_if_a_host_is_there_gives_up_sooner_than_working_on_it():
+	"""
+	The SDK applies its timeout to every request, not just to connecting, so
+	one number cannot serve both jobs: an /exec has to be allowed to run for as
+	long as the command takes, while a menu must not spend that long finding
+	out a machine is unplugged.
+	"""
+	import copy
+	import docker
+	import host_registry
+
+	asked = []
+
+	def sdk(base_url=None, timeout=None, **kwargs):
+		asked.append((base_url, timeout))
+		return MagicMock()
+
+	docker.DockerClient = sdk
+	store.set("hosts", copy.deepcopy(HOST_FIXTURE))
+	host_registry.reset()
+	try:
+		host_registry.ping("h_nas")
+		host_registry.client("h_nas")
+		timeouts = dict((url, timeout) for url, timeout in asked)
+		assert timeouts["tcp://nas:2375"] == host_registry.DEFAULT_TIMEOUT_SECONDS
+		assert host_registry.PROBE_TIMEOUT_SECONDS in [t for _, t in asked]
+		assert host_registry.PROBE_TIMEOUT_SECONDS < host_registry.DEFAULT_TIMEOUT_SECONDS
+
+		# And the probe is not what callers end up operating through.
+		working = host_registry.client("h_nas")
+		assert working is not host_registry.probe_client("h_nas")
+	finally:
+		_restore_hosts()
+
+
+def test_dropping_a_host_forgets_the_probe_too():
+	"""
+	Leaving the probe behind means the next check answers about a connection
+	the rest of the bot has already given up on.
+	"""
+	import copy
+	import docker
+	import host_registry
+
+	docker.DockerClient = lambda **kwargs: MagicMock()
+	store.set("hosts", copy.deepcopy(HOST_FIXTURE))
+	host_registry.reset()
+	try:
+		first = host_registry.probe_client("h_nas")
+		assert host_registry.probe_client("h_nas") is first, "debe cachearse"
+		host_registry.drop("h_nas")
+		assert host_registry.probe_client("h_nas") is not first
+	finally:
+		_restore_hosts()
 
 
 def test_reading_what_someone_typed_when_adding_a_host():
@@ -1458,6 +1699,64 @@ def test_renaming_a_host_from_the_menu():
 		_restore_hosts()
 
 
+def test_renaming_a_host_does_not_lose_one_added_at_the_same_time():
+	"""
+	Renaming rewrites the whole host list from a copy it read. Without the
+	registry's lock, an add landing in between is written over and the host
+	silently disappears from the settings.
+	"""
+	registry = _with_hosts(HOST_FIXTURE, unreachable=())
+	original_set = store.set
+	midway = threading.Event()
+
+	def slow_set(key, value):
+		# Widens the window between the read and the write, which is the race.
+		if key == "hosts" and not midway.is_set():
+			midway.set()
+			time.sleep(0.05)
+		return original_set(key, value)
+
+	adder = threading.Thread(
+		target=lambda: (midway.wait(1),
+						registry.add_host("nuevo", "tcp://nuevo:2375")))
+	store.set = slow_set
+	try:
+		adder.start()
+		registry.rename_host("h_nas", "sinologia")
+		adder.join(2)
+	finally:
+		store.set = original_set
+
+	try:
+		aliases = [h["alias"] for h in registry.hosts()]
+		assert "sinologia" in aliases, aliases
+		assert "nuevo" in aliases, aliases
+	finally:
+		_restore_hosts()
+
+
+def test_a_host_name_with_markup_does_not_break_the_message():
+	"""
+	Aliases are typed by hand, and every screen that names a host is parsed as
+	HTML: an unescaped `<` would make Telegram reject the whole message.
+	"""
+	hosts = [
+		HOST_FIXTURE[0],
+		{"id": "h_nas", "alias": "<b>nas", "url": "tcp://nas:2375"},
+	]
+	_with_hosts(hosts, unreachable=())
+	try:
+		assert dcb.host_alias("h_nas") == "&lt;b&gt;nas"
+		assert "<b>nas" not in dcb.host_label("h_nas")
+		text, _ = dcb.build_settings_host("h_nas")
+		assert "&lt;b&gt;nas" in text
+		text, _ = dcb.build_settings_host_remove("h_nas")
+		assert "&lt;b&gt;nas" in text
+		assert "&lt;b&gt;nas" in dcb.prune_prompt("h_nas")
+	finally:
+		_restore_hosts()
+
+
 def test_checking_hosts_does_not_wait_for_them_one_by_one():
 	"""
 	A menu that pinged hosts in sequence would hang for the sum of their
@@ -1486,6 +1785,58 @@ def test_checking_hosts_does_not_wait_for_them_one_by_one():
 		assert len(statuses) == 6
 		assert all(not ok for ok, _ in statuses.values())
 	finally:
+		_restore_hosts()
+
+
+def test_a_host_that_never_answers_does_not_pile_up_threads():
+	"""
+	Giving up on the deadline does not stop the ping, so without remembering
+	the one already running every refresh of the menu would leave another
+	thread behind on the same unresponsive machine.
+	"""
+	import host_registry
+	release = threading.Event()
+	import docker
+
+	def sdk(base_url=None, **kwargs):
+		fake = MagicMock()
+		fake.ping.side_effect = lambda: release.wait(10)
+		return fake
+
+	docker.DockerClient = sdk
+	store.set("hosts", [{"id": "h_slow", "alias": "lento", "url": "tcp://slow:2375"}])
+	host_registry.reset()
+	try:
+		before = threading.active_count()
+		for _ in range(5):
+			statuses = host_registry.status_snapshot(deadline_seconds=0.1)
+			assert statuses["h_slow"][0] is False
+		assert threading.active_count() <= before + 1, "un hilo por sondeo"
+	finally:
+		release.set()
+		_restore_hosts()
+
+
+def test_looking_at_one_host_does_not_wait_for_the_others():
+	"""
+	build_settings_host used to sweep the whole fleet to draw a single screen,
+	so opening the local host waited on every unplugged machine.
+	"""
+	import host_registry
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	probed = []
+	original = host_registry.status_snapshot
+
+	def spy(deadline_seconds=5, entries=None):
+		probed.append([e["id"] for e in (entries or host_registry.hosts())])
+		return original(deadline_seconds, entries)
+
+	host_registry.status_snapshot = spy
+	try:
+		dcb.build_settings_host("h_local")
+		assert probed == [["h_local"]], probed
+	finally:
+		host_registry.status_snapshot = original
 		_restore_hosts()
 
 

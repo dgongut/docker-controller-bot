@@ -5,7 +5,6 @@ import html
 import io
 import json
 import os
-import pickle
 import re
 import requests
 import shlex
@@ -238,6 +237,21 @@ class DockerManager:
 		sorted_containers = sorted(containers, key=lambda x: (0 if x.name == CONTAINER_NAME else 1, status_order.get(x.status, 6), x.name.lower()))
 		return sorted_containers
 
+	def container_named(self, name):
+		"""
+		The container with exactly this name on this host, or None.
+
+		The daemon does the filtering rather than list_containers: this runs on
+		every button press, and over ssh pulling the whole list to discard all
+		but one is a round-trip the size of the machine instead of the size of
+		the answer. Docker's name filter matches by substring, hence the exact
+		comparison afterwards.
+		"""
+		for container in self.client.containers.list(all=True, filters={"name": name}):
+			if container.name == name:
+				return container
+		return None
+
 	# ========== COMPOSE PROJECT METHODS ==========
 
 	def get_compose_projects(self):
@@ -346,7 +360,12 @@ class DockerManager:
 		try:
 			container = self.client.containers.get(container_id)
 			logs = container.logs().decode("utf-8")
-			return get_text("showing_logs", container_name, logs[-3500:])
+			# Escaped because the message is parsed as HTML and this is whatever
+			# the process inside the container decided to print: a single "<"
+			# in its output would have Telegram reject the whole message, and
+			# the user would see "the logs could not be shown" for a container
+			# that is working fine.
+			return get_text("showing_logs", container_name, html.escape(logs[-3500:]))
 		except Exception as e:
 			error(f"The logs for container {container_name} could not be shown. Error: [{e}]")
 			return get_text("error_showing_logs_container", container_name)
@@ -382,17 +401,20 @@ class DockerManager:
 			if not project_info:
 				return get_text("error_project_not_found", project_name)
 
-			# Basic information
-			text = f'📦 <b>{get_text("project_info_title", project_name)}</b>\n\n'
+			# Basic information. Everything below comes from Compose labels on
+			# the containers, so it is escaped: the message is parsed as HTML
+			# and a path or a service name carrying a "<" would have Telegram
+			# reject it whole.
+			text = f'📦 <b>{get_text("project_info_title", html.escape(project_name))}</b>\n\n'
 			text += '<pre><code>'
 
 			# Project name
-			text += f'🏷️  {get_text("project_name")}: {project_name}\n\n'
+			text += f'🏷️  {get_text("project_name")}: {html.escape(project_name)}\n\n'
 
 			# Working directory
 			working_dir = project_info.get_working_dir()
 			if working_dir:
-				text += f'📁 {get_text("project_working_dir")}: {working_dir}\n\n'
+				text += f'📁 {get_text("project_working_dir")}: {html.escape(str(working_dir))}\n\n'
 
 			# Configuration file
 			config_files = project_info.get_config_files()
@@ -400,7 +422,7 @@ class DockerManager:
 				# Extract only the file name
 				import os
 				config_file_name = os.path.basename(config_files)
-				text += f'📄 {get_text("project_config_file")}: {config_file_name}\n\n'
+				text += f'📄 {get_text("project_config_file")}: {html.escape(config_file_name)}\n\n'
 
 			# Number of services
 			service_count = project_info.get_container_count()
@@ -418,7 +440,7 @@ class DockerManager:
 				if len(image_with_tag) > 30:
 					image_with_tag = image_with_tag[:27] + "..."
 
-				text += f'  {status_emoji} {service_name} ({image_with_tag})\n'
+				text += f'  {status_emoji} {html.escape(service_name)} ({html.escape(image_with_tag)})\n'
 
 			# Dependencies between services
 			text += f'\n🔗 {get_text("project_dependencies")}:\n'
@@ -430,7 +452,7 @@ class DockerManager:
 					has_dependencies = True
 					# Format dependencies (they may be comma-separated)
 					deps = depends_on.replace(',', ', ')
-					text += f'  {service_name} → {deps}\n'
+					text += f'  {html.escape(service_name)} → {html.escape(deps)}\n'
 
 			if not has_dependencies:
 				text += f'  {get_text("project_no_dependencies")}\n'
@@ -860,6 +882,16 @@ docker_manager = DockerManager()
 # Instantiate the PortManager
 port_manager = PortManager(docker_manager)
 
+def host_alias(host_id):
+	"""
+	A host's display name, ready to go into a message parsed as HTML.
+
+	Aliases are typed by hand, so one containing `<` would otherwise break the
+	parse and the message would never arrive.
+	"""
+	return html.escape(host_registry.alias(host_id))
+
+
 def host_label(host_id):
 	"""
 	How a message says which host it is about, or nothing when there is only
@@ -870,7 +902,7 @@ def host_label(host_id):
 	"""
 	if host_registry.is_single_host():
 		return ""
-	return f"<b>{host_registry.alias(host_id)}</b> · "
+	return f"<b>{host_alias(host_id)}</b> · "
 
 
 class DockerEventMonitor:
@@ -1251,20 +1283,12 @@ class DockerScheduleMonitor:
 		except Exception as e:
 			error(f"Error reading schedule file: [{e}]")
 
-	def _execute_action(self, data, line=None):
-		"""
-		DEPRECATED: Use _execute_schedule_action instead.
-		This method is kept for backward compatibility only.
-		"""
-		return self._execute_schedule_action(data, line)
-
-	def _execute_schedule_action(self, schedule: dict, line: str = None):
+	def _execute_schedule_action(self, schedule: dict):
 		"""
 		Execute a schedule action from JSON format.
 
 		Args:
 			schedule: Schedule dict from JSON
-			line: Deprecated, kept for compatibility but not used
 
 		Returns:
 			True if successful, False if failed
@@ -1480,7 +1504,7 @@ def _build_schedule_summary(state: dict) -> str:
 	# asking which one.
 	if (state.get("host") and not host_registry.is_single_host()
 			and state.get("action") in HOST_SCOPED_SCHEDULE_ACTIONS):
-		lines.append(f"<b>{get_text('schedule_label_host')}:</b> {host_registry.alias(state['host'])}")
+		lines.append(f"<b>{get_text('schedule_label_host')}:</b> {host_alias(state['host'])}")
 	# Only show show_output if action is exec or prune and show_output is not None
 	if state.get("action") in ("exec", "prune") and state.get("show_output") is not None:
 		lines.append(f"<b>{get_text('schedule_label_show_output')}:</b> {get_text('schedule_yes') if state.get('show_output') else get_text('schedule_no')}")
@@ -1563,7 +1587,7 @@ def show_schedule_menu(user_id: int, chat_id: int):
 			host_line = None
 			if not host_registry.is_single_host() and action in HOST_SCOPED_SCHEDULE_ACTIONS:
 				task_host = sched.get("host") or host_registry.local_host_id()
-				host_line = f"  {get_text('schedule_label_host')}: <b>{host_registry.alias(task_host)}</b>"
+				host_line = f"  {get_text('schedule_label_host')}: <b>{host_alias(task_host)}</b>"
 
 			# Add action-specific details
 			if action == 'mute':
@@ -1674,7 +1698,7 @@ def show_schedule_edit_options(user_id: int, schedule_name: str):
 	host_line = ""
 	if not host_registry.is_single_host() and action in HOST_SCOPED_SCHEDULE_ACTIONS:
 		task_host = schedule.get("host") or host_registry.local_host_id()
-		host_line = f"<b>{get_text('schedule_label_host')}:</b> <b>{host_registry.alias(task_host)}</b>\n"
+		host_line = f"<b>{get_text('schedule_label_host')}:</b> <b>{host_alias(task_host)}</b>\n"
 
 	if action == 'mute':
 		message_text += f"<b>{get_text('schedule_label_minutes')}:</b> <b>{minutes}</b>\n"
@@ -2244,6 +2268,20 @@ def _toggle_button(field):
 		callback_data=f"settingsToggle|{field}"
 	)
 
+def _add_navigation(markup, back_callback):
+	"""
+	The last row of a menu screen: one step back, and out.
+
+	Both, always, and through the same function: a screen with only a way back
+	leaves the menu open with no way to dismiss it, and one with only a close
+	button makes going up a level mean starting over from /start. Sharing a row
+	keeps the two apart from the options above them.
+	"""
+	markup.row(
+		InlineKeyboardButton(get_text("button_back"), callback_data=back_callback),
+		InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
+	return markup
+
 def build_settings():
 	"""
 	Renders the settings menu.
@@ -2282,7 +2320,7 @@ def build_settings():
 		callback_data="settingsHosts"))
 	if channel:
 		markup.add(InlineKeyboardButton(get_text("button_settings_clear_channel"), callback_data="settingsClearChannel"))
-	markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
+	_add_navigation(markup, "startMenu")
 
 	# Nothing but the title: every value is on a button, and the file location
 	# is answered by the README rather than by a line nobody needs twice a year.
@@ -2310,7 +2348,7 @@ def build_settings_updates():
 		get_text("settings_row_interval", _format_interval(store.get("bot.check_update_every_hours"))),
 		callback_data="settingsAskInterval"))
 	markup.add(_toggle_button("check_update_stopped_containers"))
-	markup.add(InlineKeyboardButton(get_text("button_back"), callback_data="settings"))
+	_add_navigation(markup, "settings")
 
 	text = f'{get_text("settings_updates_title")}\n\n{get_text("settings_updates_help")}'
 	return text, markup
@@ -2331,7 +2369,7 @@ def build_settings_hosts():
 			f'{"🟢" if ok else "🔴"} - {entry.get("alias", entry["id"])}',
 			callback_data=f'settingsHost|{entry["id"]}'))
 	markup.add(InlineKeyboardButton(get_text("button_host_add"), callback_data="settingsHostAdd"))
-	markup.add(InlineKeyboardButton(get_text("button_back"), callback_data="settings"))
+	_add_navigation(markup, "settings")
 
 	text = f'{get_text("settings_hosts_title")}\n\n{get_text("settings_hosts_help")}'
 	return text, markup
@@ -2348,8 +2386,10 @@ def build_settings_host(host_id):
 	if entry is None:
 		return None
 
-	ok, reason = host_registry.status_snapshot().get(host_id, (False, ""))
-	lines = [get_text("settings_host_title", entry.get("alias", host_id))]
+	# Only this host: sweeping the fleet to draw one screen means waiting on
+	# every other machine as well.
+	ok, reason = host_registry.host_status(host_id)
+	lines = [get_text("settings_host_title", host_alias(host_id))]
 	lines.append(f'<code>{html.escape(entry.get("url", ""))}</code>')
 	lines.append("")
 	lines.append(get_text("settings_host_ok") if ok else get_text("settings_host_failed"))
@@ -2365,7 +2405,7 @@ def build_settings_host(host_id):
 	# The local host has no remove button: the bot itself runs on it.
 	if not entry.get("local"):
 		markup.add(InlineKeyboardButton(get_text("button_host_remove"), callback_data=f"settingsHostRemove|{host_id}"))
-	markup.add(InlineKeyboardButton(get_text("button_back"), callback_data="settingsHosts"))
+	_add_navigation(markup, "settingsHosts")
 	return "\n".join(lines), markup
 
 
@@ -2378,7 +2418,7 @@ def build_settings_host_remove(host_id):
 	markup.add(InlineKeyboardButton(get_text("button_host_remove_confirm"),
 									callback_data=f"settingsHostRemoveConfirm|{host_id}"))
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data=f"settingsHost|{host_id}"))
-	return get_text("settings_host_remove_confirm", entry.get("alias", host_id)), markup
+	return get_text("settings_host_remove_confirm", host_alias(host_id)), markup
 
 
 def parse_host_definition(raw):
@@ -2450,8 +2490,10 @@ def build_language_keyboard(with_back=True, mark_current=True):
 		)
 		for code in SUPPORTED_LANGUAGES
 	])
+	# Nothing on the first run: there is no previous screen to go back to, and
+	# closing would leave the bot with no language chosen.
 	if with_back:
-		markup.add(InlineKeyboardButton(get_text("button_back"), callback_data="settings"))
+		_add_navigation(markup, "settings")
 	return markup
 
 def show_settings_language(chat_id, message_id):
@@ -2483,7 +2525,7 @@ def show_settings_columns(chat_id, message_id):
 		)
 		for columns in range(1, 5)
 	])
-	markup.add(InlineKeyboardButton(get_text("button_back"), callback_data="settings"))
+	_add_navigation(markup, "settings")
 	edit_message_text(get_text("button_settings_columns"), chat_id, message_id, reply_markup=markup)
 
 def ask_text_input(user_id, field, prompt_key, back_to="main"):
@@ -2539,12 +2581,18 @@ def apply_settings_text_value(field, raw):
 			return None
 		try:
 			entry = host_registry.add_host(alias_name, url)
+		except host_registry.HostRejected as e:
+			# Nothing was tried: it is what was typed that cannot be registered.
+			key = ("settings_host_duplicate" if e.reason == "duplicate"
+				   else "settings_host_bad_scheme")
+			send_message(message=get_text(key, html.escape(url)))
+			return None
 		except host_registry.HostUnavailable as e:
 			# Rejected at the point of adding, while the connection details are
 			# still in front of the person typing them.
 			send_message(message=get_text("settings_host_unreachable", html.escape(url), html.escape(str(e.reason))))
 			return None
-		return get_text("settings_host_added", entry["alias"])
+		return get_text("settings_host_added", html.escape(entry["alias"]))
 
 	if field.startswith("host_rename:"):
 		host_id = field.split(":", 1)[1]
@@ -2607,20 +2655,37 @@ def _start_summary():
 	"""
 	Container counts for the header, across every reachable host.
 
+	The host count is only shown when there is more than one: with a single
+	host saying "servers: 1" is noise about a concept that machine's owner
+	never had to think about.
+
+	When some host is not answering the header says so as a fraction rather
+	than counting only what replied — the container totals are missing that
+	machine's containers, and a bare number would present a partial count as
+	the whole picture.
+
 	None when nothing answers at all: a header claiming zero containers would
 	read as "everything is gone" rather than "I cannot see anything".
 	"""
 	try:
+		sections = hosts_with_containers()
 		containers = [container
-					for _, _, host_containers in hosts_with_containers()
+					for _, _, host_containers in sections
 					for container in host_containers]
-		if not containers and host_registry.hosts():
+		configured = host_registry.hosts()
+		if not containers and configured:
 			return None
 	except Exception as e:
 		debug(f"Could not count containers for the start menu: {e}")
 		return None
 	running = sum(1 for c in containers if c.status in ("running", "restarting"))
-	return get_text("start_summary", len(containers), running, len(containers) - running)
+	stopped = len(containers) - running
+	if len(configured) <= 1:
+		return get_text("start_summary", len(containers), running, stopped)
+	if len(sections) == len(configured):
+		return get_text("start_summary_hosts", len(containers), running, stopped, len(configured))
+	return get_text("start_summary_hosts_partial", len(containers), running, stopped,
+					len(sections), len(configured))
 
 def _start_button(kind, key):
 	if kind == "category":
@@ -2649,7 +2714,7 @@ def build_start_category(key):
 		InlineKeyboardButton(get_text(f"start_cmd_{name}"), callback_data=f"startCommand|{name}")
 		for name in commands
 	])
-	markup.add(InlineKeyboardButton(get_text("button_back"), callback_data="startMenu"))
+	_add_navigation(markup, "startMenu")
 	return f'{get_text("start_title")}\n{get_text(f"start_cat_{key}")}', markup
 
 def send_start_menu():
@@ -2981,7 +3046,7 @@ def _execute_container_action(action, containerId, containerName, from_schedule=
 	try:
 		owner = manager_for(containerId)
 	except host_registry.HostUnavailable as e:
-		message = get_text("host_unreachable", host_registry.alias(ref_host(containerId)), e.reason)
+		message = get_text("host_unreachable", host_alias(ref_host(containerId)), html.escape(str(e.reason)))
 		send_message(message=message)
 		return message
 	result = getattr(owner, config['method'])(
@@ -3587,7 +3652,7 @@ def _confirm_prune_action(prune_type, host_id=None):
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 	question = get_text(f"confirm_prune_{kind.lower()}")
 	if not host_registry.is_single_host():
-		question = f'{get_text("list_host_header", host_registry.alias(host_id))}\n{question}'
+		question = f'{get_text("list_host_header", host_alias(host_id))}\n{question}'
 	send_message(message=question, reply_markup=markup)
 
 
@@ -4483,7 +4548,7 @@ def prune_prompt(host_id):
 	"""The /prune prompt, naming the host when there is more than one."""
 	if host_registry.is_single_host():
 		return get_text("prune_system")
-	return f'{get_text("list_host_header", host_registry.alias(host_id))}\n{get_text("prune_system")}'
+	return f'{get_text("list_host_header", host_alias(host_id))}\n{get_text("prune_system")}'
 
 
 def send_prune_types(host_id):
@@ -4576,7 +4641,7 @@ def _send_picker_for_host(entry, containers, action_type, prompt_key, bot_contai
 
 	prompt = get_text(prompt_key)
 	if name_host:
-		prompt = f'{get_text("list_host_header", entry.get("alias", entry["id"]))}\n{prompt}'
+		prompt = f'{get_text("list_host_header", host_alias(entry["id"]))}\n{prompt}'
 
 	sent = send_message(message=prompt, reply_markup=markup)
 	if sent and standalone:
@@ -4602,7 +4667,7 @@ def render_picker_for_host(chat_id, message_id, action_type, host_id):
 		owner = manager(host_id)
 		containers = owner.list_containers(comando=spec.get("comando", ""))
 	except host_registry.HostUnavailable as e:
-		edit_message_text(get_text("host_unreachable", host_registry.alias(host_id), e.reason),
+		edit_message_text(get_text("host_unreachable", host_alias(host_id), html.escape(str(e.reason))),
 						chat_id, message_id)
 		return
 	except Exception as e:
@@ -4611,7 +4676,7 @@ def render_picker_for_host(chat_id, message_id, action_type, host_id):
 		# which says nothing about the machine being unreachable.
 		host_registry.drop(host_id)
 		forget_managers()
-		edit_message_text(get_text("host_unreachable", host_registry.alias(host_id), str(e)),
+		edit_message_text(get_text("host_unreachable", host_alias(host_id), html.escape(str(e))),
 						chat_id, message_id)
 		return
 
@@ -4627,7 +4692,7 @@ def render_picker_for_host(chat_id, message_id, action_type, host_id):
 	# after a press rebuilds from that machine and not from the local one.
 	if spec.get("multi_action") and store.get("bot.multi_selection"):
 		save_multi_action(chat_id, message_id, spec["multi_action"], host_id=host_id)
-	prompt = f'{get_text("list_host_header", host_registry.alias(host_id))}\n{get_text(spec["prompt_key"])}'
+	prompt = f'{get_text("list_host_header", host_alias(host_id))}\n{get_text(spec["prompt_key"])}'
 	edit_message_text(prompt, chat_id, message_id, reply_markup=markup)
 
 
@@ -5349,7 +5414,7 @@ def show_container_ports(host_id=None):
 	try:
 		containers = manager(host_id).list_containers()
 	except host_registry.HostUnavailable as e:
-		send_message(message=get_text("host_unreachable", host_registry.alias(host_id), e.reason))
+		send_message(message=get_text("host_unreachable", host_alias(host_id), html.escape(str(e.reason))))
 		return
 
 	# Sort containers: bot first, then running, then stopped (all alphabetically)
@@ -5610,17 +5675,17 @@ def display_all_hosts(comando=""):
 		try:
 			containers = manager(host_id).list_containers(comando=comando)
 		except host_registry.HostUnavailable as e:
-			return get_text("list_host_unreachable", host_registry.alias(host_id), e.reason)
+			return get_text("list_host_unreachable", host_alias(host_id), html.escape(str(e.reason)))
 		return display_containers(containers, host_id)
 
 	sections = hosts_with_containers(comando)
 	rendered = []
 	for entry, _, containers in sections:
 		body = display_containers(containers, entry["id"]) if containers else get_text("list_host_empty")
-		rendered.append(f'{get_text("list_host_header", entry.get("alias", entry["id"]))}\n{body}')
+		rendered.append(f'{get_text("list_host_header", host_alias(entry["id"]))}\n{body}')
 
 	for entry in unreachable_hosts(sections):
-		rendered.append(get_text("list_host_unreachable", entry.get("alias", entry["id"]), ""))
+		rendered.append(get_text("list_host_unreachable", host_alias(entry["id"]), ""))
 
 	return "\n\n".join(rendered) if rendered else get_text("error_no_containers_available")
 
@@ -5685,6 +5750,11 @@ def sanitize_text_for_filename(text):
 	sanitized = re.sub(r'_+', '_', sanitized)
 	return sanitized
 
+def _cache_dir():
+	directory = os.path.join(store.state_dir(), "cache")
+	os.makedirs(directory, exist_ok=True)
+	return directory
+
 def _cache_path(key):
 	"""
 	Location of one entry of the session cache.
@@ -5694,38 +5764,120 @@ def _cache_path(key):
 	hashes in callback_data back to project names. It lives under the storage
 	volume rather than in the container filesystem so that buttons on messages
 	sent before an update still work afterwards.
+
+	The key becomes a file name, so it is sanitised: every key is built by the
+	bot today, but one that ever carried a slash would write outside the cache.
 	"""
-	directory = os.path.join(store.state_dir(), "cache")
-	os.makedirs(directory, exist_ok=True)
-	return os.path.join(directory, key)
+	return os.path.join(_cache_dir(), f"{sanitize_text_for_filename(str(key))}.json")
+
+# An entry not read for this long is gone: this is interface state for menus
+# nobody is looking at any more, and it sits in the storage volume, which is
+# the one directory that survives every update.
+CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
+
+# Sets do not survive a round trip through JSON, and two of the entries here
+# hold one (which containers are selected, which are already done). Tagged on
+# the way out and rebuilt on the way in, so callers keep working with sets.
+_SET_TAG = "__set__"
+
+def _encode_cache_value(value):
+	if isinstance(value, (set, frozenset)):
+		return {_SET_TAG: sorted(value, key=str)}
+	raise TypeError(f"{type(value).__name__} is not cacheable")
+
+def _decode_cache_value(document):
+	if len(document) == 1 and _SET_TAG in document:
+		return set(document[_SET_TAG])
+	return document
 
 def write_cache_item(key, value):
-	"""Write cache item with thread-safe lock to prevent corruption."""
+	"""
+	Stores one entry of the session cache, as JSON.
+
+	JSON and not pickle: this directory is in the storage volume the user
+	mounts, and unpickling is running whatever is in the file. Nothing in here
+	needs more than what JSON carries.
+	"""
 	with _cache_lock:
+		path = _cache_path(key)
+		temporary = f"{path}.tmp"
 		try:
-			with open(_cache_path(key), 'wb') as handle:
-				pickle.dump(value, handle)
+			with open(temporary, "w", encoding="utf-8") as handle:
+				json.dump(value, handle, default=_encode_cache_value, ensure_ascii=False)
+			os.replace(temporary, path)
 		except Exception as e:
 			error(f"Error writing cache item: {key} - {e}")
+			try:
+				os.remove(temporary)
+			except OSError:
+				pass
 
 def read_cache_item(key):
-	"""Read cache item with thread-safe lock to prevent corruption."""
+	"""
+	One entry of the session cache, or None when it is missing or expired.
+
+	Reading pushes the expiry back: an entry is dropped after a week of nobody
+	touching it, not a week after it was written, so a menu still in use does
+	not stop working underneath someone.
+	"""
 	with _cache_lock:
+		path = _cache_path(key)
 		try:
-			with open(_cache_path(key), 'rb') as handle:
-				return pickle.load(handle)
-		except:
+			if time.time() - os.path.getmtime(path) > CACHE_TTL_SECONDS:
+				os.remove(path)
+				return None
+			with open(path, "r", encoding="utf-8") as handle:
+				value = json.load(handle, object_hook=_decode_cache_value)
+			os.utime(path, None)
+			return value
+		except (OSError, ValueError):
 			return None
 
 def delete_cache_item(key):
 	"""Delete cache item with thread-safe lock to prevent corruption."""
 	with _cache_lock:
 		try:
-			path = _cache_path(key)
-			if os.path.exists(path):
-				os.remove(path)
-		except Exception as e:
-			pass
+			os.remove(_cache_path(key))
+		except OSError as e:
+			if not isinstance(e, FileNotFoundError):
+				debug(f"Could not delete cache item {key}: {e}")
+
+def sweep_cache():
+	"""
+	Drops expired entries, and anything left by a version that wrote pickles.
+
+	Without this the directory only ever grows: every menu, every prompt and
+	every update selection leaves a file behind in a volume nobody looks at.
+	Returns how many files were removed, which is what the test asserts on.
+	"""
+	removed = 0
+	with _cache_lock:
+		try:
+			names = os.listdir(_cache_dir())
+		except OSError as e:
+			debug(f"Could not sweep the cache: {e}")
+			return 0
+		for name in names:
+			path = os.path.join(_cache_dir(), name)
+			try:
+				# Anything that is not a .json is either a half-written
+				# temporary or a pickle from before this format, and neither is
+				# ever read again.
+				if not name.endswith(".json") or time.time() - os.path.getmtime(path) > CACHE_TTL_SECONDS:
+					os.remove(path)
+					removed += 1
+			except OSError as e:
+				debug(f"Could not remove cache file {name}: {e}")
+	if removed:
+		debug(f"Session cache: removed {removed} stale entries")
+	return removed
+
+def _schedule_cache_sweep():
+	"""Sweeps the session cache now and once a day after that."""
+	sweep_cache()
+	timer = threading.Timer(24 * 60 * 60, _schedule_cache_sweep)
+	timer.daemon = True
+	timer.start()
 
 def save_container_update_status(image_with_tag, container_name, has_update, host_id=None):
 	"""
@@ -6013,11 +6165,11 @@ def find_container_id_on_host(host_id, container_name):
 		debug(f"Cannot reach host {host_id} to look up {container_name}: {e.reason}")
 		return None
 	try:
-		for container in owner.list_containers():
-			if container.name == container_name:
-				return container.id[:CONTAINER_ID_LENGTH]
+		container = owner.container_named(container_name)
+		if container is not None:
+			return container.id[:CONTAINER_ID_LENGTH]
 	except Exception as e:
-		debug(f"Could not list containers on {host_id}: {e}")
+		debug(f"Could not look up {container_name} on {host_id}: {e}")
 	return None
 
 def get_container_name(chat_id, message_id, container_id):
@@ -6550,6 +6702,10 @@ def main():
 	schedule_monitor = DockerScheduleMonitor()
 	schedule_monitor.demonio_schedule()
 	debug("Schedule daemon started")
+
+	# The session cache is interface state in the storage volume: without a
+	# sweep it only ever grows, one file per menu opened.
+	_schedule_cache_sweep()
 
 	register_bot_commands()
 	delete_updater()

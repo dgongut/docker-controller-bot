@@ -140,7 +140,7 @@ With **a single host** — the normal case — none of this shows up: the bot lo
 | Form | What it needs | When |
 |:---|:---|:---|
 | `ssh://user@machine` | Nothing on the remote host beyond the sshd it already runs | **The recommended one.** Reuses your keys and your `~/.ssh/config` |
-| `tcp://machine:2375` | Exposing the daemon's port | Only inside a private network (Tailscale, WireGuard, an isolated VLAN) |
+| `tcp://machine:2375` | A socket proxy on the remote machine | Only inside a private network (Tailscale, WireGuard, an isolated VLAN) |
 | `tcp://machine:2376` + TLS | Generating a CA and certificates, and configuring `dockerd --tlsverify` | If you want it exposed without a private network |
 
 > [!WARNING]
@@ -184,11 +184,14 @@ ssh-copy-id -i ~/.ssh/id_ed25519.pub user@machine
 > [!TIP]
 > **The second server does not need another key.** The same one works for all of them: just repeat step 3 pointing at the new machine. Steps 2 and 6 are done once.
 
-**4. Connect once by hand** so it lands in `known_hosts`, and take the chance to run the check above:
+**4. Connect once by hand, from the machine the bot runs on**, so the remote machine's fingerprint lands in your `known_hosts`. Take the chance to run the check above:
 
 ```bash
 ssh user@machine docker version
 ```
+
+> [!IMPORTANT]
+> Steps 2, 3 and 4 are done **on the bot's machine, not inside the container**. The bot cannot accept a new fingerprint for you: there is no terminal to answer "yes" at, and `.ssh` is mapped read-only, so it cannot write to `known_hosts`. If the remote machine is not already in your `known_hosts`, the bot will report it as not answering with a `Host key verification failed`.
 
 **5. Give the remote user access to the socket**, if step 4 complained about permissions:
 
@@ -204,6 +207,8 @@ volumes:
     - /path/to/save/the/config:/app/config
     - ~/.ssh:/root/.ssh:ro # Only if you are going to use ssh:// hosts
 ```
+
+The bot runs as `root` inside the container, so it reads `/root/.ssh`. It has to be the `.ssh` of the user you ran `ssh-copy-id` as: that is where the private key and the `known_hosts` that step 4 filled in live. Read-only on purpose, since the bot has no need to write anything there.
 
 The connection is opened by the system `ssh` client, not by an implementation of our own, so your whole `~/.ssh/config` applies: host aliases, ports, `IdentityFile`, `User`. If your config has a `Host nas`, the URL can simply be `ssh://nas`.
 
@@ -254,6 +259,37 @@ That buys two things beyond the keys. The URLs become plain **`ssh://unraid`** a
 
 > [!NOTE]
 > `~/.ssh/config` is mapped into the container too, since you are already mapping the whole directory. Nothing to add to the docker-compose.
+
+### Step by step with `tcp://` through a socket proxy
+
+If your machines are already on a private network this is the shortest route: instead of exposing the whole socket, you expose a proxy that only lets through what you allow. On the **remote machine**:
+
+```yaml
+services:
+    docker-socket-proxy:
+        image: tecnativa/docker-socket-proxy
+        container_name: docker-socket-proxy
+        environment:
+            - CONTAINERS=1
+            - IMAGES=1
+            - NETWORKS=1
+            - VOLUMES=1
+            - POST=1 # needed to start, stop and update
+        volumes:
+            - /var/run/docker.sock:/var/run/docker.sock:ro
+        ports:
+            - 2375:2375
+        restart: unless-stopped
+```
+
+The URL for the bot is then `tcp://machine:2375`. Check it first from the bot's machine:
+
+```bash
+docker -H tcp://machine:2375 version
+```
+
+> [!WARNING]
+> This carries **no TLS and no authentication**: the proxy limits what can be done, not who can do it. Publish the port only on a network you trust — Tailscale, WireGuard, an isolated VLAN — never on the internet. If you need it exposed beyond that, use TLS.
 
 ### Step by step with `tcp://` + TLS
 

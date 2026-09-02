@@ -15,6 +15,8 @@ Importing this module is what registers the callbacks, so the entry point has
 to import it before polling starts.
 """
 
+import html
+
 from telebot.types import InlineKeyboardButton
 from telebot.types import InlineKeyboardMarkup
 
@@ -518,7 +520,7 @@ def cb_prune(ctx):
 		owner = core.manager(host_id)
 	except core.host_registry.HostUnavailable as e:
 		core.send_message(message=get_text("host_unreachable",
-										core.host_registry.alias(host_id), e.reason))
+										core.host_alias(host_id), html.escape(str(e.reason))))
 		return
 
 	result, data = getattr(owner, f"prune_{kind.lower()}")()
@@ -1245,7 +1247,7 @@ def cb_settingsHostRemove(ctx):
 
 @callback(name="settingsHostRemoveConfirm", params=("value",), keeps_message=True)
 def cb_settingsHostRemoveConfirm(ctx):
-	alias = host_registry.alias(ctx.value)
+	alias = core.host_alias(ctx.value)
 	if host_registry.remove_host(ctx.value):
 		# The supervisor notices on its next pass and stops that host's event
 		# stream; dropping the manager keeps a stale client from being reused

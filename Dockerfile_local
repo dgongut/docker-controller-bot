@@ -20,5 +20,10 @@ RUN export PIP_BREAK_SYSTEM_PACKAGES=1 && \
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD python3 -c "import sys; sys.exit(0)" || exit 1
 
-# Use watchdog for file monitoring instead of nodemon
-ENTRYPOINT ["watchmedo", "auto-restart", "-d", "/app", "-p", "*.py", "--", "python3", "docker-controller-bot.py"]
+# Use watchdog for file monitoring instead of nodemon. The locale directory is
+# watched too because i18n caches each file on first read, so a translation
+# edited while running would otherwise keep falling back to English until the
+# next restart. Neither directory is watched recursively: /app/config and
+# /app/schedule hold the state the bot itself writes, and restarting on those
+# would loop.
+ENTRYPOINT ["watchmedo", "auto-restart", "-d", "/app", "-d", "/app/locale", "-p", "*.py;*.json", "--", "python3", "docker-controller-bot.py"]

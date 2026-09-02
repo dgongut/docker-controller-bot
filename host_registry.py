@@ -25,6 +25,38 @@ from logger import debug, warning
 
 LOCAL_SOCKET_URL = "unix:///var/run/docker.sock"
 
+# The three transports the Docker SDK speaks. Anything else parses fine as a
+# URL and then fails much later, with an error that says nothing about what was
+# actually wrong.
+SUPPORTED_SCHEMES = ("unix://", "tcp://", "ssh://")
+
+# What a host's operations wait for when it does not say otherwise. The SDK
+# applies this to every request, not just to opening the connection, so it has
+# to be long enough for the slowest legitimate call — an /exec running someone's
+# command — rather than for the quickest.
+DEFAULT_TIMEOUT_SECONDS = 30
+
+# What a reachability check waits for. Far shorter, because the only question it
+# asks is whether the daemon is there: nothing it does can legitimately take
+# thirty seconds, so waiting that long only delays finding out the host is down.
+PROBE_TIMEOUT_SECONDS = 5
+
+
+class HostRejected(Exception):
+	"""
+	Raised when a host is not worth even trying to reach.
+
+	Separate from HostUnavailable because the fix is different: the machine may
+	well be up, it is what was typed that cannot be registered.
+
+	`reason` is one of "scheme" or "duplicate", so the caller picks the message
+	instead of parsing text.
+	"""
+
+	def __init__(self, reason):
+		super().__init__(reason)
+		self.reason = reason
+
 
 class HostUnavailable(Exception):
 	"""
@@ -44,6 +76,17 @@ _lock = threading.RLock()
 # Clients are cached per host, together with the URL they were built from, so
 # that changing a host's URL rebuilds it instead of reusing a stale connection.
 _clients = {}
+
+# Reachability checks in flight, and the outcomes they left behind. A ping that
+# blocks past the deadline cannot be cancelled, so it is remembered instead: the
+# next sweep reuses it rather than piling a second thread on the same host.
+_probe_lock = threading.Lock()
+_probes = {}
+_probe_results = {}
+# Probe clients are cached separately from the working ones. They differ only in
+# their timeout, and sharing a cache would mean whichever ran first decided how
+# long every later operation waits.
+_probe_clients = {}
 
 
 def hosts():
@@ -128,7 +171,7 @@ def generate_host_id():
 # Clients
 # ---------------------------------------------------------------------------
 
-def _build_client(entry, verify=False):
+def _build_client(entry, verify=False, timeout=None):
 	"""
 	Opens a Docker client for one host.
 
@@ -141,13 +184,20 @@ def _build_client(entry, verify=False):
 	The SDK handles unix://, tcp:// and ssh:// itself. ssh:// additionally needs
 	paramiko, which is reported as a missing dependency rather than as a
 	connection failure, because the two have completely different fixes.
+
+	`timeout` overrides what the host is configured with, and exists for the
+	reachability checks: the SDK applies the timeout to every request, so the
+	value that lets an /exec finish is far too long to spend finding out that a
+	machine is unplugged.
 	"""
 	import docker
 
 	url = entry.get("url") or LOCAL_SOCKET_URL
 	host_id = entry["id"]
 
-	kwargs = {"base_url": url, "timeout": int(entry.get("timeout") or 30)}
+	if timeout is None:
+		timeout = int(entry.get("timeout") or DEFAULT_TIMEOUT_SECONDS)
+	kwargs = {"base_url": url, "timeout": timeout}
 
 	if url.startswith("ssh://"):
 		# The SDK imports paramiko to load its ssh transport at all, even when
@@ -223,15 +273,47 @@ def try_client(host_id):
 		return None
 
 
+def probe_client(host_id):
+	"""
+	A short-timeout client for `host_id`, used only to ask whether it is there.
+
+	Separate from the working client because the SDK's timeout applies to every
+	request, not just to connecting. The working client has to wait long enough
+	for the slowest legitimate call — an /exec running whatever the user typed —
+	while a reachability check that waits that long turns an unplugged machine
+	into half a minute of a menu looking frozen.
+
+	Raises HostUnavailable, like client().
+	"""
+	entry = host(host_id)
+	if entry is None:
+		raise HostUnavailable(host_id, "not configured")
+
+	url = entry.get("url") or LOCAL_SOCKET_URL
+	with _lock:
+		cached = _probe_clients.get(host_id)
+		if cached and cached[0] == url:
+			return cached[1]
+
+		built = _build_client(entry, timeout=PROBE_TIMEOUT_SECONDS)
+		_probe_clients[host_id] = (url, built)
+		return built
+
+
 def ping(host_id):
 	"""
 	Whether `host_id` answers right now.
 
+	Asked through the probe client, so a host that has gone away is reported as
+	down in seconds rather than after a full operation timeout.
+
 	A cached client whose connection has gone bad is dropped, so the next use
 	reconnects instead of reusing a dead socket.
 	"""
-	connection = try_client(host_id)
-	if connection is None:
+	try:
+		connection = probe_client(host_id)
+	except HostUnavailable as e:
+		warning(str(e))
 		return False
 	try:
 		connection.ping()
@@ -244,13 +326,17 @@ def ping(host_id):
 
 def drop(host_id):
 	"""
-	Forgets the cached client for a host.
+	Forgets the cached clients for a host.
 
 	Called when a host's connection details change, and when a connection goes
-	bad so that the next use reconnects instead of reusing a dead socket.
+	bad so that the next use reconnects instead of reusing a dead socket. Both
+	the working client and the probe one go: they point at the same daemon, and
+	leaving one behind means the next check answers about a connection the rest
+	of the bot has already given up on.
 	"""
 	with _lock:
 		removed = _clients.pop(host_id, None)
+		_probe_clients.pop(host_id, None)
 	if removed:
 		debug(f"Dropped the cached client for host {host_id}")
 
@@ -261,15 +347,36 @@ def reachable_hosts():
 
 	Anything that has to sweep every host goes through here, so one machine
 	being down degrades that sweep instead of breaking it.
+
+	The client handed back is the working one, not the probe that answered the
+	ping: callers operate through it, and they must not inherit the short
+	timeout that only makes sense for asking whether a host is there.
 	"""
 	pairs = []
 	for entry in hosts():
-		if ping(entry["id"]):
-			pairs.append((entry, _clients[entry["id"]][1]))
+		if not ping(entry["id"]):
+			continue
+		try:
+			pairs.append((entry, client(entry["id"])))
+		except HostUnavailable as e:
+			warning(str(e))
 	return pairs
 
 
-def status_snapshot(deadline_seconds=5):
+def host_status(host_id, deadline_seconds=5):
+	"""
+	Whether one host answers, as (ok, reason).
+
+	For the screens that show a single machine: sweeping the whole fleet to
+	draw one host means waiting on every other one as well.
+	"""
+	entry = host(host_id)
+	if entry is None:
+		return False, ""
+	return status_snapshot(deadline_seconds, entries=[entry]).get(host_id, (False, ""))
+
+
+def status_snapshot(deadline_seconds=5, entries=None):
 	"""
 	Whether each host answers, as {host_id: (ok, reason)}.
 
@@ -283,15 +390,22 @@ def status_snapshot(deadline_seconds=5):
 	the deadline as the reason: from the user's side "did not answer in five
 	seconds" and "refused the connection" both mean the same thing, which is
 	that it cannot be used right now.
+
+	Giving up on the deadline does not stop the ping — a blocking socket read
+	cannot be cancelled — so a check still running is remembered and no second
+	one is started for that host. Otherwise a machine that hangs for a minute
+	would leave a thread behind on every refresh of the menu.
+
+	The probe client is what does the asking, so an abandoned check gives up on
+	its own shortly after the deadline instead of holding a thread for as long
+	as a real operation is allowed to take.
 	"""
-	results = {}
-	results_lock = threading.Lock()
-	configured = hosts()
+	configured = hosts() if entries is None else entries
 
 	def check(entry):
 		host_id = entry["id"]
 		try:
-			connection = client(host_id)
+			connection = probe_client(host_id)
 			connection.ping()
 			outcome = (True, "")
 		except HostUnavailable as e:
@@ -299,12 +413,21 @@ def status_snapshot(deadline_seconds=5):
 		except Exception as e:
 			drop(host_id)
 			outcome = (False, str(e))
-		with results_lock:
-			results[host_id] = outcome
+		with _probe_lock:
+			_probe_results[host_id] = outcome
+			_probes.pop(host_id, None)
 
 	threads = []
 	for entry in configured:
-		thread = threading.Thread(target=check, args=(entry,), daemon=True)
+		host_id = entry["id"]
+		with _probe_lock:
+			# Discard whatever the last sweep left: this one reports now.
+			_probe_results.pop(host_id, None)
+			pending = _probes.get(host_id)
+			if pending is not None and pending.is_alive():
+				continue
+			thread = threading.Thread(target=check, args=(entry,), daemon=True)
+			_probes[host_id] = thread
 		thread.start()
 		threads.append(thread)
 
@@ -312,11 +435,23 @@ def status_snapshot(deadline_seconds=5):
 	for thread in threads:
 		thread.join(max(0, deadline - time.monotonic()))
 
-	with results_lock:
+	with _probe_lock:
 		return {
-			entry["id"]: results.get(entry["id"], (False, f"no answer in {deadline_seconds}s"))
+			entry["id"]: _probe_results.pop(entry["id"], (False, f"no answer in {deadline_seconds}s"))
 			for entry in configured
 		}
+
+
+def same_url(one, other):
+	"""
+	Whether two host URLs point at the same daemon.
+
+	Only the obvious differences are folded in — a missing URL means the local
+	socket, and a trailing slash is not a different machine. Nothing here tries
+	to resolve names: two aliases of one host are not worth chasing.
+	"""
+	return ((one or LOCAL_SOCKET_URL).strip().rstrip("/")
+			== (other or LOCAL_SOCKET_URL).strip().rstrip("/"))
 
 
 def add_host(alias_name, url, tls=None, timeout=None):
@@ -326,7 +461,19 @@ def add_host(alias_name, url, tls=None, timeout=None):
 	The client is opened straight away: a host that cannot be reached is worth
 	rejecting at the point someone adds it, while they still have the details
 	in front of them.
+
+	Raises HostRejected before that for a transport the SDK does not speak, and
+	for a machine that is already registered: a second entry for the local
+	socket would come in without `local`, so the guard in remove_host would not
+	protect it, it would show up twice in every listing and its update cache
+	would drift between the two ids.
 	"""
+	url = (url or "").strip()
+	if not url.startswith(SUPPORTED_SCHEMES):
+		raise HostRejected("scheme")
+	if any(same_url(existing.get("url"), url) for existing in hosts()):
+		raise HostRejected("duplicate")
+
 	entry = {"id": generate_host_id(), "alias": alias_name, "url": url, "local": False}
 	if tls:
 		entry["tls"] = tls
@@ -337,6 +484,10 @@ def add_host(alias_name, url, tls=None, timeout=None):
 
 	with _lock:
 		configured = hosts()
+		# Checked again under the lock: verifying the connection takes long
+		# enough for the same host to have been added meanwhile.
+		if any(same_url(existing.get("url"), url) for existing in configured):
+			raise HostRejected("duplicate")
 		configured.append(entry)
 		store.set("hosts", configured)
 	debug(f"Registered host {alias_name} ({url}) as {entry['id']}")
@@ -369,13 +520,18 @@ def rename_host(host_id, new_alias):
 
 	Nothing is keyed on the alias, so this touches no cached state and no
 	schedule.
+
+	Under the same lock as adding and removing: this rewrites the whole list
+	from a copy it read, so a rename racing an add would drop the host that was
+	just added.
 	"""
-	configured = hosts()
-	for entry in configured:
-		if entry["id"] == host_id:
-			entry["alias"] = new_alias
-			store.set("hosts", configured)
-			return True
+	with _lock:
+		configured = hosts()
+		for entry in configured:
+			if entry["id"] == host_id:
+				entry["alias"] = new_alias
+				store.set("hosts", configured)
+				return True
 	return False
 
 
@@ -383,3 +539,9 @@ def reset():
 	"""Drops every cached client. For tests, and after a settings reload."""
 	with _lock:
 		_clients.clear()
+		_probe_clients.clear()
+	with _probe_lock:
+		# The threads themselves are daemons and cannot be stopped; forgetting
+		# them keeps a check against the old settings from being reused.
+		_probes.clear()
+		_probe_results.clear()

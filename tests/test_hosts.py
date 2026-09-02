@@ -279,6 +279,47 @@ def test_adding_a_host_verifies_it_first():
 	shutil.rmtree(root, ignore_errors=True)
 
 
+def test_a_host_the_sdk_cannot_dial_is_refused():
+	"""
+	Anything with "://" used to be accepted and then failed much later, with an
+	error that said nothing about what was wrong.
+	"""
+	store_, root = setup()
+	for url in ("http://nas:2375", "https://nas:2376", "nas:2375"):
+		try:
+			host_registry.add_host("nas", url)
+			raise AssertionError(f"debería rechazar {url}")
+		except host_registry.HostRejected as e:
+			assert e.reason == "scheme", url
+	assert len(store_.get("hosts")) == 1
+	shutil.rmtree(root, ignore_errors=True)
+
+
+def test_the_same_machine_cannot_be_registered_twice():
+	"""
+	A second entry for the local socket comes in without `local`, so the guard
+	in remove_host does not protect it, it shows up twice in every listing and
+	its update cache drifts between the two ids.
+	"""
+	store_, root = setup()
+	for url in (host_registry.LOCAL_SOCKET_URL, f"{host_registry.LOCAL_SOCKET_URL}/", f"  {host_registry.LOCAL_SOCKET_URL}  "):
+		try:
+			host_registry.add_host("otra vez", url)
+			raise AssertionError(f"debería rechazar {url!r}")
+		except host_registry.HostRejected as e:
+			assert e.reason == "duplicate", url
+	assert len(store_.get("hosts")) == 1
+
+	host_registry.add_host("nas", "tcp://nas:2375")
+	try:
+		host_registry.add_host("nas otra vez", "tcp://nas:2375")
+		raise AssertionError("debería rechazar el duplicado")
+	except host_registry.HostRejected as e:
+		assert e.reason == "duplicate"
+	assert len(store_.get("hosts")) == 2
+	shutil.rmtree(root, ignore_errors=True)
+
+
 def test_generated_ids_do_not_collide():
 	_, root = setup()
 	seen = {"h_local"}
