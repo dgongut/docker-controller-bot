@@ -688,6 +688,95 @@ def test_an_unknown_picker_action_is_ignored():
 
 
 # ---------------------------------------------------------------------------
+# The multi-selection session
+# ---------------------------------------------------------------------------
+
+def test_the_session_remembers_its_host():
+	"""
+	Without it the repaint after every press rebuilt from the local host, so
+	stopping a remote container swapped the list for the local machine's.
+	"""
+	dcb.save_multi_action(1, 2, "Stop", host_id="h_nas")
+	session = dcb.load_multi_action(1, 2)
+	assert session["host"] == "h_nas"
+	dcb.clear_multi_action(1, 2)
+
+
+def test_a_session_from_before_hosts_means_the_local_one():
+	"""A menu left open across the upgrade still has to repaint."""
+	dcb.write_cache_item("multi_action_1_2", {
+		"_timestamp": __import__("datetime").datetime.now().isoformat(),
+		"action": "Stop", "level": 1, "project": None, "done": set(),
+	})
+	session = dcb.load_multi_action(1, 2)
+	assert session["host"] == dcb.host_registry.local_host_id()
+	dcb.clear_multi_action(1, 2)
+
+
+def test_repainting_rebuilds_from_the_session_host():
+	"""
+	The bug as reported: stop a container on Ganimedes and the refreshed menu
+	showed the local containers instead.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	asked = []
+	fake = {
+		"h_local": [_container("nginx", "running")],
+		"h_nas": [_container("plex", "running"), _container("tautulli", "running")],
+	}
+	original = dcb.DockerManager.list_containers
+
+	def listing(self, comando=""):
+		asked.append(self.host_id)
+		return fake[self.host_id]
+
+	dcb.DockerManager.list_containers = listing
+	captured = {}
+	original_edit = dcb.edit_message_text
+	dcb.edit_message_text = lambda text, chat, message, **kw: captured.update(
+		text=text, markup=kw.get("reply_markup"))
+	try:
+		dcb.save_multi_action(1, 2, "Stop", host_id="h_nas")
+		asked.clear()
+		dcb.refresh_multi_action_menu(1, 2, ["plex"], succeeded=True)
+
+		assert asked == ["h_nas"], f"reconstruyó desde {asked}, no desde el host de la sesión"
+		labels = harness.keyboard_labels(captured["markup"])
+		assert any("tautulli" in l for l in labels), labels
+		assert not any("nginx" in l for l in labels), f"salieron los del host local: {labels}"
+		# Y el que se acaba de parar queda marcado como hecho.
+		assert any("plex" in l for l in labels), labels
+	finally:
+		dcb.DockerManager.list_containers = original
+		dcb.edit_message_text = original_edit
+		dcb.clear_multi_action(1, 2)
+		_restore_hosts()
+
+
+def test_the_containers_it_offers_keep_their_host():
+	"""A repaint must not hand back buttons pointing at the wrong machine."""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": (
+		[_container("plex", "running")] if self.host_id == "h_nas" else [_container("nginx", "running")])
+	captured = {}
+	original_edit = dcb.edit_message_text
+	dcb.edit_message_text = lambda text, chat, message, **kw: captured.update(markup=kw.get("reply_markup"))
+	try:
+		dcb.save_multi_action(1, 2, "Stop", host_id="h_nas")
+		dcb.refresh_multi_action_menu(1, 2, None)
+		for data in harness.keyboard_callbacks(captured["markup"]):
+			if data == "cerrar":
+				continue
+			assert dcb.ref_host(data.split("|", 1)[1]) == "h_nas", data
+	finally:
+		dcb.DockerManager.list_containers = original
+		dcb.edit_message_text = original_edit
+		dcb.clear_multi_action(1, 2)
+		_restore_hosts()
+
+
+# ---------------------------------------------------------------------------
 # Managing hosts
 # ---------------------------------------------------------------------------
 

@@ -4144,10 +4144,9 @@ def send_container_picker(action_type, prompt_key, empty_key, comando="",
 			callback_data=f'pickHost|{action_type}|{entry["id"]}'))
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 
-	sent = send_message(message=get_text("pick_a_host", get_text(prompt_key)), reply_markup=markup)
-	if sent and multi_action:
-		save_multi_action(sent.chat.id, sent.message_id, multi_action)
-	return sent
+	# No session yet: which host the menu is showing is only decided once one
+	# is picked, and that is where the session is opened.
+	return send_message(message=get_text("pick_a_host", get_text(prompt_key)), reply_markup=markup)
 
 
 def _send_picker_for_host(entry, containers, action_type, prompt_key, bot_container_name,
@@ -4168,7 +4167,7 @@ def _send_picker_for_host(entry, containers, action_type, prompt_key, bot_contai
 	if sent and standalone:
 		save_container_cache(sent.chat.id, sent.message_id, standalone, entry["id"])
 	if sent and multi_action and store.get("bot.multi_selection"):
-		save_multi_action(sent.chat.id, sent.message_id, multi_action)
+		save_multi_action(sent.chat.id, sent.message_id, multi_action, host_id=entry["id"])
 	return sent
 
 
@@ -4209,6 +4208,10 @@ def render_picker_for_host(chat_id, message_id, action_type, host_id):
 
 	if standalone:
 		save_container_cache(chat_id, message_id, standalone, host_id)
+	# The session opens here, now that a host has been chosen, so every repaint
+	# after a press rebuilds from that machine and not from the local one.
+	if spec.get("multi_action") and store.get("bot.multi_selection"):
+		save_multi_action(chat_id, message_id, spec["multi_action"], host_id=host_id)
 	prompt = f'{get_text("list_host_header", host_registry.alias(host_id))}\n{get_text(spec["prompt_key"])}'
 	edit_message_text(prompt, chat_id, message_id, reply_markup=markup)
 
@@ -4303,24 +4306,27 @@ def get_project_container_names(project_name):
 	project_info = docker_manager.get_project_info(project_name)
 	return [c.name for c in project_info.containers] if project_info else []
 
-def enter_project_multi_aware(action_type, project_name, chatId, messageId):
+def enter_project_multi_aware(action_type, project_name, chatId, messageId, host_id=None):
 	"""
 	Enters a Compose project, pointing any multi-action session at it so later
 	repaints land on the project list instead of the top level.
 	"""
 	session = load_multi_action(chatId, messageId)
 	done = session["done"] if session else None
+	host_id = host_id or (session["host"] if session else None)
 	if session:
-		save_multi_action(chatId, messageId, session["action"], 2, project_name, done)
-	handle_enter_project_level2(action_type, project_name, chatId, messageId, marked_names=done)
+		save_multi_action(chatId, messageId, session["action"], 2, project_name, done, host_id)
+	handle_enter_project_level2(action_type, project_name, chatId, messageId,
+								marked_names=done, host_id=host_id)
 
-def back_to_level1_multi_aware(action_type, chatId, messageId):
+def back_to_level1_multi_aware(action_type, chatId, messageId, host_id=None):
 	"""Returns to the top-level list, keeping any multi-action session in sync."""
 	session = load_multi_action(chatId, messageId)
 	done = session["done"] if session else None
+	host_id = host_id or (session["host"] if session else None)
 	if session:
-		save_multi_action(chatId, messageId, session["action"], 1, None, done)
-	result = build_back_to_level1_keyboard(action_type, chatId, messageId, marked_names=done)
+		save_multi_action(chatId, messageId, session["action"], 1, None, done, host_id)
+	result = build_back_to_level1_keyboard(action_type, chatId, messageId, marked_names=done, host_id=host_id)
 	if result:
 		markup, message_key = result
 		edit_message_text(get_text(message_key), chatId, messageId, reply_markup=markup)
@@ -4358,23 +4364,25 @@ def refresh_multi_action_menu(chatId, messageId, container_names=None, succeeded
 
 		action = session["action"]
 		done = session["done"]
+		host_id = session["host"]
 
 		if container_names and succeeded:
 			done.update(container_names)
-			save_multi_action(chatId, messageId, action, session["level"], session["project"], done)
+			save_multi_action(chatId, messageId, action, session["level"], session["project"], done, host_id)
 
 		# Level 2: repaint the project, or fall through to level 1 when it is empty
 		if session["level"] == 2 and session["project"]:
-			menu = build_project_level2_menu(action, session["project"], chatId, messageId, marked_names=done)
+			menu = build_project_level2_menu(action, session["project"], chatId, messageId,
+											marked_names=done, host_id=host_id)
 			if menu and count_actionable_buttons(menu[0]):
 				markup, text = menu
 				edit_message_text(text, chatId, messageId, reply_markup=markup)
 				return
 			# Nothing left here (or the project is gone): go back to the top level
-			save_multi_action(chatId, messageId, action, 1, None, done)
+			save_multi_action(chatId, messageId, action, 1, None, done, host_id)
 
 		# Level 1: repaint, or close the menu when there is nothing left to do
-		result = build_back_to_level1_keyboard(action, chatId, messageId, marked_names=done)
+		result = build_back_to_level1_keyboard(action, chatId, messageId, marked_names=done, host_id=host_id)
 		if not result or not count_actionable_buttons(result[0]):
 			close_multi_action_menu(chatId, messageId)
 			return
@@ -4382,7 +4390,7 @@ def refresh_multi_action_menu(chatId, messageId, container_names=None, succeeded
 		markup, message_key = result
 		edit_message_text(get_text(message_key), chatId, messageId, reply_markup=markup)
 
-def build_back_to_level1_keyboard(action_type, chatId, messageId, bot_container_name=CONTAINER_NAME, marked_names=None):
+def build_back_to_level1_keyboard(action_type, chatId, messageId, bot_container_name=CONTAINER_NAME, marked_names=None, host_id=None):
 	"""
 	Generic function to build "backTo...Level1" keyboards.
 
@@ -4492,7 +4500,12 @@ def build_back_to_level1_keyboard(action_type, chatId, messageId, bot_container_
 	if not config:
 		return None
 
-	containers = docker_manager.list_containers()
+	host_id = host_id or host_registry.local_host_id()
+	try:
+		containers = manager(host_id).list_containers()
+	except host_registry.HostUnavailable as e:
+		debug(f"Cannot rebuild the menu for {host_id}: {e.reason}")
+		return None
 
 	# Check if no containers or only bot container
 	if not containers:
@@ -4511,12 +4524,13 @@ def build_back_to_level1_keyboard(action_type, chatId, messageId, bot_container_
 		exclude_container,
 		filter_standalone_status=config['filter_standalone_status'],
 		filter_projects_with_all_status=config['filter_projects_with_all_status'],
-		marked_names=marked_names
+		marked_names=marked_names,
+		host_id=host_id
 	)
 
 	# Save container cache for standalone containers
 	if standalone_containers:
-		save_container_cache(chatId, messageId, standalone_containers)
+		save_container_cache(chatId, messageId, standalone_containers, host_id)
 
 	return markup, config['message_key']
 
@@ -5431,7 +5445,7 @@ def clear_container_cache(chat_id, message_id):
 	"""Clears the container cache for a message"""
 	delete_cache_item(f"containers_{chat_id}_{message_id}")
 
-def save_multi_action(chat_id, message_id, action, level=1, project=None, done=None):
+def save_multi_action(chat_id, message_id, action, level=1, project=None, done=None, host_id=None):
 	"""
 	Stores the multi-action session attached to a /run, /stop or /restart menu.
 
@@ -5453,6 +5467,10 @@ def save_multi_action(chat_id, message_id, action, level=1, project=None, done=N
 		"action": action,
 		"level": level,
 		"project": project,
+		# Which host the menu is showing. Without it the repaint after every
+		# press rebuilt from the local host, so acting on a remote container
+		# swapped the list for the local machine's.
+		"host": host_id or host_registry.local_host_id(),
 		"done": set(done) if done else set()
 	})
 
@@ -5475,6 +5493,9 @@ def load_multi_action(chat_id, message_id):
 
 	if not isinstance(data.get("done"), set):
 		data["done"] = set(data.get("done") or [])
+	# A session started before hosts existed carries no host, and means the
+	# local one.
+	data.setdefault("host", host_registry.local_host_id())
 	return data
 
 def clear_multi_action(chat_id, message_id):
