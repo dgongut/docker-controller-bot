@@ -1036,6 +1036,67 @@ def test_the_bot_is_never_offered_to_a_scheduled_task():
 		_restore_hosts()
 
 
+def test_a_scheduled_prune_is_asked_which_host():
+	"""
+	It picks no container, so nothing else in the flow would say where it runs.
+	Interactive /prune asks the machine before the object type; this follows it
+	for the same reason: it deletes things.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	captured = {}
+	original = dcb.send_message
+	dcb.send_message = lambda **kwargs: captured.update(kwargs)
+	original_save = dcb.save_schedule_state
+	dcb.save_schedule_state = lambda *a, **k: None
+	try:
+		dcb.ask_schedule_prune_host(1, {"name": "nightly", "action": "prune"})
+		callbacks = harness.keyboard_callbacks(captured["reply_markup"])
+		assert "scheduleSelectHost|h_local" in callbacks, callbacks
+		assert "scheduleSelectHost|h_nas" in callbacks, callbacks
+		for data in callbacks:
+			callback_registry.parse(data)
+	finally:
+		dcb.send_message = original
+		dcb.save_schedule_state = original_save
+		_restore_hosts()
+
+
+def test_the_prune_type_step_offers_the_four_kinds():
+	captured = {}
+	original = dcb.send_message
+	dcb.send_message = lambda **kwargs: captured.update(kwargs)
+	original_save = dcb.save_schedule_state
+	dcb.save_schedule_state = lambda *a, **k: None
+	try:
+		dcb.ask_schedule_prune_type(1, {"name": "nightly", "action": "prune"})
+		callbacks = harness.keyboard_callbacks(captured["reply_markup"])
+		for kind in ("containers", "images", "networks", "volumes"):
+			assert f"scheduleSelectPruneType|{kind}" in callbacks, callbacks
+	finally:
+		dcb.send_message = original
+		dcb.save_schedule_state = original_save
+
+
+def test_a_task_always_ends_up_with_a_host():
+	"""
+	Confirming records the local host when nothing asked for one, so the
+	executor never has to guess.
+	"""
+	_with_hosts([HOST_FIXTURE[0]], unreachable=())
+	state = {"name": "nightly", "action": "prune", "prune_type": "images"}
+	original = dcb.send_message
+	dcb.send_message = lambda **kwargs: None
+	original_save = dcb.save_schedule_state
+	dcb.save_schedule_state = lambda *a, **k: None
+	try:
+		dcb.confirm_schedule_creation(1, state)
+		assert state["host"] == "h_local", state
+	finally:
+		dcb.send_message = original
+		dcb.save_schedule_state = original_save
+		_restore_hosts()
+
+
 def test_the_schedule_summary_says_which_machine():
 	"""
 	A prune task picks no container, so nothing implies its host. Leaving it
@@ -1046,6 +1107,11 @@ def test_the_schedule_summary_says_which_machine():
 		summary = dcb._build_schedule_summary(
 			{"name": "nightly", "action": "prune", "prune_type": "images", "host": "h_nas"})
 		assert "nas" in summary, summary
+
+		# Not defaulted: the step that asks for the host renders this summary
+		# above the question, and a fallback would claim one while still asking.
+		asking = dcb._build_schedule_summary({"name": "nightly", "action": "prune"})
+		assert dcb.get_text("schedule_label_host") not in asking, asking
 
 		# With one host the summary reads as it always did.
 		_with_hosts([HOST_FIXTURE[0]], unreachable=())

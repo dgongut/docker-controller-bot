@@ -1474,11 +1474,12 @@ def _build_schedule_summary(state: dict) -> str:
 		lines.append(f"<b>{get_text('schedule_label_minutes')}:</b> {state.get('minutes')}")
 	if state.get("prune_type"):
 		lines.append(f"<b>{get_text('schedule_label_prune_type')}:</b> {state.get('prune_type')}")
-	# Which machine the task will run on. Shown for every task once there is
-	# more than one host, including a prune, which has no container to imply it.
-	if not host_registry.is_single_host():
-		task_host = state.get("host") or host_registry.local_host_id()
-		lines.append(f"<b>{get_text('schedule_label_host')}:</b> {host_registry.alias(task_host)}")
+	# Which machine the task will run on, once one has been chosen. Never
+	# defaulted here: the step that asks for it renders this summary above the
+	# question, and a fallback would have it claiming a host while still
+	# asking which one.
+	if state.get("host") and not host_registry.is_single_host():
+		lines.append(f"<b>{get_text('schedule_label_host')}:</b> {host_registry.alias(state['host'])}")
 	# Only show show_output if action is exec or prune and show_output is not None
 	if state.get("action") in ("exec", "prune") and state.get("show_output") is not None:
 		lines.append(f"<b>{get_text('schedule_label_show_output')}:</b> {get_text('schedule_yes') if state.get('show_output') else get_text('schedule_no')}")
@@ -1552,6 +1553,12 @@ def show_schedule_menu(user_id: int, chat_id: int):
 			lines.append(f"  {label_status}: <b>{status_icon} {status_text}</b>")
 			lines.append(f"  {label_cron}: <code>{cron}</code>")
 			lines.append(f"  {label_action}: <b>{action}</b>")
+			# Which machine the task runs on. A task names a container, and a
+			# name is only unique within one daemon, so with several hosts the
+			# listing is ambiguous without this.
+			if not host_registry.is_single_host():
+				task_host = sched.get("host") or host_registry.local_host_id()
+				lines.append(f"  {get_text('schedule_label_host')}: <b>{host_registry.alias(task_host)}</b>")
 
 			# Add action-specific details
 			if action == 'mute':
@@ -1742,6 +1749,61 @@ def show_schedule_container_selection(user_id: int, action: str):
 		schedule_state["last_message_id"] = msg.message_id if msg else None
 		save_schedule_state(user_id, schedule_state)
 
+def ask_schedule_prune_host(user_id: int, state: dict):
+	"""
+	Asks which host a scheduled prune will clean.
+
+	A prune task picks no container, so nothing else in the flow would say
+	where it runs. Interactive /prune asks the machine before the object type
+	and this follows it, for the same reason: it deletes things.
+	"""
+	state["step"] = "ask_prune_host"
+	if state.get("last_message_id"):
+		try:
+			delete_message(state.get("last_message_id"))
+		except:
+			pass
+
+	message_text = _build_schedule_summary(state)
+	message_text += f'\n\n{get_text("pick_a_host")}'
+
+	markup = InlineKeyboardMarkup(row_width=1)
+	for entry in host_registry.hosts():
+		markup.add(InlineKeyboardButton(
+			f'🖥️ {entry.get("alias", entry["id"])}',
+			callback_data=f'scheduleSelectHost|{entry["id"]}'))
+	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+
+	msg = send_message(message=message_text, reply_markup=markup)
+	state["last_message_id"] = msg.message_id if msg else None
+	save_schedule_state(user_id, state)
+
+
+def ask_schedule_prune_type(user_id: int, state: dict):
+	"""Asks which kind of unused object a scheduled prune will remove."""
+	state["step"] = "ask_prune_type"
+	if state.get("last_message_id"):
+		try:
+			delete_message(state.get("last_message_id"))
+		except:
+			pass
+
+	message_text = _build_schedule_summary(state)
+	message_text += f"\n\n{get_text('schedule_ask_prune_type')}"
+
+	markup = InlineKeyboardMarkup(row_width=2)
+	markup.add(*[
+		InlineKeyboardButton(get_text(f"schedule_prune_{kind}"),
+							callback_data=f"scheduleSelectPruneType|{kind}")
+		for kind in ("containers", "images", "networks", "volumes")
+	])
+	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+
+	msg = send_message(message=message_text, reply_markup=markup)
+	state["last_message_id"] = msg.message_id if msg else None
+	save_schedule_state(user_id, state)
+
+
 def is_valid_cron(cron_expr: str) -> bool:
 	"""Validate cron expression"""
 	try:
@@ -1751,10 +1813,9 @@ def is_valid_cron(cron_expr: str) -> bool:
 		return False
 
 def confirm_schedule_creation(user_id: int, state: dict):
-	# A prune task picks no container, so nothing has set its host. Recording
-	# the local one explicitly beats leaving it blank and having the executor
-	# fall back silently: the confirmation then says which machine it means.
-	if state.get("action") == "prune" and not state.get("host"):
+	# A prune task with a single host configured never got asked, so its host
+	# is recorded here rather than left blank for the executor to guess.
+	if not state.get("host"):
 		state["host"] = host_registry.local_host_id()
 		save_schedule_state(user_id, state)
 	"""Show confirmation of schedule creation"""
@@ -3257,7 +3318,11 @@ def perform_container_update(container_id, container_name, tag=None, send_fn=Non
 		debug(f"Could not pre-fetch Compose info for {container_name}: {e}")
 
 	# Send the initial "updating" progress message
-	x = send_fn(get_text("updating", container_name))
+	# Both the progress line and the result say which machine, the same as the
+	# start/stop notifications do. Without it an update report on a multi-host
+	# setup does not say where it happened.
+	label = host_label(host_id)
+	x = send_fn(f'{label}{get_text("updating", container_name)}')
 
 	# Perform the actual update
 	result = owner.update(container_id=ref_id(container_id), container_name=container_name, message=x, bot=bot, tag=tag)
@@ -3267,7 +3332,7 @@ def perform_container_update(container_id, container_name, tag=None, send_fn=Non
 	# (auto-update) instead of the chat being used.
 	if x is not None:
 		delete_message(x.message_id, x.chat.id)
-	send_fn(result)
+	send_fn(f"{label}{result}")
 
 	# Restart dependents if applicable. Resolve the freshly recreated container
 	# by name (Docker enforces unique container names, and perform_update keeps
@@ -3892,8 +3957,8 @@ def confirm_update(containerId, containerName):
 	if comparison['current_digest'] == comparison['new_digest']:
 		# Same image, no update needed - save to cache as updated
 		image_with_tag = comparison['current_tag']
-		save_container_update_status(image_with_tag, containerName, False)
-		send_message(message=get_text("already_updated", containerName))
+		save_container_update_status(image_with_tag, containerName, False, ref_host(containerId))
+		send_message(message=f'{host_label(ref_host(containerId))}{get_text("already_updated", containerName)}')
 		return
 
 	# Build changes list

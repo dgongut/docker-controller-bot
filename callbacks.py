@@ -782,24 +782,12 @@ def cb_scheduleSelectAction(ctx):
 			schedule_state["last_message_id"] = msg.message_id if msg else None
 			core.save_schedule_state(ctx.userId, schedule_state)
 		elif ctx.action == "prune":
-			schedule_state["step"] = "ask_prune_type"
 			schedule_state["container"] = None  # Not applicable for prune
-
-			# Build message with summary
-			message_text = core._build_schedule_summary(schedule_state)
-			message_text += f"\n\n{get_text('schedule_ask_prune_type')}"
-
-			markup = InlineKeyboardMarkup(row_width=2)
-			markup.add(
-				InlineKeyboardButton(get_text("schedule_prune_containers"), callback_data="scheduleSelectPruneType|containers"),
-				InlineKeyboardButton(get_text("schedule_prune_images"), callback_data="scheduleSelectPruneType|images"),
-				InlineKeyboardButton(get_text("schedule_prune_networks"), callback_data="scheduleSelectPruneType|networks"),
-				InlineKeyboardButton(get_text("schedule_prune_volumes"), callback_data="scheduleSelectPruneType|volumes")
-			)
-			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
-			msg = core.send_message(message=message_text, reply_markup=markup)
-			schedule_state["last_message_id"] = msg.message_id if msg else None
-			core.save_schedule_state(ctx.userId, schedule_state)
+			# With one host there is nothing to ask, so the flow is unchanged.
+			if core.host_registry.is_single_host():
+				core.ask_schedule_prune_type(ctx.userId, schedule_state)
+			else:
+				core.ask_schedule_prune_host(ctx.userId, schedule_state)
 		else:
 			# For run, stop, restart, exec - ask for container
 			# show_output will remain None until after container selection for exec
@@ -885,6 +873,19 @@ def cb_scheduleSelectShowOutput(ctx):
 		msg = core.send_message(message=message_text, reply_markup=markup)
 		schedule_state["last_message_id"] = msg.message_id if msg else None
 		core.save_schedule_state(ctx.userId, schedule_state)
+
+@callback(name="scheduleSelectHost", params=("value",))
+def cb_scheduleSelectHost(ctx):
+	"""Records which host a scheduled prune will clean, then asks what to clean."""
+	schedule_state = core.load_schedule_state(ctx.userId)
+	if not schedule_state:
+		return
+	if core.host_registry.host(ctx.value) is None:
+		core.send_message(message=get_text("error_invalid_selection"))
+		return
+	schedule_state["host"] = ctx.value
+	core.ask_schedule_prune_type(ctx.userId, schedule_state)
+
 
 @callback(
 	name='scheduleSelectPruneType',
