@@ -406,8 +406,153 @@ def test_every_submenu_has_a_way_back():
 
 
 # ---------------------------------------------------------------------------
+# Container references and the multi-host listing
+# ---------------------------------------------------------------------------
+
+def test_a_reference_carries_its_host():
+	"""
+	Five hex characters are only unique within one daemon, so what travels in
+	a button has to say which machine it means.
+	"""
+	assert dcb.make_ref("h_5f55", "9a3b1c2d3e4f") == "h_5f55:9a3b1"
+	assert dcb.parse_ref("h_5f55:9a3b1") == ("h_5f55", "9a3b1")
+	assert dcb.ref_host("h_5f55:9a3b1") == "h_5f55"
+	assert dcb.ref_id("h_5f55:9a3b1") == "9a3b1"
+
+
+def test_a_bare_id_still_means_the_local_host():
+	"""
+	That is what a button sent before the upgrade carries. Pressing one has to
+	keep working rather than failing with something inscrutable.
+	"""
+	local = dcb.host_registry.local_host_id()
+	assert dcb.parse_ref("9a3b1") == (local, "9a3b1")
+	assert dcb.ref_host("9a3b1") == local
+	assert dcb.parse_ref("") == (local, "")
+	assert dcb.parse_ref(None) == (local, "")
+
+
+def test_a_reference_to_an_unreachable_host_finds_nothing():
+	"""Rather than raising, so a stale button gives the usual "not found"."""
+	_with_hosts(HOST_FIXTURE)
+	try:
+		owner, container = dcb.find_container("h_nas:abc12")
+		assert (owner, container) == (None, None)
+	finally:
+		_restore_hosts()
+
+
+def test_the_single_host_listing_is_unchanged():
+	"""
+	The golden rule of the release: with one host the bot has to read exactly
+	as it did before hosts existed, byte for byte.
+	"""
+	registry = _with_hosts([HOST_FIXTURE[0]], unreachable=())
+	fake = [_container("nginx", "running"), _container("redis", "exited")]
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": fake
+	try:
+		assert registry.is_single_host()
+		grouped = dcb.display_all_hosts(comando="/list")
+		plain = dcb.display_containers(fake, "h_local")
+		assert grouped == plain, "con un host no debe añadirse ninguna cabecera"
+		assert "🖥️" not in grouped
+	finally:
+		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
+def test_several_hosts_get_a_section_each():
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	fake = {
+		"h_local": [_container("nginx", "running")],
+		"h_nas": [_container("plex", "running"), _container("tautulli", "exited")],
+	}
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": fake[self.host_id]
+	try:
+		out = dcb.display_all_hosts(comando="/list")
+		assert "casa" in out and "nas" in out
+		assert out.index("casa") < out.index("nas"), "el orden debe ser el de los ajustes"
+		assert "nginx" in out and "plex" in out and "tautulli" in out
+	finally:
+		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
+def test_a_host_that_is_down_is_reported_not_hidden():
+	"""
+	Quietly showing fewer containers than the user has is worse than saying a
+	machine is unreachable: they would think something had been deleted.
+
+	The real listing path is used here, so the exclusion comes from the client
+	failing rather than from a mock deciding it should.
+	"""
+	_with_hosts(HOST_FIXTURE)  # nas falla en todas sus llamadas
+	try:
+		sections = dcb.hosts_with_containers()
+		assert [entry["id"] for entry, _, _ in sections] == ["h_local"]
+		assert [entry["id"] for entry in dcb.unreachable_hosts(sections)] == ["h_nas"]
+
+		out = dcb.display_all_hosts(comando="/list")
+		assert "nas" in out
+		assert "🔴" in out, out
+	finally:
+		_restore_hosts()
+
+
+def test_a_host_that_fails_mid_listing_does_not_break_the_rest():
+	"""A daemon can answer a ping and then fail the very next call."""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	original = dcb.DockerManager.list_containers
+
+	def flaky(self, comando=""):
+		if self.host_id == "h_nas":
+			raise Exception("connection reset by peer")
+		return [_container("nginx", "running")]
+
+	dcb.DockerManager.list_containers = flaky
+	try:
+		sections = dcb.hosts_with_containers()
+		assert [entry["id"] for entry, _, _ in sections] == ["h_local"]
+		out = dcb.display_all_hosts(comando="/list")
+		assert "nginx" in out
+	finally:
+		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
+def test_update_state_is_read_from_the_right_host():
+	"""
+	Two hosts can run a container of the same name. Reading the cache without
+	saying which host would show one machine's pending update on the other.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	try:
+		store.set("bot.check_updates", True)
+		store.set_update_status("h_nas", "nginx", "nginx:1.27", True)
+		nginx = _container("nginx", "running", image="nginx:1.27")
+		assert dcb.update_available(nginx, "h_nas") is True
+		assert dcb.update_available(nginx, "h_local") is False
+	finally:
+		store.forget_update_status("h_nas", "nginx")
+		_restore_hosts()
+
+
+# ---------------------------------------------------------------------------
 # Managing hosts
 # ---------------------------------------------------------------------------
+
+def _container(name, status, image=None):
+	"""A stand-in for a docker-py container, with what the renderer reads."""
+	fake = MagicMock()
+	fake.name = name
+	fake.status = status
+	fake.id = f"{abs(hash(name)) % 0xfffffffff:09x}"
+	fake.labels = {}
+	fake.attrs = {"Config": {"Image": image or f"{name}:latest"}}
+	return fake
+
 
 HOST_FIXTURE = [
 	{"id": "h_local", "alias": "casa", "url": "unix:///var/run/docker.sock", "local": True},
@@ -432,7 +577,13 @@ def _with_hosts(hosts, unreachable=("nas",)):
 	def sdk(base_url=None, **kwargs):
 		fake = MagicMock()
 		if any(name in (base_url or "") for name in unreachable):
-			fake.ping.side_effect = Exception("no route to host")
+			# Everything fails, not just the ping: nothing pings before using a
+			# client, so a host is excluded by the call itself failing.
+			down = Exception("no route to host")
+			fake.ping.side_effect = down
+			fake.info.side_effect = down
+			fake.containers.get.side_effect = down
+			fake.containers.list.side_effect = down
 		return fake
 
 	docker.DockerClient = sdk

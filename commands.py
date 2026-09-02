@@ -26,7 +26,7 @@ from core import (
 	VERSION, ask_command, ask_text_input,
 	build_hierarchical_keyboard, button_columns, change_tag_container,
 	compose, confirm_delete, create_simple_keyboard,
-	delete_message, display_containers, docker_manager,
+	delete_message, display_all_hosts, docker_manager,
 	info, log_file, logs,
 	mute, print_donors, restart,
 	run, save_container_cache, save_multi_action,
@@ -45,8 +45,8 @@ from core import (
 # container, which is always the case for a button press.
 
 def cmd_list(user_id=None, chat_id=None, container_id=None, container_name=None, argument=None):
-	containers = docker_manager.list_containers(comando="/list")
-	send_message(message=display_containers(containers), reply_markup=create_simple_keyboard("button_close"))
+	send_message(message=display_all_hosts(comando="/list"),
+				reply_markup=create_simple_keyboard("button_close"))
 
 def cmd_run(user_id=None, chat_id=None, container_id=None, container_name=None, argument=None):
 	if container_id:

@@ -386,5 +386,8 @@
   "button_host_test": "🔄 - Test again",
   "button_host_rename": "✏️ - Rename",
   "button_host_remove": "🗑️ - Remove host",
-  "button_host_remove_confirm": "🗑️ - Yes, remove it"
+  "button_host_remove_confirm": "🗑️ - Yes, remove it",
+  "list_host_header": "🖥️ <b>$1</b>",
+  "list_host_empty": "<i>No containers</i>",
+  "list_host_unreachable": "🔴 <b>$1</b> is not answering\n<i>$2</i>"
 }

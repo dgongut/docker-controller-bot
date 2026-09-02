@@ -4413,18 +4413,31 @@ def build_compose_project_level2_keyboard(project_info, project_name, action_typ
 def is_admin(userId):
 	return str(userId) in str(TELEGRAM_ADMIN).split(',')
 
-def update_available(container):
+def update_available(container, host_id=None):
+	"""
+	Whether a container has a pending update, according to the cache.
+
+	`host_id` is which host it lives on. It defaults to the local one so the
+	single-host callers read as they always did, but anything iterating over
+	hosts has to pass it or it would read another machine's cache entry.
+	"""
 	image_with_tag = container.attrs['Config']['Image']
 	update = False
 	if store.get("bot.check_updates"):
 		try:
-			if read_container_update_status(image_with_tag, container.name) is True:
+			if read_container_update_status(image_with_tag, container.name, host_id) is True:
 				update = True
 		except:
 			pass
 	return update
 
-def display_containers(containers):
+def display_containers(containers, host_id=None):
+	"""
+	Renders a list of containers, grouped into Compose projects and standalone.
+
+	`host_id` is which host they came from, needed to read their update state
+	from the right machine's cache.
+	"""
 	# Calculate statistics
 	total_containers = len(containers)
 	running_containers = sum(1 for c in containers if c.status in ['running', 'restarting'])
@@ -4449,7 +4462,7 @@ def display_containers(containers):
 		container_info_cache[container.id] = (project_name, service_name)
 
 		# Cache update status
-		has_update = update_available(container)
+		has_update = update_available(container, host_id)
 		update_cache[container.id] = has_update
 		if has_update:
 			pending_updates += 1
@@ -4809,6 +4822,145 @@ def get_array_donors_online():
 	else:
 		error(f"Error getting donors: error code [{response.status_code}]")
 		return []
+
+# --- REFERENCIAS DE CONTENEDOR -------------------------------------------
+#
+# A container is identified by which host it is on plus its short id, because
+# five hex characters are only unique within one daemon. The two travel
+# together through callback_data and the message caches as
+#
+#     <hostId>:<shortId>        e.g. h_5f55:9a3b1
+#
+# so that a button carries everything needed to act on the right machine. That
+# is what keeps every operation from having to grow a host argument of its
+# own: whatever holds a reference can find its way back to the host.
+CONTAINER_REF_SEPARATOR = ":"
+
+
+def make_ref(host_id, container_id):
+	"""Builds the reference for a container on a host."""
+	return f"{host_id}{CONTAINER_REF_SEPARATOR}{container_id[:CONTAINER_ID_LENGTH]}"
+
+
+def container_ref(host_id, container):
+	"""The reference for a container object on a host."""
+	return make_ref(host_id, container.id)
+
+
+def parse_ref(ref):
+	"""
+	Splits a reference into (host_id, short_id).
+
+	A bare short id means the local host. That is what a button sent before the
+	upgrade carries, and pressing one of those has to keep working rather than
+	failing with something inscrutable.
+	"""
+	text = str(ref or "")
+	if CONTAINER_REF_SEPARATOR in text:
+		host_id, _, short_id = text.partition(CONTAINER_REF_SEPARATOR)
+		return host_id, short_id
+	return host_registry.local_host_id(), text
+
+
+def ref_host(ref):
+	"""The host a reference points at."""
+	return parse_ref(ref)[0]
+
+
+def ref_id(ref):
+	"""The short container id a reference points at."""
+	return parse_ref(ref)[1]
+
+
+def manager_for(ref):
+	"""
+	The manager for the host a reference points at.
+
+	Raises host_registry.HostUnavailable when that host cannot be reached, so
+	a caller acting on one container gets the same treatment as one sweeping
+	all of them.
+	"""
+	return manager(ref_host(ref))
+
+
+def find_container(ref):
+	"""
+	(manager, container) for a reference, or (None, None) when it cannot be
+	found — an unreachable host, or a container that is gone.
+	"""
+	try:
+		owner = manager_for(ref)
+	except host_registry.HostUnavailable as e:
+		debug(f"Cannot reach the host for {ref}: {e.reason}")
+		return None, None
+	try:
+		return owner, owner.client.containers.get(ref_id(ref))
+	except Exception as e:
+		debug(f"Container {ref} not found: {e}")
+		return None, None
+
+
+def display_all_hosts(comando=""):
+	"""
+	The container listing for every host, one section each.
+
+	Rendering per host and stitching the sections together, rather than
+	threading a host through the renderer, keeps the single-host output
+	byte-identical to what it has always been.
+	"""
+	if host_registry.is_single_host():
+		host_id = host_registry.local_host_id()
+		try:
+			containers = manager(host_id).list_containers(comando=comando)
+		except host_registry.HostUnavailable as e:
+			return get_text("list_host_unreachable", host_registry.alias(host_id), e.reason)
+		return display_containers(containers, host_id)
+
+	sections = hosts_with_containers(comando)
+	rendered = []
+	for entry, _, containers in sections:
+		body = display_containers(containers, entry["id"]) if containers else get_text("list_host_empty")
+		rendered.append(f'{get_text("list_host_header", entry.get("alias", entry["id"]))}\n{body}')
+
+	for entry in unreachable_hosts(sections):
+		rendered.append(get_text("list_host_unreachable", entry.get("alias", entry["id"]), ""))
+
+	return "\n\n".join(rendered) if rendered else get_text("error_no_containers_available")
+
+
+def hosts_with_containers(comando=""):
+	"""
+	Every reachable host and its containers, in the order the hosts are
+	configured.
+
+	Returns [(host_entry, manager, containers)]. Hosts that do not answer are
+	left out: one machine being down has to degrade what it can and nothing
+	else.
+	"""
+	sections = []
+	for entry in host_registry.hosts():
+		try:
+			owner = manager(entry["id"])
+		except host_registry.HostUnavailable as e:
+			debug(f"Skipping host {entry.get('alias', entry['id'])}: {e.reason}")
+			continue
+		try:
+			sections.append((entry, owner, owner.list_containers(comando=comando)))
+		except Exception as e:
+			warning(f"Could not list containers on {entry.get('alias', entry['id'])}: {e}")
+			host_registry.drop(entry["id"])
+			forget_managers()
+	return sections
+
+
+def unreachable_hosts(sections):
+	"""
+	The configured hosts missing from `sections`, so the interface can say so
+	instead of quietly showing less than the user has.
+	"""
+	present = {entry["id"] for entry, _, _ in sections}
+	return [entry for entry in host_registry.hosts() if entry["id"] not in present]
+
 
 def get_container_id_by_name(container_name, debugging=False):
 	if debugging:
