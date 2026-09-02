@@ -2588,40 +2588,55 @@ def button_controller(call):
 		if spec.answer_immediately:
 			bot.answer_callback_query(call.id, show_alert=False)
 
-		# A callback that names a container carries only its short id.
-		if ctx.containerId and not ctx.containerName:
-			ctx.containerName = get_container_name(chatId, messageId, ctx.containerId)
+		# Which host this press is about. A container reference says so
+		# directly; a project hash resolves to one; everything else means the
+		# host the bot runs on.
+		ctx.hostId = host_registry.local_host_id()
+
+		# A callback that names a container carries a reference to it.
+		if ctx.containerId:
+			ctx.hostId = ref_host(ctx.containerId)
 			if not ctx.containerName:
-				close_multi_action_menu(chatId, messageId)
-				send_message(message=get_text("container_does_not_exist", ctx.containerId))
-				debug(f"Container {ctx.containerId} not found in cache or Docker")
-				return
+				ctx.containerName = get_container_name(chatId, messageId, ctx.containerId)
+				if not ctx.containerName:
+					close_multi_action_menu(chatId, messageId)
+					send_message(message=get_text("container_does_not_exist", ref_id(ctx.containerId)))
+					debug(f"Container {ctx.containerId} not found in cache or Docker")
+					return
 
 		# Notifications for containers that were later recreated (e.g. via compose)
 		# keep a stale short id in their callback_data. If we know the name, resolve
 		# it back to the current id so the operation targets the live container
 		# instead of failing with "container does not exist".
+		#
+		# Looked up on the reference's own host and nowhere else. Searching
+		# every host could land the action on a container of the same name on
+		# a different machine, which is the one mistake here that would be both
+		# silent and destructive.
 		if ctx.containerId and ctx.containerName and not spec.project_arg:
-			current_id = get_container_id_by_name(ctx.containerName)
+			current_id = find_container_id_on_host(ctx.hostId, ctx.containerName)
 			if current_id:
-				if current_id != ctx.containerId:
-					debug(f"Resolved stale id {ctx.containerId} to current id {current_id} via name {ctx.containerName}")
-					ctx.containerId = current_id
+				if current_id != ref_id(ctx.containerId):
+					debug(f"Resolved stale id {ctx.containerId} to {current_id} via name {ctx.containerName} on {ctx.hostId}")
+				ctx.containerId = make_ref(ctx.hostId, current_id)
 			else:
 				close_multi_action_menu(chatId, messageId)
 				send_message(message=get_text("container_does_not_exist", ctx.containerName))
-				debug(f"Container {ctx.containerName} (stale id {ctx.containerId}) not found in Docker")
+				debug(f"Container {ctx.containerName} (stale {ctx.containerId}) not found on {ctx.hostId}")
 				return
 
 		# For project-scoped callbacks the argument carries a short hash of the
 		# project name, to stay under Telegram's 64-byte callback_data limit.
+		# The hash resolves to the host as well, because two machines can run a
+		# project of the same name.
 		if spec.project_arg and ctx.containerName:
-			resolved = resolve_project_name(ctx.containerName)
-			if not resolved:
+			resolved_host, resolved_name = resolve_project_hash(ctx.containerName)
+			if not resolved_name:
 				send_message(message=get_text("error_project_not_found", ctx.containerName))
 				debug(f"Unknown project hash: {ctx.containerName}")
 				return
-			ctx.containerName = resolved
+			ctx.hostId = resolved_host
+			ctx.containerName = resolved_name
 
 		# A /run, /stop or /restart menu left open for multi-selection: the message
 		# survives this press and its keyboard is rebuilt once the action is done
@@ -2734,22 +2749,12 @@ def _execute_container_action(action, containerId, containerName, from_schedule=
 	Returns:
 		None on success, or the error message that was already sent to the user
 	"""
+	# Method names rather than bound methods: a bound method carries the host
+	# it was taken from, so the map would always act on the local one.
 	action_map = {
-		'run': {
-			'debug': 'run',
-			'message_key': 'starting',
-			'method': docker_manager.start_container
-		},
-		'stop': {
-			'debug': 'stop',
-			'message_key': 'stopping',
-			'method': docker_manager.stop_container
-		},
-		'restart': {
-			'debug': 'restart',
-			'message_key': 'restarting',
-			'method': docker_manager.restart_container
-		}
+		'run': {'debug': 'run', 'message_key': 'starting', 'method': 'start_container'},
+		'stop': {'debug': 'stop', 'message_key': 'stopping', 'method': 'stop_container'},
+		'restart': {'debug': 'restart', 'message_key': 'restarting', 'method': 'restart_container'},
 	}
 
 	config = action_map.get(action)
@@ -2759,7 +2764,14 @@ def _execute_container_action(action, containerId, containerName, from_schedule=
 
 	debug(f"Running command: {config['debug']} for container {containerName}")
 	x = send_message(message=get_text(config['message_key'], containerName))
-	result = config['method'](container_id=containerId, container_name=containerName, from_schedule=from_schedule)
+	try:
+		owner = manager_for(containerId)
+	except host_registry.HostUnavailable as e:
+		message = get_text("host_unreachable", host_registry.alias(ref_host(containerId)), e.reason)
+		send_message(message=message)
+		return message
+	result = getattr(owner, config['method'])(
+		container_id=ref_id(containerId), container_name=containerName, from_schedule=from_schedule)
 	if x:
 		delete_message(x.message_id)
 	if result:
@@ -3210,13 +3222,13 @@ def delete_compose_project(project_name):
 
 def logs(containerId, containerName):
 	debug(f"Running command: logs for container {containerName}")
-	result = docker_manager.show_logs(container_id=containerId, container_name=containerName)
+	result = manager_for(containerId).show_logs(container_id=ref_id(containerId), container_name=containerName)
 	send_message(message=result, reply_markup=create_simple_keyboard("button_close"))
 
 def log_file(containerId, containerName):
 	debug(f"Running command: log_file for container {containerName}")
 	markup = create_simple_keyboard("button_delete")
-	result = docker_manager.show_logs_raw(container_id=containerId, container_name=containerName)
+	result = manager_for(containerId).show_logs_raw(container_id=ref_id(containerId), container_name=containerName)
 	if isinstance(result, str):
 		fichero_temporal = get_temporal_file(result, f'logs_{containerName}')
 		x = send_message(message=get_text("loading_file"))
@@ -3304,7 +3316,7 @@ def check_mute():
 def compose(containerId, containerName):
 	debug(f"Running command: compose for container {containerName}")
 	markup = create_simple_keyboard("button_delete")
-	result = docker_manager.get_docker_compose(container_id=containerId, container_name=containerName)
+	result = manager_for(containerId).get_docker_compose(container_id=ref_id(containerId), container_name=containerName)
 	if isinstance(result, str) and not result.startswith("Error"):
 		fichero_temporal = io.BytesIO(result.encode('utf-8'))
 		fichero_temporal.name = "docker-compose.txt"
@@ -3319,7 +3331,7 @@ def info(containerId, containerName):
 	debug(f"Running command: info for container {containerName}")
 	markup = InlineKeyboardMarkup(row_width = 1)
 	x = send_message(message=get_text("obtaining_info", containerName))
-	result, possible_update = docker_manager.get_info(container_id=containerId, container_name=containerName)
+	result, possible_update = manager_for(containerId).get_info(container_id=ref_id(containerId), container_name=containerName)
 	delete_message(x.message_id)
 	if possible_update:
 		markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{containerId}"))
@@ -3368,7 +3380,7 @@ def confirm_execute_command(containerId, containerName, command):
 
 def execute_command(containerId, containerName, command, sendMessage=True):
 	debug(f"Running command: exec for container {containerName} with command [{command}]")
-	result = docker_manager.execute_command(container_id=containerId, container_name=containerName, command=command)
+	result = manager_for(containerId).execute_command(container_id=ref_id(containerId), container_name=containerName, command=command)
 	if sendMessage:
 		max_length = 3500
 		escaped_command = html.escape(command)
@@ -3867,7 +3879,7 @@ def count_actionable_buttons(markup):
 	rows = markup.keyboard or []
 	return sum(len(row) for row in rows[:-1])
 
-def build_hierarchical_keyboard(containers, action_type, bot_container_name, filter_standalone_status=None, filter_projects_with_all_status=None, marked_names=None):
+def build_hierarchical_keyboard(containers, action_type, bot_container_name, filter_standalone_status=None, filter_projects_with_all_status=None, marked_names=None, host_id=None):
 	"""
 	Build hierarchical keyboard with Compose projects and standalone containers.
 	Level 1: Shows projects (📦) and standalone containers (🐳)
@@ -3884,6 +3896,8 @@ def build_hierarchical_keyboard(containers, action_type, bot_container_name, fil
 	Returns:
 		InlineKeyboardMarkup: Keyboard with projects and standalone containers
 	"""
+	host_id = host_id or host_registry.local_host_id()
+	owner = manager(host_id)
 	markup = InlineKeyboardMarkup(row_width=button_columns())
 
 	# Separate containers into projects and standalone
@@ -3922,7 +3936,7 @@ def build_hierarchical_keyboard(containers, action_type, bot_container_name, fil
 	for project_name in sorted(project_containers.keys()):
 		# Apply project filter if specified (hide projects where ALL containers have the specified statuses)
 		if filter_projects_with_all_status:
-			project_info = docker_manager.get_project_info(project_name)
+			project_info = owner.get_project_info(project_name)
 			if project_info:
 				all_containers = project_info.containers
 				# Check if ALL containers in the project have one of the filtered statuses
@@ -3930,7 +3944,7 @@ def build_hierarchical_keyboard(containers, action_type, bot_container_name, fil
 					continue  # Skip this project
 
 		# Get container count (filtered by status if applicable)
-		project_info = docker_manager.get_project_info(project_name)
+		project_info = owner.get_project_info(project_name)
 		if project_info:
 			if filter_standalone_status:
 				# Count only containers matching the filter
@@ -3943,7 +3957,7 @@ def build_hierarchical_keyboard(containers, action_type, bot_container_name, fil
 		botones.append(
 			InlineKeyboardButton(
 				f"📦 {project_name} ({container_count})",
-				callback_data=f"enter{action_type}Project|{register_project_hash(project_name)}"
+				callback_data=f"enter{action_type}Project|{register_project_hash(project_name, host_id)}"
 			)
 		)
 
@@ -3987,7 +4001,7 @@ def build_hierarchical_keyboard(containers, action_type, bot_container_name, fil
 		botones.append(
 			InlineKeyboardButton(
 				f"{status_emoji} {container.name}",
-				callback_data=f"{callback_action}|{container.id[:CONTAINER_ID_LENGTH]}"
+				callback_data=f"{callback_action}|{container_ref(host_id, container)}"
 			)
 		)
 
@@ -3999,6 +4013,206 @@ def build_hierarchical_keyboard(containers, action_type, bot_container_name, fil
 
 	return markup, standalone_containers
 
+# Every action that offers a level-1 container picker, and the parameters it
+# uses. Kept here rather than in each command so that repainting a host picker
+# can look them up instead of carrying them in callback_data.
+PICKER_ACTIONS = {
+	"Run": {
+		"prompt_key": "start_a_container",
+		"empty_key": "no_containers_to_start",
+		"comando": "",
+		"bot_container_name": CONTAINER_NAME,
+		"filter_standalone_status": ["exited", "stopped", "paused", "created"],
+		"filter_projects_with_all_status": ["running", "restarting"],
+		"multi_action": "Run",
+	},
+	"Stop": {
+		"prompt_key": "stop_a_container",
+		"empty_key": "no_containers_to_stop",
+		"bot_container_name": CONTAINER_NAME,
+		"filter_standalone_status": ["running", "restarting"],
+		"filter_projects_with_all_status": ["exited", "stopped", "paused", "created"],
+		"multi_action": "Stop",
+	},
+	"Restart": {
+		"prompt_key": "restart_a_container",
+		"empty_key": "no_containers_to_restart",
+		"bot_container_name": CONTAINER_NAME,
+		"multi_action": "Restart",
+	},
+	"Delete": {
+		"prompt_key": "delete_container",
+		"empty_key": "no_containers_to_delete",
+		"bot_container_name": CONTAINER_NAME,
+	},
+	"Logs": {"prompt_key": "logs_command_container", "empty_key": "no_containers_for_logs"},
+	"Logfile": {"prompt_key": "show_logsfile", "empty_key": "no_containers_for_logs"},
+	"Info": {"prompt_key": "info_command_container", "empty_key": "no_containers_for_info"},
+	"Compose": {"prompt_key": "show_compose", "empty_key": "error_no_containers_available"},
+	"CheckUpdate": {
+		"prompt_key": "checkupdate_command_container",
+		"empty_key": "no_containers_for_checkupdate",
+	},
+	"ChangeTag": {
+		"prompt_key": "change_tag_container",
+		"empty_key": "error_no_containers_available",
+	},
+	"Exec": {
+		"prompt_key": "exec_command_container",
+		"empty_key": "no_containers_for_exec",
+		"filter_standalone_status": ["running", "restarting"],
+		"filter_projects_with_all_status": ["exited", "paused", "dead", "created"],
+	},
+}
+
+
+def send_picker(action_type):
+	"""Sends the level-1 picker for one of PICKER_ACTIONS."""
+	spec = PICKER_ACTIONS[action_type]
+	return send_container_picker(
+		action_type,
+		spec["prompt_key"],
+		spec["empty_key"],
+		comando=spec.get("comando", ""),
+		bot_container_name=spec.get("bot_container_name"),
+		filter_standalone_status=spec.get("filter_standalone_status"),
+		filter_projects_with_all_status=spec.get("filter_projects_with_all_status"),
+		multi_action=spec.get("multi_action"))
+
+
+def _picker_has_anything(containers, bot_container_name, filter_standalone_status,
+						filter_projects_with_all_status, owner):
+	"""
+	Whether an action has anything to offer on one host.
+
+	Mirrors the filtering the keyboard applies, so a host button never leads to
+	an empty list.
+	"""
+	for container in containers:
+		if bot_container_name and container.name == bot_container_name:
+			continue
+		project_name = (container.labels or {}).get("com.docker.compose.project")
+		if project_name:
+			if not filter_projects_with_all_status:
+				return True
+			info = owner.get_project_info(project_name)
+			if not info or not info.containers:
+				return True
+			if not all(c.status in filter_projects_with_all_status for c in info.containers):
+				return True
+			continue
+		if not filter_standalone_status or container.status in filter_standalone_status:
+			return True
+	return False
+
+
+def send_container_picker(action_type, prompt_key, empty_key, comando="",
+						bot_container_name=None, filter_standalone_status=None,
+						filter_projects_with_all_status=None, multi_action=None):
+	"""
+	Sends the level-1 picker for an action and remembers what it offered.
+
+	Every reachable host is consulted. The host level only appears when more
+	than one of them has something to offer: a host button leading to a single
+	container is a tap that disambiguates nothing, and with one host the menu
+	has to look exactly as it always did.
+
+	Returns the sent message, or None when nothing was offered.
+	"""
+	sections = []
+	for entry, owner, containers in hosts_with_containers(comando):
+		if _picker_has_anything(containers, bot_container_name, filter_standalone_status,
+								filter_projects_with_all_status, owner):
+			sections.append((entry, owner, containers))
+
+	if not sections:
+		send_message(message=get_text(empty_key))
+		return None
+
+	if len(sections) == 1:
+		entry, _, containers = sections[0]
+		return _send_picker_for_host(
+			entry, containers, action_type, prompt_key, bot_container_name,
+			filter_standalone_status, filter_projects_with_all_status, multi_action,
+			name_host=not host_registry.is_single_host())
+
+	# More than one host has something: offer the hosts first.
+	markup = InlineKeyboardMarkup(row_width=1)
+	for entry, _, containers in sections:
+		markup.add(InlineKeyboardButton(
+			f'🖥️ {entry.get("alias", entry["id"])}',
+			callback_data=f'pickHost|{action_type}|{entry["id"]}'))
+	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+
+	sent = send_message(message=get_text("pick_a_host", get_text(prompt_key)), reply_markup=markup)
+	if sent and multi_action:
+		save_multi_action(sent.chat.id, sent.message_id, multi_action)
+	return sent
+
+
+def _send_picker_for_host(entry, containers, action_type, prompt_key, bot_container_name,
+						filter_standalone_status, filter_projects_with_all_status,
+						multi_action, name_host=False):
+	"""Sends one host's level-1 keyboard, naming the host when it is not the only one."""
+	markup, standalone = build_hierarchical_keyboard(
+		containers, action_type, bot_container_name,
+		filter_standalone_status=filter_standalone_status,
+		filter_projects_with_all_status=filter_projects_with_all_status,
+		host_id=entry["id"])
+
+	prompt = get_text(prompt_key)
+	if name_host:
+		prompt = f'{get_text("list_host_header", entry.get("alias", entry["id"]))}\n{prompt}'
+
+	sent = send_message(message=prompt, reply_markup=markup)
+	if sent and standalone:
+		save_container_cache(sent.chat.id, sent.message_id, standalone, entry["id"])
+	if sent and multi_action and store.get("bot.multi_selection"):
+		save_multi_action(sent.chat.id, sent.message_id, multi_action)
+	return sent
+
+
+def render_picker_for_host(chat_id, message_id, action_type, host_id):
+	"""
+	Repaints a host picker as that host's container list.
+
+	The parameters of the original action are looked up rather than carried in
+	the callback: they are fixed per action, and putting them in callback_data
+	would spend bytes on something already known.
+	"""
+	spec = PICKER_ACTIONS.get(action_type)
+	if spec is None:
+		warning(f"Unknown picker action: {action_type}")
+		return
+	try:
+		owner = manager(host_id)
+		containers = owner.list_containers(comando=spec.get("comando", ""))
+	except host_registry.HostUnavailable as e:
+		edit_message_text(get_text("host_unreachable", host_registry.alias(host_id), e.reason),
+						chat_id, message_id)
+		return
+	except Exception as e:
+		# A daemon can build a client and then fail the very next call. Left
+		# uncaught this surfaced as a generic "error processing request",
+		# which says nothing about the machine being unreachable.
+		host_registry.drop(host_id)
+		forget_managers()
+		edit_message_text(get_text("host_unreachable", host_registry.alias(host_id), str(e)),
+						chat_id, message_id)
+		return
+
+	markup, standalone = build_hierarchical_keyboard(
+		containers, action_type, spec.get("bot_container_name"),
+		filter_standalone_status=spec.get("filter_standalone_status"),
+		filter_projects_with_all_status=spec.get("filter_projects_with_all_status"),
+		host_id=host_id)
+
+	if standalone:
+		save_container_cache(chat_id, message_id, standalone, host_id)
+	prompt = f'{get_text("list_host_header", host_registry.alias(host_id))}\n{get_text(spec["prompt_key"])}'
+	edit_message_text(prompt, chat_id, message_id, reply_markup=markup)
+
+
 # Status filters applied inside a Compose project (Level 2). They mirror the
 # Level 1 filters so the count on the project button and the list you get after
 # entering it always agree: /run only offers stopped services, /stop only
@@ -4009,7 +4223,7 @@ PROJECT_LEVEL2_STATUS_FILTERS = {
 	'exec': ['running', 'restarting'],
 }
 
-def build_project_level2_menu(action_type, project_name, chatId, messageId, marked_names=None):
+def build_project_level2_menu(action_type, project_name, chatId, messageId, marked_names=None, host_id=None):
 	"""
 	Builds the Level 2 menu for a Compose project and refreshes the container
 	name cache attached to the message.
@@ -4024,7 +4238,12 @@ def build_project_level2_menu(action_type, project_name, chatId, messageId, mark
 	Returns:
 		tuple: (markup, text) or None if the project does not exist
 	"""
-	project_info = docker_manager.get_project_info(project_name)
+	host_id = host_id or host_registry.local_host_id()
+	try:
+		project_info = manager(host_id).get_project_info(project_name)
+	except host_registry.HostUnavailable as e:
+		debug(f"Cannot reach {host_id} for project {project_name}: {e.reason}")
+		return None
 
 	if not project_info:
 		return None
@@ -4047,15 +4266,16 @@ def build_project_level2_menu(action_type, project_name, chatId, messageId, mark
 		action_type.lower(),
 		f'backTo{action_type}Level1',  # Use action_type as-is (already has correct capitalization)
 		filter_status=PROJECT_LEVEL2_STATUS_FILTERS.get(action_type.lower()),
-		marked_names=marked_names
+		marked_names=marked_names,
+		host_id=host_id
 	)
 
 	# Save container cache
-	save_container_cache(chatId, messageId, project_info.containers)
+	save_container_cache(chatId, messageId, project_info.containers, host_id)
 
 	return markup, get_text(message_key, project_name)
 
-def handle_enter_project_level2(action_type, project_name, chatId, messageId, marked_names=None):
+def handle_enter_project_level2(action_type, project_name, chatId, messageId, marked_names=None, host_id=None):
 	"""
 	Generic function to handle "enter...Project" callbacks (Level 2).
 
@@ -4069,7 +4289,7 @@ def handle_enter_project_level2(action_type, project_name, chatId, messageId, ma
 	Returns:
 		None (sends message directly)
 	"""
-	menu = build_project_level2_menu(action_type, project_name, chatId, messageId, marked_names)
+	menu = build_project_level2_menu(action_type, project_name, chatId, messageId, marked_names, host_id)
 
 	if not menu:
 		send_message(message=get_text("error_project_not_found", project_name))
@@ -4300,7 +4520,7 @@ def build_back_to_level1_keyboard(action_type, chatId, messageId, bot_container_
 
 	return markup, config['message_key']
 
-def build_compose_project_level2_keyboard(project_info, project_name, action_type, back_callback, filter_status=None, marked_names=None):
+def build_compose_project_level2_keyboard(project_info, project_name, action_type, back_callback, filter_status=None, marked_names=None, host_id=None):
 	"""
 	Generic function to build Level 2 keyboard for Compose projects.
 
@@ -4334,6 +4554,7 @@ def build_compose_project_level2_keyboard(project_info, project_name, action_typ
 		'ports': {'icon': '🔌', 'button_key': None, 'whole_callback': None, 'use_emoji': True}
 	}
 
+	host_id = host_id or host_registry.local_host_id()
 	config = action_config.get(action_type.lower(), {})
 
 	# Add individual container buttons (sorted by status and service name)
@@ -4373,7 +4594,7 @@ def build_compose_project_level2_keyboard(project_info, project_name, action_typ
 		botones.append(
 			InlineKeyboardButton(
 				f"{status_indicator} {container.name}",
-				callback_data=f"{callback_action}|{container.id[:CONTAINER_ID_LENGTH]}"
+				callback_data=f"{callback_action}|{container_ref(host_id, container)}"
 			)
 		)
 
@@ -4388,14 +4609,14 @@ def build_compose_project_level2_keyboard(project_info, project_name, action_typ
 		bottom_buttons.append(
 			InlineKeyboardButton(
 				get_text("button_view_project_info"),
-				callback_data=f"showProjectInfo|{register_project_hash(project_name)}"
+				callback_data=f"showProjectInfo|{register_project_hash(project_name, host_id)}"
 			)
 		)
 	elif config.get('whole_callback'):
 		bottom_buttons.append(
 			InlineKeyboardButton(
 				f"{config['icon']} {get_text(config['button_key'])}",
-				callback_data=f"{config['whole_callback']}|{register_project_hash(project_name)}"
+				callback_data=f"{config['whole_callback']}|{register_project_hash(project_name, host_id)}"
 			)
 		)
 
@@ -5152,22 +5373,22 @@ def load_port_check_request_state(user_id):
 def clear_port_check_request_state(user_id):
 	_clear_cache("pending_port_check", user_id)
 
-def save_container_cache(chat_id, message_id, containers):
+def save_container_cache(chat_id, message_id, containers, host_id=None):
 	"""
-	Guarda mapeo de container_id -> container_name para un mensaje con TTL de 7 días
+	Remembers which container each button on a message refers to, for 7 days.
 
-	Args:
-		chat_id: ID del chat
-		message_id: ID del mensaje
-		containers: Lista de objetos container
+	Keyed by reference rather than by short id: the same five characters can
+	name a different container on another host, so a bare id would let a
+	button resolve to the wrong machine's container.
 	"""
+	host_id = host_id or host_registry.local_host_id()
 	from datetime import datetime
 	cache_data = {
 		"_timestamp": datetime.now().isoformat(),
 		"containers": {}
 	}
 	for container in containers:
-		cache_data["containers"][container.id[:CONTAINER_ID_LENGTH]] = container.name
+		cache_data["containers"][container_ref(host_id, container)] = container.name
 
 	write_cache_item(f"containers_{chat_id}_{message_id}", cache_data)
 
@@ -5199,7 +5420,12 @@ def load_container_name(chat_id, message_id, container_id):
 		except:
 			pass
 
-	return cache_data.get("containers", {}).get(container_id)
+	names = cache_data.get("containers", {})
+	if container_id in names:
+		return names[container_id]
+	# Entries written before hosts existed are keyed by bare short id, and a
+	# button from one of those messages still has to resolve.
+	return names.get(ref_id(container_id))
 
 def clear_container_cache(chat_id, message_id):
 	"""Clears the container cache for a message"""
@@ -5255,22 +5481,39 @@ def clear_multi_action(chat_id, message_id):
 	"""Clears the multi-action session for a message"""
 	delete_cache_item(f"multi_action_{chat_id}_{message_id}")
 
-def get_container_name_by_id(container_id):
+def get_container_name_by_id(container_ref_or_id):
 	"""
-	Returns the name of a container by its ID from the Docker API
+	The name of a container, asked of the host its reference points at.
 
-	Args:
-		container_id: Container ID
+	Returns None when the host cannot be reached or the container is gone,
+	which the caller reports as "does not exist" either way.
+	"""
+	_, container = find_container(container_ref_or_id)
+	return container.name if container is not None else None
 
-	Returns:
-		str: Container name or None if it doesn't exist
+
+def find_container_id_on_host(host_id, container_name):
+	"""
+	The short id of a container by name, on one host only.
+
+	Deliberately not a search across hosts: this resolves the id of a button
+	whose container was recreated, and the button already says which machine
+	it meant. Searching everywhere could land the action on a container of the
+	same name on a different host, which is the one mistake in all of this
+	that would be both silent and destructive.
 	"""
 	try:
-		container = docker_manager.client.containers.get(container_id)
-		return container.name
-	except Exception as e:
-		debug(f"Container {container_id} not found: {e}")
+		owner = manager(host_id)
+	except host_registry.HostUnavailable as e:
+		debug(f"Cannot reach host {host_id} to look up {container_name}: {e.reason}")
 		return None
+	try:
+		for container in owner.list_containers():
+			if container.name == container_name:
+				return container.id[:CONTAINER_ID_LENGTH]
+	except Exception as e:
+		debug(f"Could not list containers on {host_id}: {e}")
+	return None
 
 def get_container_name(chat_id, message_id, container_id):
 	"""
@@ -5301,24 +5544,48 @@ PROJECT_HASH_CACHE_KEY = "project_hash_map"
 PROJECT_HASH_LENGTH = 8
 _project_hash_lock = threading.Lock()  # Atomic read-modify-write for the mapping
 
-def register_project_hash(project_name):
-	"""Return a short hash for project_name, persisting the mapping in cache."""
+def register_project_hash(project_name, host_id=None):
+	"""
+	Returns a short hash standing for a project on a host, remembering the
+	mapping.
+
+	The host goes into the hash, not just into the stored value: two machines
+	can run a project of the same name, and hashing only the name would give
+	both the same button.
+	"""
 	if not project_name:
 		return project_name
-	h = short_hash(project_name, PROJECT_HASH_LENGTH)
+	host_id = host_id or host_registry.local_host_id()
+	h = short_hash(f"{host_id}{CONTAINER_REF_SEPARATOR}{project_name}", PROJECT_HASH_LENGTH)
+	entry = {"host": host_id, "name": project_name}
 	with _project_hash_lock:
 		mapping = read_cache_item(PROJECT_HASH_CACHE_KEY) or {}
-		if mapping.get(h) != project_name:
-			mapping[h] = project_name
+		if mapping.get(h) != entry:
+			mapping[h] = entry
 			write_cache_item(PROJECT_HASH_CACHE_KEY, mapping)
 	return h
 
-def resolve_project_name(value):
-	"""Resolve a hash back to a project name, or None if unknown."""
+def resolve_project_hash(value):
+	"""
+	Resolves a hash back to (host_id, project_name), or (None, None).
+
+	Entries written before hosts existed are bare strings, and mean the local
+	host: a button from an older message still has to work.
+	"""
 	if not value:
-		return None
+		return None, None
 	mapping = read_cache_item(PROJECT_HASH_CACHE_KEY) or {}
-	return mapping.get(value)
+	entry = mapping.get(value)
+	if entry is None:
+		return None, None
+	if isinstance(entry, str):
+		return host_registry.local_host_id(), entry
+	return entry.get("host") or host_registry.local_host_id(), entry.get("name")
+
+def resolve_project_name(value):
+	"""Just the project name for a hash, or None. Kept for callers that have
+	the host from somewhere else."""
+	return resolve_project_hash(value)[1]
 
 def generate_docker_compose(container):
 	"""

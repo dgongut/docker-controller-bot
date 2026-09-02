@@ -389,5 +389,7 @@
   "button_host_remove_confirm": "🗑️ - Yes, remove it",
   "list_host_header": "🖥️ <b>$1</b>",
   "list_host_empty": "<i>No containers</i>",
-  "list_host_unreachable": "🔴 <b>$1</b> is not answering\n<i>$2</i>"
+  "list_host_unreachable": "🔴 <b>$1</b> is not answering\n<i>$2</i>",
+  "host_unreachable": "🔴 <b>$1</b> is not answering\n<i>$2</i>",
+  "pick_a_host": "$1\n\n<i>On which host?</i>"
 }

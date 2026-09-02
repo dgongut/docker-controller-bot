@@ -51,6 +51,9 @@ class Context:
 
 	__slots__ = (
 		"call", "comando", "messageId", "chatId", "userId",
+		# Which Docker host this press is about, resolved by the dispatcher
+		# from the container reference or the project hash the button carries.
+		"hostId",
 		"containerId", "containerName", "tag", "action", "containerIdx",
 		"originalMessageId", "commandId", "scheduleHash", "field",
 		"scheduleId", "value", "pruneType", "multiAction",

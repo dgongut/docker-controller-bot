@@ -389,5 +389,7 @@
   "button_host_remove_confirm": "🗑️ - Sí, quitarlo",
   "list_host_header": "🖥️ <b>$1</b>",
   "list_host_empty": "<i>Sin contenedores</i>",
-  "list_host_unreachable": "🔴 <b>$1</b> no responde\n<i>$2</i>"
+  "list_host_unreachable": "🔴 <b>$1</b> no responde\n<i>$2</i>",
+  "host_unreachable": "🔴 <b>$1</b> no responde\n<i>$2</i>",
+  "pick_a_host": "$1\n\n<i>¿En qué host?</i>"
 }

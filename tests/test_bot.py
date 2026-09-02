@@ -540,6 +540,154 @@ def test_update_state_is_read_from_the_right_host():
 
 
 # ---------------------------------------------------------------------------
+# The container pickers
+# ---------------------------------------------------------------------------
+
+def _capture_picker(action_type):
+	"""Runs a picker with sending stubbed, returning (text, markup)."""
+	captured = {}
+
+	class Sent:
+		chat = type("Chat", (), {"id": 1})()
+		message_id = 2
+
+	original = (dcb.send_message, dcb.save_container_cache, dcb.save_multi_action)
+	dcb.send_message = lambda **kwargs: (captured.update(kwargs), Sent())[1]
+	dcb.save_container_cache = lambda *a, **k: None
+	dcb.save_multi_action = lambda *a, **k: None
+	try:
+		dcb.send_picker(action_type)
+	finally:
+		dcb.send_message, dcb.save_container_cache, dcb.save_multi_action = original
+	return captured.get("message", ""), captured.get("reply_markup")
+
+
+def test_a_picker_offers_containers_from_every_host():
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	fake = {
+		"h_local": [_container("nginx", "running")],
+		"h_nas": [_container("plex", "running")],
+	}
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": fake[self.host_id]
+	try:
+		text, markup = _capture_picker("Stop")
+		callbacks = harness.keyboard_callbacks(markup)
+		assert "pickHost|Stop|h_local" in callbacks, callbacks
+		assert "pickHost|Stop|h_nas" in callbacks, callbacks
+	finally:
+		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
+def test_no_host_level_when_only_one_host_can_offer_anything():
+	"""
+	A host button leading to a single container is a tap that disambiguates
+	nothing. /run with one stopped container on one machine should go straight
+	to it.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	fake = {
+		"h_local": [_container("nginx", "running")],       # nada que arrancar
+		"h_nas": [_container("plex", "exited")],           # el único candidato
+	}
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": fake[self.host_id]
+	try:
+		text, markup = _capture_picker("Run")
+		callbacks = harness.keyboard_callbacks(markup)
+		assert not any(c.startswith("pickHost") for c in callbacks), callbacks
+		assert any(c == "run|h_nas:" + dcb.ref_id(c) for c in callbacks if c.startswith("run|")), callbacks
+		# Con varios hosts configurados, el prompt dice de cuál se trata.
+		assert "nas" in text, text
+	finally:
+		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
+def test_a_single_host_picker_names_no_host():
+	"""The golden rule again: one host means the menu reads as it always did."""
+	_with_hosts([HOST_FIXTURE[0]], unreachable=())
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": [_container("plex", "exited")]
+	try:
+		text, markup = _capture_picker("Run")
+		assert "🖥️" not in text, text
+		assert not any(c.startswith("pickHost") for c in harness.keyboard_callbacks(markup))
+	finally:
+		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
+def test_a_picker_with_nothing_anywhere_says_so():
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": [_container("nginx", "running")]
+	try:
+		text, markup = _capture_picker("Run")   # nada parado en ningún host
+		assert markup is None, "no debe haber teclado si no hay nada que ofrecer"
+		assert text, "y sí un mensaje explicándolo"
+	finally:
+		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
+def test_container_buttons_carry_their_host():
+	"""
+	The whole point: a button has to say which machine it means, or five hex
+	characters could match a container on the wrong one.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": (
+		[_container("plex", "exited")] if self.host_id == "h_nas" else [])
+	try:
+		_, markup = _capture_picker("Run")
+		for data in harness.keyboard_callbacks(markup):
+			if data == "cerrar":
+				continue
+			assert data.startswith("run|h_nas:"), data
+			assert len(data.encode()) <= 64
+	finally:
+		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
+def test_every_picker_action_has_its_texts():
+	"""A missing key would show the raw key name to the user."""
+	for action, spec in dcb.PICKER_ACTIONS.items():
+		for locale in ("es", "en"):
+			keys = i18n.load_locale(locale)
+			assert spec["prompt_key"] in keys, (action, spec["prompt_key"], locale)
+			assert spec["empty_key"] in keys, (action, spec["empty_key"], locale)
+
+
+def test_repainting_a_host_picker_reports_an_unreachable_host():
+	_with_hosts(HOST_FIXTURE)  # nas caído
+	captured = {}
+	original = dcb.edit_message_text
+	dcb.edit_message_text = lambda text, chat, message, **kw: captured.update(text=text)
+	try:
+		dcb.render_picker_for_host(1, 2, "Stop", "h_nas")
+		assert "nas" in captured.get("text", ""), captured
+		assert "🔴" in captured.get("text", ""), captured
+	finally:
+		dcb.edit_message_text = original
+		_restore_hosts()
+
+
+def test_an_unknown_picker_action_is_ignored():
+	captured = {}
+	original = dcb.edit_message_text
+	dcb.edit_message_text = lambda *a, **kw: captured.update(called=True)
+	try:
+		dcb.render_picker_for_host(1, 2, "NoExiste", "h_local")
+		assert not captured, "no debe repintar nada"
+	finally:
+		dcb.edit_message_text = original
+
+
+# ---------------------------------------------------------------------------
 # Managing hosts
 # ---------------------------------------------------------------------------
 

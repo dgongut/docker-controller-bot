@@ -22,6 +22,7 @@ from telebot.types import InlineKeyboardMarkup
 from config import CONTAINER_ID_LENGTH, CONTAINER_NAME, ICON_CONTAINER_MARK_FOR_UPDATE
 from i18n import get_text
 from core import (
+	send_picker, manager_for, ref_id,
 	register_command,
 	VERSION, ask_command, ask_text_input,
 	build_hierarchical_keyboard, button_columns, change_tag_container,
@@ -51,146 +52,38 @@ def cmd_list(user_id=None, chat_id=None, container_id=None, container_name=None,
 def cmd_run(user_id=None, chat_id=None, container_id=None, container_name=None, argument=None):
 	if container_id:
 		run(container_id, container_name)
-	else:
-		# Get ALL containers to show projects with all containers, but filter standalone to only stopped
-		containers = docker_manager.list_containers()
-		if not containers or all(c.name == CONTAINER_NAME for c in containers):
-			send_message(message=get_text("no_containers_to_start"))
-			return
-
-		# Use hierarchical keyboard with filters:
-		# - Standalone: only stopped/paused/exited/created
-		# - Projects: hide if ALL containers are running/restarting
-		markup, standalone_containers = build_hierarchical_keyboard(
-			containers, "Run", CONTAINER_NAME,
-			filter_standalone_status=['exited', 'stopped', 'paused', 'created'],
-			filter_projects_with_all_status=['running', 'restarting']
-		)
-		sent_message = send_message(message=get_text("start_a_container"), reply_markup=markup)
-		# Save container cache for standalone containers
-		if sent_message and standalone_containers:
-			save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
-		# Keep this menu open so several containers can be picked in a row
-		if sent_message and store.get("bot.multi_selection"):
-			save_multi_action(sent_message.chat.id, sent_message.message_id, "Run")
+		return
+	send_picker("Run")
 
 def cmd_stop(user_id=None, chat_id=None, container_id=None, container_name=None, argument=None):
 	if container_id:
 		stop(container_id, container_name)
-	else:
-		# Get ALL containers to show projects with all containers, but filter standalone to only running
-		containers = docker_manager.list_containers()
-		if not containers or all(c.name == CONTAINER_NAME for c in containers):
-			send_message(message=get_text("no_containers_to_stop"))
-			return
-
-		# Use hierarchical keyboard with filters:
-		# - Standalone: only running/restarting
-		# - Projects: hide if ALL containers are stopped/paused/exited/created
-		markup, standalone_containers = build_hierarchical_keyboard(
-			containers, "Stop", CONTAINER_NAME,
-			filter_standalone_status=['running', 'restarting'],
-			filter_projects_with_all_status=['exited', 'stopped', 'paused', 'created']
-		)
-		sent_message = send_message(message=get_text("stop_a_container"), reply_markup=markup)
-		# Save container cache for standalone containers
-		if sent_message and standalone_containers:
-			save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
-		# Keep this menu open so several containers can be picked in a row
-		if sent_message and store.get("bot.multi_selection"):
-			save_multi_action(sent_message.chat.id, sent_message.message_id, "Stop")
+		return
+	send_picker("Stop")
 
 def cmd_restart(user_id=None, chat_id=None, container_id=None, container_name=None, argument=None):
 	if container_id:
 		restart(container_id, container_name)
-	else:
-		# Get ALL containers (not just running) to show with status indicators
-		containers = docker_manager.list_containers()
-		if not containers or all(c.name == CONTAINER_NAME for c in containers):
-			send_message(message=get_text("no_containers_to_restart"))
-			return
-
-		# Use hierarchical keyboard (Level 1: projects + standalone containers)
-		markup, standalone_containers = build_hierarchical_keyboard(containers, "Restart", CONTAINER_NAME)
-		sent_message = send_message(message=get_text("restart_a_container"), reply_markup=markup)
-		# Save container cache for standalone containers
-		if sent_message and standalone_containers:
-			save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
-		# Keep this menu open so several containers can be picked in a row
-		if sent_message and store.get("bot.multi_selection"):
-			save_multi_action(sent_message.chat.id, sent_message.message_id, "Restart")
+		return
+	send_picker("Restart")
 
 def cmd_logs(user_id=None, chat_id=None, container_id=None, container_name=None, argument=None):
 	if container_id:
 		logs(container_id, container_name)
-	else:
-		# Get ALL containers to show projects and standalone
-		containers = docker_manager.list_containers()
-		if not containers:
-			send_message(message=get_text("no_containers_for_logs"))
-			return
-
-		# Use hierarchical keyboard (Level 1: projects + standalone containers)
-		# No project-level action for logs (can't get logs from whole project)
-		# Filter: show all containers (you can see logs from any container)
-		# Don't exclude bot container for logs (we want to see bot logs too)
-		markup, standalone_containers = build_hierarchical_keyboard(
-			containers,
-			"Logs",
-			None  # Don't exclude any container
-		)
-		sent_message = send_message(message=get_text("logs_command_container"), reply_markup=markup)
-		# Save container cache for standalone containers
-		if sent_message and standalone_containers:
-			save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
+		return
+	send_picker("Logs")
 
 def cmd_logfile(user_id=None, chat_id=None, container_id=None, container_name=None, argument=None):
 	if container_id:
 		log_file(container_id, container_name)
-	else:
-		# Get ALL containers to show projects and standalone
-		containers = docker_manager.list_containers()
-		if not containers:
-			send_message(message=get_text("no_containers_for_logs"))
-			return
-
-		# Use hierarchical keyboard (Level 1: projects + standalone containers)
-		# No project-level action for logfile (can't get logfile from whole project)
-		# Filter: show all containers (you can get logfile from any container)
-		# Don't exclude bot container for logfile (we want to see bot logfile too)
-		markup, standalone_containers = build_hierarchical_keyboard(
-			containers,
-			"Logfile",
-			None  # Don't exclude any container
-		)
-		sent_message = send_message(message=get_text("show_logsfile"), reply_markup=markup)
-		# Save container cache for standalone containers
-		if sent_message and standalone_containers:
-			save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
+		return
+	send_picker("Logfile")
 
 def cmd_compose(user_id=None, chat_id=None, container_id=None, container_name=None, argument=None):
 	if container_id:
 		compose(container_id, container_name)
-	else:
-		# Get ALL containers to show projects and standalone
-		containers = docker_manager.list_containers()
-		if not containers:
-			send_message(message=get_text("error_no_containers_available"))
-			return
-
-		# Use hierarchical keyboard (Level 1: projects + standalone containers)
-		# No project-level action for compose (can't get compose file from whole project)
-		# Filter: show all containers (you can get compose file from any container)
-		# Don't exclude bot container for compose (we want to see bot compose too)
-		markup, standalone_containers = build_hierarchical_keyboard(
-			containers,
-			"Compose",
-			None  # Don't exclude any container
-		)
-		sent_message = send_message(message=get_text("show_compose"), reply_markup=markup)
-		# Save container cache for standalone containers
-		if sent_message and standalone_containers:
-			save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
+		return
+	send_picker("Compose")
 
 def cmd_schedule(user_id=None, chat_id=None, container_id=None, container_name=None, argument=None):
 	show_schedule_menu(user_id, chat_id)
@@ -201,93 +94,26 @@ def cmd_settings(user_id=None, chat_id=None, container_id=None, container_name=N
 def cmd_info(user_id=None, chat_id=None, container_id=None, container_name=None, argument=None):
 	if container_id:
 		info(container_id, container_name)
-	else:
-		# Get ALL containers to show projects and standalone
-		containers = docker_manager.list_containers()
-		if not containers:
-			send_message(message=get_text("no_containers_for_info"))
-			return
-
-		# Use hierarchical keyboard (Level 1: projects + standalone containers)
-		# No project-level action for info (can't get info from whole project)
-		# Filter: show all containers (you can see info from any container)
-		# Don't exclude bot container (we want to see bot info too)
-		markup, standalone_containers = build_hierarchical_keyboard(
-			containers,
-			"Info",
-			None  # Don't exclude any container
-		)
-		sent_message = send_message(message=get_text("info_command_container"), reply_markup=markup)
-		# Save container cache for standalone containers
-		if sent_message and standalone_containers:
-			save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
+		return
+	send_picker("Info")
 
 def cmd_exec(user_id=None, chat_id=None, container_id=None, container_name=None, argument=None):
 	if container_id:
 		ask_command(user_id, container_id, container_name)
-	else:
-		# Get ALL containers to show projects and standalone
-		containers = docker_manager.list_containers()
-		if not containers:
-			send_message(message=get_text("no_containers_for_exec"))
-			return
-
-		# Use hierarchical keyboard (Level 1: projects + standalone containers)
-		# No project-level action for exec (can't exec on whole project)
-		# Filter: only show running/restarting containers and projects with at least one running container
-		# Don't exclude bot container (we want to exec into the bot too)
-		markup, standalone_containers = build_hierarchical_keyboard(
-			containers,
-			"Exec",
-			None,  # Don't exclude any container
-			filter_standalone_status=['running', 'restarting'],
-			filter_projects_with_all_status=['exited', 'paused', 'dead', 'created']
-		)
-		sent_message = send_message(message=get_text("exec_command_container"), reply_markup=markup)
-		# Save container cache for standalone containers
-		if sent_message and standalone_containers:
-			save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
+		return
+	send_picker("Exec")
 
 def cmd_delete(user_id=None, chat_id=None, container_id=None, container_name=None, argument=None):
 	if container_id:
 		confirm_delete(container_id, container_name)
-	else:
-		# Get ALL containers to show projects and standalone
-		containers = docker_manager.list_containers()
-		if not containers or all(c.name == CONTAINER_NAME for c in containers):
-			send_message(message=get_text("no_containers_to_delete"))
-			return
-
-		# Use hierarchical keyboard (Level 1: projects + standalone containers)
-		markup, standalone_containers = build_hierarchical_keyboard(containers, "Delete", CONTAINER_NAME)
-		sent_message = send_message(message=get_text("delete_container"), reply_markup=markup)
-		# Save container cache for standalone containers
-		if sent_message and standalone_containers:
-			save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
+		return
+	send_picker("Delete")
 
 def cmd_checkupdate(user_id=None, chat_id=None, container_id=None, container_name=None, argument=None):
 	if container_id:
-		docker_manager.force_check_update(container_id)
-	else:
-		# Get ALL containers to show projects and standalone
-		containers = docker_manager.list_containers()
-		if not containers:
-			send_message(message=get_text("no_containers_for_checkupdate"))
-			return
-
-		# Use hierarchical keyboard (Level 1: projects + standalone containers)
-		# No project-level action for checkupdate (can't check updates on whole project)
-		# Filter: show all containers (you can check updates on any container)
-		# Don't exclude bot container (we want to check bot updates too)
-		markup, standalone_containers = build_hierarchical_keyboard(
-			containers,
-			"CheckUpdate",
-			None  # Don't exclude any container
-		)
-		sent_message = send_message(message=get_text("checkupdate_command_container"), reply_markup=markup)
-		# Save container cache for standalone containers
-		if sent_message and standalone_containers:
-			save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
+		manager_for(container_id).force_check_update(ref_id(container_id))
+		return
+	send_picker("CheckUpdate")
 
 def cmd_updateall(user_id=None, chat_id=None, container_id=None, container_name=None, argument=None):
 	containers = docker_manager.list_containers()
@@ -321,26 +147,8 @@ def cmd_updateall(user_id=None, chat_id=None, container_id=None, container_name=
 def cmd_changetag(user_id=None, chat_id=None, container_id=None, container_name=None, argument=None):
 	if container_id:
 		change_tag_container(container_id, container_name)
-	else:
-		# Get ALL containers to show projects and standalone
-		containers = docker_manager.list_containers()
-		if not containers:
-			send_message(message=get_text("error_no_containers_available"))
-			return
-
-		# Use hierarchical keyboard (Level 1: projects + standalone containers)
-		# No project-level action for changetag (can't change tag for whole project)
-		# Filter: show all containers (you can change tag on any container)
-		# Don't exclude bot container (we want to change bot tag too)
-		markup, standalone_containers = build_hierarchical_keyboard(
-			containers,
-			"ChangeTag",
-			None  # Don't exclude any container
-		)
-		sent_message = send_message(message=get_text("change_tag_container"), reply_markup=markup)
-		# Save container cache for standalone containers
-		if sent_message and standalone_containers:
-			save_container_cache(sent_message.chat.id, sent_message.message_id, standalone_containers)
+		return
+	send_picker("ChangeTag")
 
 def cmd_prune(user_id=None, chat_id=None, container_id=None, container_name=None, argument=None):
 	markup = InlineKeyboardMarkup(row_width=button_columns())
