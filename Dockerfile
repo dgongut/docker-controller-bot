@@ -7,7 +7,7 @@ ENV TZ=UTC
 WORKDIR /app
 
 # Install dependencies and download source
-RUN apk add --no-cache python3 py3-pip tzdata curl unzip && \
+RUN apk add --no-cache python3 py3-pip tzdata curl unzip py3-paramiko openssh-client && \
     curl -fsSL https://github.com/dgongut/docker-controller-bot/archive/refs/tags/v${VERSION}.zip -o /tmp/app.zip && \
     unzip -q /tmp/app.zip -d /tmp && \
     mv /tmp/docker-controller-bot-${VERSION}/docker-controller-bot.py /app && \

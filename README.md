@@ -129,6 +129,46 @@ Los cambios hechos desde `/settings` se aplican al momento, sin reiniciar el con
 > [!NOTE]
 > Si vienes de la 4.x no tienes que hacer nada: en el primer arranque el bot importa los valores de tus variables de entorno a `settings.json` y los conserva tal cual. A partir de ahí manda `settings.json`, y esas variables ya no se leen; el log te avisa de las que puedes borrar del docker-compose.
 
+## Hosts remotos
+
+A partir de la 5.0.0 el bot puede gestionar varios hosts Docker. Se definen en los ajustes, no en variables de entorno, así que se añaden desde el propio bot sin tocar el docker-compose.
+
+Con **un solo host** —el caso normal— nada de esto aparece: el bot se ve exactamente igual que en la 4.x.
+
+### Cómo conectar con un host remoto
+
+| Forma | Qué necesita | Cuándo |
+|:---|:---|:---|
+| `ssh://usuario@maquina` | Nada en el host remoto salvo su `sshd` de siempre | **La recomendada.** Reutiliza tus claves y tu `~/.ssh/config` |
+| `tcp://maquina:2375` | Exponer el puerto del daemon | Solo dentro de una red privada (Tailscale, WireGuard, VLAN aislada) |
+| `tcp://maquina:2376` + TLS | Generar una CA y certificados, y configurar `dockerd --tlsverify` | Si quieres exponerlo sin red privada |
+
+> [!WARNING]
+> `tcp://` sin TLS **no tiene autenticación de ningún tipo**: cualquiera que alcance ese puerto controla el Docker de esa máquina por completo, con permisos equivalentes a root. No lo expongas a internet.
+
+### `ssh://`, que es la vía cómoda
+
+La conexión la abre el cliente `ssh` del sistema, no una implementación propia. Eso significa que **si `ssh nas` te funciona en tu terminal, aquí también**, con la misma configuración y depurable de la misma forma: `~/.ssh/config`, `known_hosts`, alias de host, puertos e `IdentityFile`.
+
+Para eso hay que mapear tu directorio `.ssh` al contenedor:
+
+```yaml
+volumes:
+    - /var/run/docker.sock:/var/run/docker.sock # NO CAMBIAR
+    - /ruta/para/guardar/la/configuracion:/app/config
+    - ~/.ssh:/root/.ssh:ro # Solo si vas a usar hosts ssh://
+```
+
+Tres cosas a tener en cuenta:
+
+- La clave **no puede tener passphrase**, o no habrá nadie para teclearla.
+- La máquina remota tiene que estar en `known_hosts`, o la conexión se rechazará. La forma más simple es conectarte una vez a mano desde el host antes de mapear el directorio.
+- El usuario remoto necesita permiso sobre el socket de Docker, normalmente estando en el grupo `docker`.
+
+### Las credenciales nunca se guardan en los ajustes
+
+En `settings.json` solo va la URL y, para TLS, las rutas de los certificados. Ni claves ni contraseñas: el material sensible son ficheros que tú mapeas, y así ningún mensaje de Telegram acaba llevándolo dentro.
+
 ## Anotaciones
 > [!WARNING]
 > Será necesario mapear un volumen para almacenar lo que el bot escribe en /app/config (ajustes, programaciones y caché de actualizaciones)

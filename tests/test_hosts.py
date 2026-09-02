@@ -31,6 +31,27 @@ def setup(hosts=None):
 	return store_, root
 
 
+def with_paramiko():
+	"""
+	Pretends paramiko is importable.
+
+	It ships in the image as py3-paramiko but is not normally installed on a
+	development machine, so any test that reaches the ssh path has to stand in
+	for it or it would only ever exercise the "missing dependency" branch.
+	"""
+	import types
+
+	installed = "paramiko" in sys.modules
+	if not installed:
+		sys.modules["paramiko"] = types.ModuleType("paramiko")
+	return installed
+
+
+def without_paramiko(was_installed):
+	if not was_installed:
+		sys.modules.pop("paramiko", None)
+
+
 def test_a_single_host_hides_the_host_level():
 	"""
 	The whole interface hangs off this: with one host the bot has to look
@@ -186,6 +207,50 @@ def test_ssh_without_paramiko_says_so():
 			__builtins__["__import__"] = real_import
 		else:
 			__builtins__.__import__ = real_import
+	shutil.rmtree(root, ignore_errors=True)
+
+
+def test_ssh_hands_the_connection_to_the_system_client():
+	"""
+	use_ssh_client is what makes ~/.ssh/config, known_hosts and the agent work,
+	so a host that answers `ssh nas` answers here too and is debugged the same
+	way. Only for ssh:// — passing it for a socket would be meaningless.
+	"""
+	_, root = setup([
+		{"id": "h_ssh", "alias": "nas", "url": "ssh://user@nas"},
+		{"id": "h_local", "alias": "casa", "url": host_registry.LOCAL_SOCKET_URL, "local": True},
+	])
+	import docker
+	seen = {}
+	docker.DockerClient = lambda **kwargs: seen.update(kwargs) or MagicMock()
+	host_registry.reset()
+	had = with_paramiko()
+	try:
+		host_registry.client("h_ssh")
+		assert seen.get("use_ssh_client") is True, seen
+
+		seen.clear()
+		host_registry.client("h_local")
+		assert "use_ssh_client" not in seen, seen
+	finally:
+		without_paramiko(had)
+	shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_missing_ssh_binary_is_its_own_message():
+	"""Distinct from a missing paramiko, because the fix is a different one."""
+	_, root = setup([{"id": "h_ssh", "alias": "nas", "url": "ssh://user@nas"}])
+	original = host_registry.shutil.which
+	host_registry.shutil.which = lambda name: None
+	had = with_paramiko()
+	try:
+		host_registry.client("h_ssh")
+		raise AssertionError("debería lanzar")
+	except host_registry.HostUnavailable as e:
+		assert "ssh client" in e.reason, e.reason
+	finally:
+		host_registry.shutil.which = original
+		without_paramiko(had)
 	shutil.rmtree(root, ignore_errors=True)
 
 

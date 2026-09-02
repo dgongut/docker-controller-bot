@@ -16,6 +16,7 @@ mapped into the container as a file and the settings only name the path, which
 keeps a chat message from ever carrying key material.
 """
 
+import shutil
 import threading
 
 import store
@@ -145,13 +146,25 @@ def _build_client(entry, verify=False):
 	url = entry.get("url") or LOCAL_SOCKET_URL
 	host_id = entry["id"]
 
+	kwargs = {"base_url": url, "timeout": int(entry.get("timeout") or 30)}
+
 	if url.startswith("ssh://"):
+		# The SDK imports paramiko to load its ssh transport at all, even when
+		# the connection itself is handed to the ssh binary. The image ships
+		# both; a custom build without them gets told which is missing, since a
+		# missing dependency and an unreachable machine have different fixes.
 		try:
 			import paramiko  # noqa: F401
 		except ImportError:
-			raise HostUnavailable(host_id, "ssh:// needs paramiko, which this image does not ship")
+			raise HostUnavailable(host_id, "ssh:// needs the py3-paramiko package, which this image does not have")
+		if not shutil.which("ssh"):
+			raise HostUnavailable(host_id, "ssh:// needs the ssh client, which this image does not have")
 
-	kwargs = {"base_url": url, "timeout": int(entry.get("timeout") or 30)}
+		# Hand the connection to the system ssh client rather than letting
+		# paramiko dial it. That is what makes ~/.ssh/config, known_hosts and
+		# the agent work, so a host that answers `ssh nas` answers here too and
+		# is debugged the same way.
+		kwargs["use_ssh_client"] = True
 
 	# TLS for a tcp:// host. The certificates are files mapped into the
 	# container; only their paths are ever stored.

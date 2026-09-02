@@ -129,6 +129,46 @@ Changes made from `/settings` apply immediately, without restarting the containe
 > [!NOTE]
 > Coming from 4.x there is nothing to do: on the first start the bot imports the values of your environment variables into `settings.json` and keeps them as they were. From then on `settings.json` is the only source and those variables are no longer read; the log tells you which ones you can remove from the docker-compose.
 
+## Remote hosts
+
+From 5.0.0 the bot can manage several Docker hosts. They are defined in the settings rather than in environment variables, so one is added from the bot itself without touching the docker-compose.
+
+With **a single host** — the normal case — none of this shows up: the bot looks exactly as it did in 4.x.
+
+### How to reach a remote host
+
+| Form | What it needs | When |
+|:---|:---|:---|
+| `ssh://user@machine` | Nothing on the remote host beyond the sshd it already runs | **The recommended one.** Reuses your keys and your `~/.ssh/config` |
+| `tcp://machine:2375` | Exposing the daemon's port | Only inside a private network (Tailscale, WireGuard, an isolated VLAN) |
+| `tcp://machine:2376` + TLS | Generating a CA and certificates, and configuring `dockerd --tlsverify` | If you want it exposed without a private network |
+
+> [!WARNING]
+> `tcp://` without TLS has **no authentication whatsoever**: anyone who can reach that port controls that machine's Docker completely, with root-equivalent access. Do not expose it to the internet.
+
+### `ssh://`, the comfortable way
+
+The connection is opened by the system `ssh` client, not by an implementation of our own. That means **if `ssh nas` works in your terminal, it works here**, with the same configuration and debugged the same way: `~/.ssh/config`, `known_hosts`, host aliases, ports and `IdentityFile`.
+
+That requires mapping your `.ssh` directory into the container:
+
+```yaml
+volumes:
+    - /var/run/docker.sock:/var/run/docker.sock # DON'T CHANGE
+    - /path/to/save/the/config:/app/config
+    - ~/.ssh:/root/.ssh:ro # Only if you are going to use ssh:// hosts
+```
+
+Three things to keep in mind:
+
+- The key **cannot have a passphrase**, since there would be nobody to type it.
+- The remote machine has to be in `known_hosts`, or the connection is refused. The simplest way is to connect once by hand from the host before mapping the directory.
+- The remote user needs access to the Docker socket, usually by being in the `docker` group.
+
+### Credentials are never stored in the settings
+
+`settings.json` only holds the URL and, for TLS, the paths to the certificates. No keys and no passwords: the sensitive material is files you map yourself, so nothing sensitive ever travels inside a Telegram message.
+
 ## Anotations
 > [!WARNING]
 > You need to map a volume to /app/config for persistent storage of your bot's data (settings, schedules and the update cache)
