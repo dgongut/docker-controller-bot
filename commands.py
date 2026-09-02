@@ -14,10 +14,12 @@ to import it before polling starts.
 
 import time
 
+import store
+
 from telebot.types import InlineKeyboardButton
 from telebot.types import InlineKeyboardMarkup
 
-from config import CONTAINER_ID_LENGTH, CONTAINER_NAME
+from config import CONTAINER_ID_LENGTH, CONTAINER_NAME, ICON_CONTAINER_MARK_FOR_UPDATE
 from i18n import get_text
 from core import (
 	register_command,

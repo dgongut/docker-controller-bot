@@ -9,6 +9,7 @@ guarantee that nothing is missing once polling starts.
 
 import core
 import commands  # noqa: F401  (registra los comandos al importarse)
+import callbacks  # noqa: F401  (registra los callbacks al importarse)
 
 if __name__ == "__main__":
 	core.main()

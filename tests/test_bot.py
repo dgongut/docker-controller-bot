@@ -18,9 +18,12 @@ from unittest.mock import MagicMock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import harness
 
+import i18n
+
 import callback_registry
 
 dcb, store, _root = harness.load_bot(env={"LANGUAGE": "ES", "BUTTON_COLUMNS": "3"})
+import callbacks
 import commands
 
 # What the seeding produced, captured before any test can change it: these
@@ -45,12 +48,12 @@ def test_settings_are_seeded_from_the_environment():
 
 def test_the_language_applies_without_a_restart():
 	store.set("bot.language", "EN")
-	assert dcb.get_text("check_for_updates") == dcb.load_locale("en")["check_for_updates"]
+	assert dcb.get_text("check_for_updates") == i18n.load_locale("en")["check_for_updates"]
 	store.set("bot.language", "IT")
-	assert dcb.get_text("check_for_updates") == dcb.load_locale("it")["check_for_updates"]
+	assert dcb.get_text("check_for_updates") == i18n.load_locale("it")["check_for_updates"]
 	# An unsupported value falls back rather than crashing on a missing file.
 	store.set("bot.language", "XX")
-	assert dcb.get_text("check_for_updates") == dcb.load_locale("es")["check_for_updates"]
+	assert dcb.get_text("check_for_updates") == i18n.load_locale("es")["check_for_updates"]
 	store.set("bot.language", "ES")
 
 
@@ -121,10 +124,10 @@ def test_changing_the_language_no_longer_empties_the_cache():
 	dcb.save_container_update_status("redis:7", "redis", True)
 	store.set("bot.language", "DE")
 	assert dcb.read_container_update_status("redis:7", "redis") is True
-	assert dcb.update_status_text(True) == dcb.load_locale("de")["NEED_UPDATE_CONTAINER_TEXT"]
+	assert dcb.update_status_text(True) == i18n.load_locale("de")["NEED_UPDATE_CONTAINER_TEXT"]
 	store.set("bot.language", "ES")
-	assert dcb.update_status_text(True) == dcb.load_locale("es")["NEED_UPDATE_CONTAINER_TEXT"]
-	assert dcb.update_status_text(False) == dcb.load_locale("es")["UPDATED_CONTAINER_TEXT"]
+	assert dcb.update_status_text(True) == i18n.load_locale("es")["NEED_UPDATE_CONTAINER_TEXT"]
+	assert dcb.update_status_text(False) == i18n.load_locale("es")["UPDATED_CONTAINER_TEXT"]
 	assert dcb.update_status_text(None) == ""
 
 
@@ -300,6 +303,17 @@ def test_every_language_has_a_name_of_its_own():
 	assert set(dcb.SUPPORTED_LANGUAGES) == set(dcb.LANGUAGE_NAMES)
 
 
+def test_answering_the_mute_prompt_goes_through_the_registry():
+	"""
+	The core used to call cmd_mute directly. Once the commands moved out that
+	was a NameError waiting for someone to answer the prompt, and no test
+	reached it: the static check did.
+	"""
+	assert "/mute" in dcb.COMMAND_ACTIONS
+	source = io.open(os.path.join(harness.REPO, "core.py"), encoding="utf-8").read()
+	assert "cmd_mute(" not in source, "el núcleo no debe llamar a un comando por su nombre"
+
+
 def test_mute_asks_for_its_argument_when_pressed_as_a_button():
 	asked = {}
 	# Patched on `commands`, not on `core`: the `from core import` binding is
@@ -361,7 +375,7 @@ def test_every_menu_label_exists():
 		in_menu.update([key] if kind == "command" else dcb.START_CATEGORY_COMMANDS[key])
 
 	for locale in ("es", "en"):
-		keys = dcb.load_locale(locale)
+		keys = i18n.load_locale(locale)
 		for key in ("start_title", "start_summary", "mute_ask_minutes"):
 			assert key in keys, f"{key} falta en {locale}"
 		for category in dcb.START_CATEGORY_COMMANDS:
@@ -487,8 +501,8 @@ def test_project_navigation_is_generated():
 	22 callbacks with two distinct bodies between them, each needing entries in
 	several registries. Adding an action used to mean ten edits in two files.
 	"""
-	generated = {f"enter{a}Project" for a in dcb.PROJECT_NAVIGATION_ACTIONS}
-	generated |= {f"backTo{a}Level1" for a in dcb.PROJECT_NAVIGATION_ACTIONS}
+	generated = {f"enter{a}Project" for a in callbacks.PROJECT_NAVIGATION_ACTIONS}
+	generated |= {f"backTo{a}Level1" for a in callbacks.PROJECT_NAVIGATION_ACTIONS}
 	generated.add("backToComposeLevel1")
 	assert len(generated) == 21
 

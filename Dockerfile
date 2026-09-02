@@ -13,6 +13,7 @@ RUN apk add --no-cache python3 py3-pip tzdata curl unzip && \
     mv /tmp/docker-controller-bot-${VERSION}/docker-controller-bot.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/core.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/commands.py /app && \
+    mv /tmp/docker-controller-bot-${VERSION}/callbacks.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/config.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/store.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/migration.py /app && \
