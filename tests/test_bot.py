@@ -406,6 +406,218 @@ def test_every_submenu_has_a_way_back():
 
 
 # ---------------------------------------------------------------------------
+# Managing hosts
+# ---------------------------------------------------------------------------
+
+HOST_FIXTURE = [
+	{"id": "h_local", "alias": "casa", "url": "unix:///var/run/docker.sock", "local": True},
+	{"id": "h_nas", "alias": "nas", "url": "tcp://nas:2375"},
+]
+
+
+def _with_hosts(hosts, unreachable=("nas",)):
+	"""
+	Points the registry at `hosts`, with the named ones failing to answer.
+
+	Deep-copied: store.set keeps the object it is given, so a test that renames
+	a host would otherwise mutate the shared fixture and break whichever test
+	runs next.
+	"""
+	import copy
+	import docker
+	import host_registry
+
+	hosts = copy.deepcopy(hosts)
+
+	def sdk(base_url=None, **kwargs):
+		fake = MagicMock()
+		if any(name in (base_url or "") for name in unreachable):
+			fake.ping.side_effect = Exception("no route to host")
+		return fake
+
+	docker.DockerClient = sdk
+	store.set("hosts", hosts)
+	host_registry.reset()
+	return host_registry
+
+
+def _restore_hosts():
+	import docker
+	import host_registry
+	docker.DockerClient = lambda *a, **kw: MagicMock()
+	store.set("hosts", [HOST_FIXTURE[0]])
+	host_registry.reset()
+
+
+def test_reading_what_someone_typed_when_adding_a_host():
+	"""
+	One prompt instead of two: asking for a name and then a URL is twice the
+	taps for something people paste in one go.
+	"""
+	cases = {
+		"nas ssh://dgongut@nas": ("nas", "ssh://dgongut@nas"),
+		"ssh://dgongut@nas": ("nas", "ssh://dgongut@nas"),
+		"tcp://192.168.1.50:2375": ("192.168.1.50", "tcp://192.168.1.50:2375"),
+		"mi nas de casa ssh://root@10.0.0.5": ("mi nas de casa", "ssh://root@10.0.0.5"),
+		"unix:///var/run/docker.sock": ("local", "unix:///var/run/docker.sock"),
+	}
+	for raw, expected in cases.items():
+		assert dcb.parse_host_definition(raw) == expected, raw
+
+	for junk in ("hola", "", "   ", "nas"):
+		assert dcb.parse_host_definition(junk) == (None, None), junk
+
+
+def test_the_host_list_shows_who_answers():
+	_with_hosts(HOST_FIXTURE)
+	try:
+		_, markup = dcb.build_settings_hosts()
+		labels = harness.keyboard_labels(markup)
+		assert any(l.startswith("🟢") and "casa" in l for l in labels), labels
+		assert any(l.startswith("🔴") and "nas" in l for l in labels), labels
+		assert any("Añadir" in l for l in labels), labels
+	finally:
+		_restore_hosts()
+
+
+def test_a_dead_host_shows_why():
+	"""
+	The reason is the whole point of the screen: "does not answer" without it
+	leaves nothing to act on.
+	"""
+	_with_hosts(HOST_FIXTURE)
+	try:
+		text, _ = dcb.build_settings_host("h_nas")
+		assert "no route to host" in text, text
+	finally:
+		_restore_hosts()
+
+
+def test_the_local_host_has_no_remove_button():
+	"""The bot runs on it, so offering to remove it would be a trap."""
+	_with_hosts(HOST_FIXTURE)
+	try:
+		_, markup = dcb.build_settings_host("h_local")
+		assert not any("settingsHostRemove" in c for c in harness.keyboard_callbacks(markup))
+		text, _ = dcb.build_settings_host("h_local")
+		assert "bot" in text.lower()
+
+		_, markup = dcb.build_settings_host("h_nas")
+		assert "settingsHostRemove|h_nas" in harness.keyboard_callbacks(markup)
+	finally:
+		_restore_hosts()
+
+
+def test_removing_a_host_is_confirmed_first():
+	_with_hosts(HOST_FIXTURE)
+	try:
+		text, markup = dcb.build_settings_host_remove("h_nas")
+		assert "nas" in text
+		callbacks = harness.keyboard_callbacks(markup)
+		assert "settingsHostRemoveConfirm|h_nas" in callbacks
+		# Cancelling goes back to the host, not out of the menu.
+		assert "settingsHost|h_nas" in callbacks
+	finally:
+		_restore_hosts()
+
+
+def test_an_unknown_host_screen_does_not_crash():
+	_with_hosts(HOST_FIXTURE)
+	try:
+		assert dcb.build_settings_host("h_nope") is None
+		assert dcb.build_settings_host_remove("h_nope") is None
+	finally:
+		_restore_hosts()
+
+
+def test_an_unreachable_host_is_not_saved():
+	"""
+	Rejected while the connection details are still in front of the person
+	typing them, with the reason shown.
+	"""
+	registry = _with_hosts([HOST_FIXTURE[0]])
+	sent = []
+	original = dcb.send_message
+	dcb.send_message = lambda *a, **kw: sent.append(kw.get("message", "")) 
+	try:
+		assert dcb.apply_settings_text_value("host_add", "nas tcp://nas:2375") is None
+		assert len(registry.hosts()) == 1, "no debe guardarse"
+		assert any("nas" in message for message in sent), sent
+	finally:
+		dcb.send_message = original
+		_restore_hosts()
+
+
+def test_a_reachable_host_is_saved():
+	registry = _with_hosts([HOST_FIXTURE[0]], unreachable=())
+	try:
+		assert dcb.apply_settings_text_value("host_add", "nas tcp://nas:2375") is not None
+		assert [h["alias"] for h in registry.hosts()] == ["casa", "nas"]
+		assert registry.hosts()[1]["local"] is False
+	finally:
+		_restore_hosts()
+
+
+def test_junk_is_rejected_without_saving():
+	registry = _with_hosts([HOST_FIXTURE[0]], unreachable=())
+	original = dcb.send_message
+	dcb.send_message = lambda *a, **kw: None
+	try:
+		assert dcb.apply_settings_text_value("host_add", "esto no es una url") is None
+		assert len(registry.hosts()) == 1
+	finally:
+		dcb.send_message = original
+		_restore_hosts()
+
+
+def test_renaming_a_host_from_the_menu():
+	registry = _with_hosts(HOST_FIXTURE, unreachable=())
+	original = dcb.send_message
+	dcb.send_message = lambda *a, **kw: None
+	try:
+		assert dcb.apply_settings_text_value("host_rename:h_nas", "sinologia") is not None
+		assert registry.alias("h_nas") == "sinologia"
+		# An empty name, or one for a host that is gone, changes nothing.
+		assert dcb.apply_settings_text_value("host_rename:h_nas", "   ") is None
+		assert dcb.apply_settings_text_value("host_rename:h_nope", "x") is None
+		assert registry.alias("h_nas") == "sinologia"
+	finally:
+		dcb.send_message = original
+		_restore_hosts()
+
+
+def test_checking_hosts_does_not_wait_for_them_one_by_one():
+	"""
+	A menu that pinged hosts in sequence would hang for the sum of their
+	timeouts, so opening it with a machine unplugged would look frozen.
+	"""
+	import host_registry
+	slow = [
+		{"id": f"h_{index}", "alias": f"host{index}", "url": f"tcp://slow{index}:2375"}
+		for index in range(6)
+	]
+	import docker
+
+	def sdk(base_url=None, **kwargs):
+		fake = MagicMock()
+		fake.ping.side_effect = lambda: time.sleep(2)
+		return fake
+
+	docker.DockerClient = sdk
+	store.set("hosts", slow)
+	host_registry.reset()
+	try:
+		started = time.time()
+		statuses = host_registry.status_snapshot(deadline_seconds=1)
+		elapsed = time.time() - started
+		assert elapsed < 2.5, f"tardó {elapsed:.1f}s con 6 hosts lentos"
+		assert len(statuses) == 6
+		assert all(not ok for ok, _ in statuses.values())
+	finally:
+		_restore_hosts()
+
+
+# ---------------------------------------------------------------------------
 # The callback registry
 # ---------------------------------------------------------------------------
 
@@ -421,6 +633,19 @@ def _all_keyboards():
 		harness.capture_edit(dcb, dcb.show_settings_columns, 1, 2)[1],
 	]
 	keyboards += [dcb.build_start_category(c)[1] for c in dcb.START_CATEGORY_COMMANDS]
+
+	# The host screens, with one host down so its remove path shows up too.
+	import host_registry
+	previous = store.get("hosts")
+	store.set("hosts", HOST_FIXTURE)
+	host_registry.reset()
+	keyboards.append(dcb.build_settings_hosts()[1])
+	keyboards.append(dcb.build_settings_host("h_local")[1])
+	keyboards.append(dcb.build_settings_host("h_nas")[1])
+	keyboards.append(dcb.build_settings_host_remove("h_nas")[1])
+	store.set("hosts", previous)
+	host_registry.reset()
+
 	store.set("bot.notification_channel", "")
 	return keyboards
 
@@ -442,7 +667,10 @@ def test_anything_that_repaints_in_place_keeps_its_message():
 	says otherwise. Forgetting that flag is exactly how the settings menu shipped
 	broken once: the handler ran, then edited a message that was already gone.
 	"""
+	# The ones that deliberately hand the message over to something else: a
+	# text prompt, or whatever a command opens.
 	replaces_message = {"settingsAskInterval", "settingsAskChannel", "cancelTextInput",
+						"settingsHostAdd", "settingsHostRename",
 						"cerrar", "startCommand"}
 	emitted = set()
 	for markup in _all_keyboards():

@@ -2103,6 +2103,9 @@ def build_settings():
 	markup.add(InlineKeyboardButton(
 		get_text("settings_row_channel", channel or get_text("settings_not_set")),
 		callback_data="settingsAskChannel"))
+	markup.add(InlineKeyboardButton(
+		get_text("settings_row_hosts", len(host_registry.hosts())),
+		callback_data="settingsHosts"))
 	if channel:
 		markup.add(InlineKeyboardButton(get_text("button_settings_clear_channel"), callback_data="settingsClearChannel"))
 	markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
@@ -2138,10 +2141,109 @@ def build_settings_updates():
 	text = f'{get_text("settings_updates_title")}\n\n{get_text("settings_updates_help")}'
 	return text, markup
 
+def build_settings_hosts():
+	"""
+	The list of Docker hosts, each with whether it answers right now.
+
+	Every host is checked in parallel with a deadline, so opening this with a
+	machine unplugged costs a few seconds once instead of hanging for the sum
+	of every timeout.
+	"""
+	statuses = host_registry.status_snapshot()
+	markup = InlineKeyboardMarkup(row_width=1)
+	for entry in host_registry.hosts():
+		ok, _ = statuses.get(entry["id"], (False, ""))
+		markup.add(InlineKeyboardButton(
+			f'{"🟢" if ok else "🔴"} - {entry.get("alias", entry["id"])}',
+			callback_data=f'settingsHost|{entry["id"]}'))
+	markup.add(InlineKeyboardButton(get_text("button_host_add"), callback_data="settingsHostAdd"))
+	markup.add(InlineKeyboardButton(get_text("button_back"), callback_data="settings"))
+
+	text = f'{get_text("settings_hosts_title")}\n\n{get_text("settings_hosts_help")}'
+	return text, markup
+
+
+def build_settings_host(host_id):
+	"""
+	One host: where it is, whether it answers, and what can be done to it.
+
+	A screen of its own rather than making a press act: removing a host from a
+	list is one mistap away from removing the wrong one.
+	"""
+	entry = host_registry.host(host_id)
+	if entry is None:
+		return None
+
+	ok, reason = host_registry.status_snapshot().get(host_id, (False, ""))
+	lines = [get_text("settings_host_title", entry.get("alias", host_id))]
+	lines.append(f'<code>{html.escape(entry.get("url", ""))}</code>')
+	lines.append("")
+	lines.append(get_text("settings_host_ok") if ok else get_text("settings_host_failed"))
+	if not ok and reason:
+		lines.append(f'<i>{html.escape(str(reason))}</i>')
+	if entry.get("local"):
+		lines.append("")
+		lines.append(get_text("settings_host_is_local"))
+
+	markup = InlineKeyboardMarkup(row_width=1)
+	markup.add(InlineKeyboardButton(get_text("button_host_test"), callback_data=f"settingsHost|{host_id}"))
+	markup.add(InlineKeyboardButton(get_text("button_host_rename"), callback_data=f"settingsHostRename|{host_id}"))
+	# The local host has no remove button: the bot itself runs on it.
+	if not entry.get("local"):
+		markup.add(InlineKeyboardButton(get_text("button_host_remove"), callback_data=f"settingsHostRemove|{host_id}"))
+	markup.add(InlineKeyboardButton(get_text("button_back"), callback_data="settingsHosts"))
+	return "\n".join(lines), markup
+
+
+def build_settings_host_remove(host_id):
+	"""Confirmation before dropping a host, since it takes its state with it."""
+	entry = host_registry.host(host_id)
+	if entry is None:
+		return None
+	markup = InlineKeyboardMarkup(row_width=1)
+	markup.add(InlineKeyboardButton(get_text("button_host_remove_confirm"),
+									callback_data=f"settingsHostRemoveConfirm|{host_id}"))
+	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data=f"settingsHost|{host_id}"))
+	return get_text("settings_host_remove_confirm", entry.get("alias", host_id)), markup
+
+
+def parse_host_definition(raw):
+	"""
+	Reads what someone typed when adding a host.
+
+	Accepts "nas ssh://dgongut@nas" and a bare URL, deriving a name from it in
+	that case. One prompt instead of two: asking for a name and then a URL is
+	twice the taps for something people paste in one go.
+
+	Returns (alias, url), or (None, None) when there is no usable URL.
+	"""
+	parts = (raw or "").split()
+	if not parts:
+		return None, None
+
+	url = next((part for part in parts if "://" in part), None)
+	if url is None:
+		return None, None
+
+	named = [part for part in parts if part != url]
+	if named:
+		return " ".join(named), url
+
+	# No name given: take the host out of the URL, which is what someone would
+	# have called it anyway.
+	remainder = url.split("://", 1)[1]
+	if remainder.startswith("/"):
+		return "local", url
+	authority = remainder.split("/", 1)[0]
+	return authority.split("@")[-1].split(":")[0] or url, url
+
+
 def build_settings_screen(screen):
 	"""Builds one of the settings screens by name."""
 	if screen == "updates":
 		return build_settings_updates()
+	if screen == "hosts":
+		return build_settings_hosts()
 	return build_settings()
 
 def send_settings_menu(prefix=None, screen="main"):
@@ -2254,6 +2356,31 @@ def apply_settings_text_value(field, raw):
 			send_message(message=get_text("settings_invalid_interval"))
 			return None
 		store.set("bot.check_update_every_hours", hours)
+		return get_text("settings_updated")
+
+	if field == "host_add":
+		alias_name, url = parse_host_definition(raw)
+		if not url:
+			send_message(message=get_text("settings_host_invalid"))
+			return None
+		try:
+			entry = host_registry.add_host(alias_name, url)
+		except host_registry.HostUnavailable as e:
+			# Rejected at the point of adding, while the connection details are
+			# still in front of the person typing them.
+			send_message(message=get_text("settings_host_unreachable", html.escape(url), html.escape(str(e.reason))))
+			return None
+		return get_text("settings_host_added", entry["alias"])
+
+	if field.startswith("host_rename:"):
+		host_id = field.split(":", 1)[1]
+		new_alias = raw.strip()
+		if not new_alias:
+			send_message(message=get_text("settings_host_invalid"))
+			return None
+		if not host_registry.rename_host(host_id, new_alias):
+			send_message(message=get_text("error_invalid_selection"))
+			return None
 		return get_text("settings_updated")
 
 	if field == "notification_channel":

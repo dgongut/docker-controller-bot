@@ -19,6 +19,7 @@ from telebot.types import InlineKeyboardButton
 from telebot.types import InlineKeyboardMarkup
 
 import core
+import host_registry
 import store
 from callback_registry import callback
 from callback_registry import register as register_callback
@@ -1185,6 +1186,59 @@ def _back_to_compose_level1(ctx):
 
 
 register_callback("backToComposeLevel1", _back_to_compose_level1, keeps_message=True)
+
+
+# --- HOSTS ---------------------------------------------------------------
+
+@callback(name="settingsHosts", keeps_message=True)
+def cb_settingsHosts(ctx):
+	core.render_settings(ctx.chatId, ctx.messageId, "hosts")
+
+
+@callback(name="settingsHost", params=("value",), keeps_message=True)
+def cb_settingsHost(ctx):
+	"""
+	One host's screen. Doubles as the "test again" button: rebuilding the
+	screen re-runs the check, so there is nothing extra to wire up.
+	"""
+	built = core.build_settings_host(ctx.value)
+	if not built:
+		core.render_settings(ctx.chatId, ctx.messageId, "hosts")
+		return
+	text, markup = built
+	core.edit_message_text(text, ctx.chatId, ctx.messageId, reply_markup=markup)
+
+
+@callback(name="settingsHostAdd", keeps_message=False)
+def cb_settingsHostAdd(ctx):
+	core.ask_text_input(ctx.userId, "host_add", "settings_host_ask", back_to="hosts")
+
+
+@callback(name="settingsHostRename", params=("value",), keeps_message=False)
+def cb_settingsHostRename(ctx):
+	core.ask_text_input(ctx.userId, f"host_rename:{ctx.value}", "settings_host_ask_name", back_to="hosts")
+
+
+@callback(name="settingsHostRemove", params=("value",), keeps_message=True)
+def cb_settingsHostRemove(ctx):
+	built = core.build_settings_host_remove(ctx.value)
+	if not built:
+		core.render_settings(ctx.chatId, ctx.messageId, "hosts")
+		return
+	text, markup = built
+	core.edit_message_text(text, ctx.chatId, ctx.messageId, reply_markup=markup)
+
+
+@callback(name="settingsHostRemoveConfirm", params=("value",), keeps_message=True)
+def cb_settingsHostRemoveConfirm(ctx):
+	alias = host_registry.alias(ctx.value)
+	if host_registry.remove_host(ctx.value):
+		# The supervisor notices on its next pass and stops that host's event
+		# stream; dropping the manager keeps a stale client from being reused
+		# if the same id ever comes back.
+		core.forget_managers()
+		core.send_message(message=get_text("settings_host_removed", alias))
+	core.render_settings(ctx.chatId, ctx.messageId, "hosts")
 
 
 @callback(name="cerrar")

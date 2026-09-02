@@ -18,6 +18,7 @@ keeps a chat message from ever carrying key material.
 
 import shutil
 import threading
+import time
 
 import store
 from logger import debug, warning
@@ -266,6 +267,56 @@ def reachable_hosts():
 		if ping(entry["id"]):
 			pairs.append((entry, _clients[entry["id"]][1]))
 	return pairs
+
+
+def status_snapshot(deadline_seconds=5):
+	"""
+	Whether each host answers, as {host_id: (ok, reason)}.
+
+	Every host is checked at the same time, on its own thread, and the whole
+	thing gives up after `deadline_seconds` no matter how many there are. A
+	menu that pinged hosts one after another would hang for the sum of their
+	timeouts, so opening it with one machine unplugged would look like the bot
+	had frozen.
+
+	A host that has not answered by the deadline is reported as failing, with
+	the deadline as the reason: from the user's side "did not answer in five
+	seconds" and "refused the connection" both mean the same thing, which is
+	that it cannot be used right now.
+	"""
+	results = {}
+	results_lock = threading.Lock()
+	configured = hosts()
+
+	def check(entry):
+		host_id = entry["id"]
+		try:
+			connection = client(host_id)
+			connection.ping()
+			outcome = (True, "")
+		except HostUnavailable as e:
+			outcome = (False, e.reason)
+		except Exception as e:
+			drop(host_id)
+			outcome = (False, str(e))
+		with results_lock:
+			results[host_id] = outcome
+
+	threads = []
+	for entry in configured:
+		thread = threading.Thread(target=check, args=(entry,), daemon=True)
+		thread.start()
+		threads.append(thread)
+
+	deadline = time.monotonic() + deadline_seconds
+	for thread in threads:
+		thread.join(max(0, deadline - time.monotonic()))
+
+	with results_lock:
+		return {
+			entry["id"]: results.get(entry["id"], (False, f"no answer in {deadline_seconds}s"))
+			for entry in configured
+		}
 
 
 def add_host(alias_name, url, tls=None, timeout=None):
