@@ -249,10 +249,10 @@ def cb_toggleUpdate(ctx):
 	try:
 		core.edit_message_reply_markup_sync(ctx.chatId, ctx.messageId, reply_markup=markup)
 		# Answer callback without text (no annoying popup)
-		core.bot.answer_callback_query(ctx.call.id, show_alert=False)
+		core.answer_callback_quietly(ctx.call.id)
 	except Exception as e:
 		core.error(f"Error updating toggle: {e}")
-		core.bot.answer_callback_query(ctx.call.id, show_alert=False)
+		core.answer_callback_quietly(ctx.call.id)
 
 @callback(
 	name='toggleUpdateAll',
@@ -274,10 +274,10 @@ def cb_toggleUpdateAll(ctx):
 	try:
 		core.edit_message_reply_markup_sync(ctx.chatId, ctx.messageId, reply_markup=markup)
 		# Answer callback without text (no annoying popup)
-		core.bot.answer_callback_query(ctx.call.id, show_alert=False)
+		core.answer_callback_quietly(ctx.call.id)
 	except Exception as e:
 		core.error(f"Error updating toggle all: {e}")
-		core.bot.answer_callback_query(ctx.call.id, show_alert=False)
+		core.answer_callback_quietly(ctx.call.id)
 
 @callback(
 	name='confirmUpdateSelected',

@@ -1200,6 +1200,48 @@ def test_checking_hosts_does_not_wait_for_them_one_by_one():
 
 
 # ---------------------------------------------------------------------------
+# Robustness of the dispatcher
+# ---------------------------------------------------------------------------
+
+def test_a_press_survives_telegram_not_answering():
+	"""
+	Reported as "error processing request" when opening the hosts menu. The
+	cause was a dropped connection while acknowledging the press: answering is
+	cosmetic, and letting it abort turned the action into nothing at all.
+	"""
+	original = dcb.bot.answer_callback_query
+
+	def dropped(*args, **kwargs):
+		raise Exception("SSLEOFError: EOF occurred in violation of protocol")
+
+	dcb.bot.answer_callback_query = dropped
+	try:
+		assert dcb.answer_callback_quietly("whatever") is False, "debe tragarse el fallo"
+	finally:
+		dcb.bot.answer_callback_query = original
+
+	# And it reports success when Telegram does answer.
+	dcb.bot.answer_callback_query = lambda *a, **kw: True
+	try:
+		assert dcb.answer_callback_quietly("whatever") is True
+	finally:
+		dcb.bot.answer_callback_query = original
+
+
+def test_nothing_answers_a_callback_without_the_guard():
+	"""
+	Every acknowledgement goes through the guard, or one of them can still
+	abort a press the next time the network hiccups.
+	"""
+	for filename in ("core.py", "callbacks.py", "commands.py"):
+		source = io.open(os.path.join(harness.REPO, filename), encoding="utf-8").read()
+		for line_number, line in enumerate(source.split("\n"), start=1):
+			if "answer_callback_query(" in line and "def " not in line:
+				assert "answer_callback_quietly" in line or "bot.answer_callback_query(callback_id" in line, \
+					f"{filename}:{line_number} responde sin la guarda: {line.strip()}"
+
+
+# ---------------------------------------------------------------------------
 # The callback registry
 # ---------------------------------------------------------------------------
 

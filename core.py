@@ -2604,6 +2604,23 @@ def command_controller(message):
 
 	action(user_id=userId, chat_id=message.chat.id, container_id=container_id,
 			container_name=container_name, argument=argument)
+def answer_callback_quietly(callback_id, text=None, show_alert=False):
+	"""
+	Stops Telegram's spinner on a button, tolerating a failure to do so.
+
+	This is presentation: it acknowledges the press. Letting it abort the
+	handler meant a dropped connection to Telegram turned an action into
+	nothing at all, which is far worse than a spinner that keeps turning for a
+	few seconds.
+	"""
+	try:
+		bot.answer_callback_query(callback_id, text=text, show_alert=show_alert)
+		return True
+	except Exception as e:
+		debug(f"Could not answer callback {callback_id}: {e}")
+		return False
+
+
 @bot.callback_query_handler(func=lambda mensaje: True)
 @with_reply_context
 def button_controller(call):
@@ -2622,7 +2639,7 @@ def button_controller(call):
 		if not is_admin(userId):
 			warning(f"User {userId} ({call.from_user.username}) tried to use admin command without permission")
 			send_message(chat_id=userId, message=get_text("user_not_admin"))
-			bot.answer_callback_query(call.id, text="❌", show_alert=False)
+			answer_callback_quietly(call.id, text="❌")
 			return
 
 		spec, args = callback_registry.parse(call.data)
@@ -2631,8 +2648,12 @@ def button_controller(call):
 
 		# Answered before running so Telegram stops showing its spinner. The
 		# update toggles answer themselves instead, with their own feedback.
+		#
+		# Failing to answer must not abort the press: the answer is cosmetic,
+		# the action is not. A momentary blip talking to Telegram used to turn
+		# a button into "error processing request" with nothing having run.
 		if spec.answer_immediately:
-			bot.answer_callback_query(call.id, show_alert=False)
+			answer_callback_quietly(call.id)
 
 		# Which host this press is about. A container reference says so
 		# directly; a project hash resolves to one; everything else means the
@@ -2691,10 +2712,7 @@ def button_controller(call):
 		debug(f"BUTTON: {spec.name} | USER: {userId} | CHAT: {chatId}")
 	except Exception as e:
 		error(f"Error initializing callback: [{str(e)}]")
-		try:
-			bot.answer_callback_query(call.id, text=get_text("error_callback_processing"), show_alert=True)
-		except:
-			pass
+		answer_callback_quietly(call.id, text=get_text("error_callback_processing"), show_alert=True)
 		return
 
 	try:
