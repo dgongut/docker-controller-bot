@@ -16,7 +16,7 @@ o añádelo a `.gitignore` antes de publicar.
 | `main` | sigue en `02376e2` (v4.2.0), intacta |
 | `VERSION` en `core.py` | `5.0.0_fase2` |
 | `ARG VERSION` en `Dockerfile` | `4.2.0`, **a propósito** (selecciona el tag de GitHub que se descarga; se mueve solo al publicar) |
-| Tests | `python3 tests/run_all.py` → **199/199 OK** |
+| Tests | `python3 tests/run_all.py` → **206/206 OK** |
 | Nada pusheado | el trabajo vive en local |
 
 ### Fases
@@ -42,6 +42,9 @@ migrar el fichero. Ese esquema aguanta igual si algún día se retoman.
 ### Commits de la rama (nuevo → viejo)
 
 ```
+6b0732d  Los avisos del monitor de eventos también dicen el host al final
+df40d94  La cola deja de reintentar lo que Telegram va a negar igual
+3db5460  El host se dice como lo diría una persona, al final de la frase
 fec208c  Un /mute con un número absurdo dejaba al bot mudo para siempre
 03c8a4f  Pule la capa que guarda las programaciones
 e09cb48  Un /mute impedía al contenedor apagarse, y los 21 comandos sin tocar
@@ -258,6 +261,43 @@ Cosas aprendidas en esta ronda:
 - El patrón correcto para un host que se cae ya estaba en el repo, en
   `render_picker_for_host`, **con su comentario explicándolo**. Le faltaba a
   cuatro sitios más. Cuando algo lleve un comentario así, buscar los hermanos.
+
+### Tercera ronda: los rincones y la forma del host
+
+- **La cola de mensajes** reintentaba tres veces, durmiendo 1s y 2s, cualquier
+  error que no fuese un 429. Pero un mensaje que ya no está no se puede editar
+  ni borrar por definición, y la cola es **serie**: cada segundo ahí lo esperan
+  todos los de detrás. `PERMANENT_FAILURES` en `message_queue.py` lista lo que
+  Telegram va a negar igual.
+- **`store.py` tapaba un incorporado y lo usaba.** La línea 72 llamaba al `set`
+  de Python y la 352 define `def set(...)`. Funcionaba por el orden en que se
+  ejecuta el módulo, y solo por eso. Ahora dice `builtins.set()`. El lint
+  prohíbe la llamada *antes* del def, no la de después: `store.toggle()` llama
+  a la función del módulo a propósito.
+- **`migration.py` y el monitor de eventos** aguantaron el fuzzing sin un
+  fallo. La validación de entradas también: 4 campos × 19 entradas hostiles y
+  209 combinaciones del flujo de programaciones, cero caídas.
+
+### La forma de nombrar el host
+
+El host salía **siempre delante**: `casa · ✅ Contenedor nginx actualizado`.
+Así se lee un log, no así habla alguien. Hay dos formas ahora, y la regla vive
+en el docstring de `host_suffix()`:
+
+| | |
+|---|---|
+| **Sufijo** `... en X` | Un resultado que se lee como una frase. Es lo que se queda en el chat |
+| **Prefijo** `X · ...` | Acaba en otra frase, en pregunta o en bloque de código; una confirmación destructiva, para que la máquina se lea primero; y el progreso, que acaba en ".." y se borra a los segundos |
+
+Veintiséis sitios pasaron a sufijo. El aviso del monitor de eventos —el
+mensaje que más se ve del bot— es `🔴 El contenedor nginx se ha detenido en
+Ganimedes`, y hay un test que lo fija.
+
+**La trampa al hacer este cambio**: el barrido buscaba `host_label` pegado a un
+`get_text`, y el monitor de eventos guarda el texto en una variable antes de
+prefijarlo. Se escapó, y dejó el mismo mensaje saliendo de dos formas según de
+dónde viniera. Si vuelves a tocar esto, busca también los `host_label` sobre
+variables.
 
 ### Los idiomas
 
