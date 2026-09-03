@@ -386,6 +386,8 @@
   "settings_host_added": "✅ Host <b>$1</b> toegevoegd",
   "settings_host_removed": "✅ Host <b>$1</b> verwijderd",
   "settings_host_remove_confirm": "Host <b>$1</b> verwijderen?\n\nZijn containers verschijnen niet meer en zijn update-cache gaat verloren. Op de machine zelf wordt niets aangeraakt.",
+  "settings_host_remove_schedules": "\n\n⏱️ Deze planningen verwijzen ernaar en worden uitgeschakeld:\n$1",
+  "settings_host_schedules_disabled": "⏱️ Planningen uitgeschakeld, ze verwezen naar de host die je hebt verwijderd:\n$1\n\n<i>Zet ze weer aan als je de host opnieuw toevoegt.</i>",
   "button_host_add": "➕ - Host toevoegen",
   "button_host_test": "🔄 - Opnieuw testen",
   "button_host_rename": "✏️ - Hernoemen",

@@ -1253,12 +1253,19 @@ def cb_settingsHostRemove(ctx):
 @callback(name="settingsHostRemoveConfirm", params=("value",), keeps_message=True)
 def cb_settingsHostRemoveConfirm(ctx):
 	alias = core.host_alias(ctx.value)
+	# Read before the removal: afterwards the host is gone and a task naming it
+	# could no longer be told apart from one meaning the local machine.
+	orphaned = core.schedules_on_host(ctx.value)
 	if host_registry.remove_host(ctx.value):
 		# The supervisor notices on its next pass and stops that host's event
 		# stream; dropping the manager keeps a stale client from being reused
 		# if the same id ever comes back.
 		core.forget_managers()
 		core.send_message(message=get_text("settings_host_removed", alias))
+		names = core.disable_schedules(orphaned)
+		if names:
+			listed = "\n".join(f"· <b>{html.escape(name)}</b>" for name in names)
+			core.send_message(message=get_text("settings_host_schedules_disabled", listed))
 	core.render_settings(ctx.chatId, ctx.messageId, "hosts")
 
 

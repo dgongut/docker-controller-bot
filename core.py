@@ -2406,6 +2406,48 @@ def build_settings_host(host_id):
 	return "\n".join(lines), markup
 
 
+def schedules_on_host(host_id):
+	"""
+	The enabled schedules that would stop working without `host_id`.
+
+	Only the host-scoped actions: a mute schedule is about the bot's own
+	notifications and belongs to no machine. A task created before hosts
+	existed carries none and means the local one, which cannot be removed
+	anyway.
+	"""
+	local = host_registry.local_host_id()
+	affected = []
+	for schedule in schedule_manager.get_all_schedules():
+		if not schedule.get("enabled", True):
+			continue
+		if schedule.get("action", "").lower() not in HOST_SCOPED_SCHEDULE_ACTIONS:
+			continue
+		if (schedule.get("host") or local) != host_id:
+			continue
+		affected.append(schedule)
+	return affected
+
+
+def disable_schedules(schedules):
+	"""
+	Turns off the given schedules, and returns the names it turned off.
+
+	Disabled rather than deleted, which is what the executor already does with
+	a task it cannot run: re-adding the host and switching them back on is a
+	couple of taps, while a deleted cron expression is gone for good. Left
+	enabled they would raise HostUnavailable on every firing.
+
+	Takes the tasks already read rather than a host id, so the caller can look
+	them up while the host still exists.
+	"""
+	names = []
+	for schedule in schedules:
+		name = schedule.get("name", "")
+		if name and schedule_manager.update_schedule(name, enabled=False):
+			names.append(name)
+	return names
+
+
 def build_settings_host_remove(host_id):
 	"""Confirmation before dropping a host, since it takes its state with it."""
 	entry = host_registry.host(host_id)
@@ -2415,7 +2457,14 @@ def build_settings_host_remove(host_id):
 	markup.add(InlineKeyboardButton(get_text("button_host_remove_confirm"),
 									callback_data=f"settingsHostRemoveConfirm|{host_id}"))
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data=f"settingsHost|{host_id}"))
-	return get_text("settings_host_remove_confirm", host_alias(host_id)), markup
+	question = get_text("settings_host_remove_confirm", host_alias(host_id))
+	# Whatever this takes down with it gets said before the tap, not after.
+	# A schedule naming a host that no longer exists raises on every firing.
+	affected = schedules_on_host(host_id)
+	if affected:
+		listed = "\n".join(f"· <b>{html.escape(s.get('name', ''))}</b>" for s in affected)
+		question += get_text("settings_host_remove_schedules", listed)
+	return question, markup
 
 
 def parse_host_definition(raw):

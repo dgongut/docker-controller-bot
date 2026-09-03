@@ -1396,6 +1396,79 @@ def test_the_three_renderers_put_the_host_in_the_same_place():
 		_restore_hosts()
 
 
+def test_removing_a_host_warns_about_the_schedules_it_would_orphan():
+	"""
+	A task naming a host that no longer exists raises HostUnavailable on every
+	firing, silently, for as long as its cron keeps coming round. The user has
+	to hear about it before the tap, not after.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	tasks = [
+		{"id": 1, "name": "Limpieza nas", "cron": "@hourly", "action": "prune",
+			"prune_type": "images", "host": "h_nas", "enabled": True},
+		{"id": 2, "name": "Reinicio local", "cron": "@daily", "action": "restart",
+			"container": "nginx", "host": "h_local", "enabled": True},
+		{"id": 3, "name": "Silencio", "cron": "@daily", "action": "mute",
+			"minutes": 60, "enabled": True},
+		{"id": 4, "name": "Apagada", "cron": "@daily", "action": "stop",
+			"container": "plex", "host": "h_nas", "enabled": False},
+	]
+	original = dcb.schedule_manager.get_all_schedules
+	dcb.schedule_manager.get_all_schedules = lambda: tasks
+	try:
+		affected = [t["name"] for t in dcb.schedules_on_host("h_nas")]
+		# Only the ones that would break: another host's task is not affected,
+		# a mute belongs to no machine, and a disabled task was not running.
+		assert affected == ["Limpieza nas"], affected
+
+		text, _markup = dcb.build_settings_host_remove("h_nas")
+		assert "Limpieza nas" in text, text
+		assert "Reinicio local" not in text, text
+		assert "Silencio" not in text, text
+	finally:
+		dcb.schedule_manager.get_all_schedules = original
+		_restore_hosts()
+
+
+def test_a_task_created_before_hosts_existed_counts_as_local():
+	"""It carries no host and means the machine it was set up on."""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	tasks = [{"id": 1, "name": "Vieja", "cron": "@daily", "action": "restart",
+				"container": "nginx", "enabled": True}]
+	original = dcb.schedule_manager.get_all_schedules
+	dcb.schedule_manager.get_all_schedules = lambda: tasks
+	try:
+		assert [t["name"] for t in dcb.schedules_on_host("h_local")] == ["Vieja"]
+		assert dcb.schedules_on_host("h_nas") == []
+	finally:
+		dcb.schedule_manager.get_all_schedules = original
+		_restore_hosts()
+
+
+def test_orphaned_schedules_are_disabled_and_not_deleted():
+	"""
+	Re-adding the host and switching them back on is a couple of taps; a
+	deleted cron expression is gone for good. Same choice the executor already
+	makes with a task it cannot run.
+	"""
+	tasks = [{"id": 1, "name": "Limpieza nas", "cron": "@hourly", "action": "prune",
+				"prune_type": "images", "host": "h_nas", "enabled": True}]
+	updates = []
+	original = dcb.schedule_manager.update_schedule
+	dcb.schedule_manager.update_schedule = lambda name, **kw: (
+		updates.append((name, kw)) or True)
+	original_delete = dcb.schedule_manager.delete_schedule
+	deleted = []
+	dcb.schedule_manager.delete_schedule = lambda name: deleted.append(name)
+	try:
+		assert dcb.disable_schedules(tasks) == ["Limpieza nas"]
+		assert updates == [("Limpieza nas", {"enabled": False})], updates
+		assert deleted == [], deleted
+	finally:
+		dcb.schedule_manager.update_schedule = original
+		dcb.schedule_manager.delete_schedule = original_delete
+
+
 def test_a_mute_task_belongs_to_no_host():
 	"""
 	Muting silences the bot's own notifications. Showing it a host would be

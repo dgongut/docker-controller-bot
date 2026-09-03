@@ -386,6 +386,8 @@
   "settings_host_added": "✅ Host <b>$1</b> added",
   "settings_host_removed": "✅ Host <b>$1</b> removed",
   "settings_host_remove_confirm": "Remove host <b>$1</b>?\n\nIts containers will stop showing up and its update cache is lost. Nothing on the machine itself is touched.",
+  "settings_host_remove_schedules": "\n\n⏱️ These schedules point at it and will be disabled:\n$1",
+  "settings_host_schedules_disabled": "⏱️ Schedules disabled, they pointed at the host you removed:\n$1\n\n<i>Turn them back on if you add the host again.</i>",
   "button_host_add": "➕ - Add a host",
   "button_host_test": "🔄 - Test again",
   "button_host_rename": "✏️ - Rename",

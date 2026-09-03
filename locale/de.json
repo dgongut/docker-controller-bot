@@ -386,6 +386,8 @@
   "settings_host_added": "✅ Host <b>$1</b> hinzugefügt",
   "settings_host_removed": "✅ Host <b>$1</b> entfernt",
   "settings_host_remove_confirm": "Host <b>$1</b> entfernen?\n\nSeine Container tauchen nicht mehr auf und sein Update-Cache geht verloren. Auf der Maschine selbst wird nichts angerührt.",
+  "settings_host_remove_schedules": "\n\n⏱️ Diese Zeitpläne verweisen darauf und werden deaktiviert:\n$1",
+  "settings_host_schedules_disabled": "⏱️ Zeitpläne deaktiviert, sie verwiesen auf den entfernten Host:\n$1\n\n<i>Aktiviere sie wieder, wenn du den Host erneut hinzufügst.</i>",
   "button_host_add": "➕ - Host hinzufügen",
   "button_host_test": "🔄 - Erneut testen",
   "button_host_rename": "✏️ - Umbenennen",

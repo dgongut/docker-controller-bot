@@ -386,6 +386,8 @@
   "settings_host_added": "✅ Host <b>$1</b> afegit",
   "settings_host_removed": "✅ Host <b>$1</b> tret",
   "settings_host_remove_confirm": "Vols treure el host <b>$1</b>?\n\nEls seus contenidors deixaran d'aparèixer i es perdrà la seva memòria cau d'actualitzacions. A la màquina no s'hi toca res.",
+  "settings_host_remove_schedules": "\n\n⏱️ Aquestes programacions hi apunten i quedaran desactivades:\n$1",
+  "settings_host_schedules_disabled": "⏱️ Programacions desactivades, apuntaven a l'amfitrió que has tret:\n$1\n\n<i>Torna a activar-les si tornes a afegir l'amfitrió.</i>",
   "button_host_add": "➕ - Afegir un host",
   "button_host_test": "🔄 - Tornar a provar",
   "button_host_rename": "✏️ - Canviar el nom",

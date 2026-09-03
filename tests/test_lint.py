@@ -447,3 +447,42 @@ def test_a_message_about_one_host_says_which():
 
 	assert not problems, (
 		"mensajes de una sola máquina que no dicen cuál:\n" + "\n".join(problems))
+
+
+# Modules that hold a lock of their own, and what each may depend on. The order
+# is what matters: core takes _managers_lock and then calls into the registry,
+# which takes _lock. For that to deadlock the registry would have to reach back
+# into core, so the rule is stated as a dependency rather than as an ordering —
+# a dependency is something a static check can actually see.
+LOCK_HOLDERS = {
+	"host_registry.py": {"store", "logger", "docker", "paramiko", "shutil",
+							"threading", "time", "uuid", "json", "os"},
+}
+
+
+def test_the_module_that_locks_last_depends_on_nothing_above_it():
+	"""
+	core.manager() calls host_registry.client() while holding _managers_lock,
+	and client() takes the registry's own lock. That is core → host_registry
+	and it is fine in one direction only: an import of core from the registry
+	would open the door to taking the two in the opposite order, which is a
+	deadlock nobody would reproduce on demand.
+	"""
+	problems = []
+	for filename, allowed in LOCK_HOLDERS.items():
+		path = os.path.join(harness.REPO, filename)
+		tree = ast.parse(io.open(path, encoding="utf-8").read())
+		for node in ast.walk(tree):
+			if isinstance(node, ast.Import):
+				names = [alias.name.split(".")[0] for alias in node.names]
+			elif isinstance(node, ast.ImportFrom):
+				names = [(node.module or "").split(".")[0]]
+			else:
+				continue
+			for name in names:
+				if name and name not in allowed:
+					problems.append(f"  {filename}:{node.lineno} importa {name}")
+
+	assert not problems, (
+		"un módulo con lock propio depende de otro que se toma antes:\n"
+		+ "\n".join(problems))

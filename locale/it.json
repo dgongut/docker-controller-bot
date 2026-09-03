@@ -386,6 +386,8 @@
   "settings_host_added": "✅ Host <b>$1</b> aggiunto",
   "settings_host_removed": "✅ Host <b>$1</b> rimosso",
   "settings_host_remove_confirm": "Rimuovere l'host <b>$1</b>?\n\nI suoi container non compariranno più e la cache degli aggiornamenti andrà persa. Sulla macchina stessa non viene toccato nulla.",
+  "settings_host_remove_schedules": "\n\n⏱️ Queste pianificazioni puntano a esso e verranno disattivate:\n$1",
+  "settings_host_schedules_disabled": "⏱️ Pianificazioni disattivate, puntavano all'host che hai rimosso:\n$1\n\n<i>Riattivale se aggiungi di nuovo l'host.</i>",
   "button_host_add": "➕ - Aggiungi un host",
   "button_host_test": "🔄 - Riprova",
   "button_host_rename": "✏️ - Rinomina",

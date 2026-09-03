@@ -386,6 +386,8 @@
   "settings_host_added": "✅ Host <b>$1</b> engadido",
   "settings_host_removed": "✅ Host <b>$1</b> quitado",
   "settings_host_remove_confirm": "Quitar o host <b>$1</b>?\n\nOs seus contedores deixarán de aparecer e pérdese a súa caché de actualizacións. Na máquina non se toca nada.",
+  "settings_host_remove_schedules": "\n\n⏱️ Estas programacións apuntan a el e quedarán desactivadas:\n$1",
+  "settings_host_schedules_disabled": "⏱️ Programacións desactivadas, apuntaban ao host que quitaches:\n$1\n\n<i>Volve activalas se engades o host de novo.</i>",
   "button_host_add": "➕ - Engadir un host",
   "button_host_test": "🔄 - Probar de novo",
   "button_host_rename": "✏️ - Renomear",
