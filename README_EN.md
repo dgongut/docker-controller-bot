@@ -140,14 +140,18 @@ With **a single host** — the normal case — none of this shows up: the bot lo
 
 ### How to reach a remote host
 
+There are two ways, and for most people the first one is the answer:
+
 | Form | What it needs | When |
 |:---|:---|:---|
-| `ssh://user@machine` | Nothing on the remote host beyond the sshd it already runs | **The recommended one.** Reuses your keys and your `~/.ssh/config` |
-| `tcp://machine:2375` | A socket proxy on the remote machine | Only inside a private network (Tailscale, WireGuard, an isolated VLAN) |
-| `tcp://machine:2376` + TLS | Generating a CA and certificates, and configuring `dockerd --tlsverify` | If you want it exposed without a private network |
+| `ssh://user@machine` | Nothing on the remote host beyond its usual `sshd` | **The recommended one.** If you already ssh into that machine, you are halfway there |
+| `tcp://machine:2375` | A socket proxy on the remote machine | If your machines are already on a private network (Tailscale, WireGuard, an isolated VLAN) |
 
 > [!WARNING]
-> `tcp://` without TLS has **no authentication whatsoever**: anyone who can reach that port controls that machine's Docker completely, with root-equivalent access. Do not expose it to the internet.
+> `tcp://` without TLS has **no authentication whatsoever**: anyone who can reach that port controls that machine's Docker completely, with root-equivalent permissions. Only inside a network you trust, never exposed to the internet.
+
+> [!NOTE]
+> Docker also supports `tcp://` encrypted with TLS. It is quite a bit more work and with `ssh://` available I don't see the need for it, but if your case calls for it, it is explained in the [FAQ](#-frequently-asked-questions-faq), under "*I want to use `tcp://` but encrypted with TLS*".
 
 ### The check that settles it
 
@@ -170,50 +174,57 @@ The reason is that the bot speaks no protocol of its own: it opens an ssh sessio
 
 ### Step by step with `ssh://`
 
-**1. Enable SSH on the remote machine.** On an ordinary Linux it already is. On a NAS it is usually a switch in its panel (see below).
+> [!IMPORTANT]
+> **One key works for all your servers.** Don't generate one per machine: you create the key once and authorise it on every machine you want to add. Each step below says whether it is *once* or *per machine*, so you don't repeat more than you need.
 
-**2. Generate a key with no passphrase** on the machine the bot runs on. No passphrase because there would be nobody to type it:
+**1. Enable SSH on the remote machine.** *(per machine)* On a normal Linux it already is. On a NAS it is usually a switch in its panel (see below).
+
+**2. Generate a key without a passphrase** *(once, and never again)*, on the machine the bot runs on. Without a passphrase because nobody will be there to type it:
 
 ```bash
 ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519
 ```
 
-**3. Authorise it on the remote machine:**
+**3. Authorise it on the remote machine.** *(per machine)* This is the only step that really repeats:
 
 ```bash
 ssh-copy-id -i ~/.ssh/id_ed25519.pub user@machine
 ```
 
-> [!TIP]
-> **The second server does not need another key.** The same one works for all of them: just repeat step 3 pointing at the new machine. Steps 2 and 6 are done once.
+For the second server, and the third, it is this same command pointing at the new machine:
 
-**4. Connect once by hand, from the machine the bot runs on**, so the remote machine's fingerprint lands in your `known_hosts`. Take the chance to run the check above:
+```bash
+ssh-copy-id -i ~/.ssh/id_ed25519.pub root@unraid
+ssh-copy-id -i ~/.ssh/id_ed25519.pub admin@synology
+```
+
+**4. Connect once by hand** *(per machine)*, from the machine the bot runs on, so the remote machine's fingerprint lands in your `known_hosts`. Take the chance to run the check above:
 
 ```bash
 ssh user@machine docker version
 ```
 
 > [!IMPORTANT]
-> Steps 2, 3 and 4 are done **on the bot's machine, not inside the container**. The bot cannot accept a new fingerprint for you: there is no terminal to answer "yes" at, and `.ssh` is mapped read-only, so it cannot write to `known_hosts`. If the remote machine is not already in your `known_hosts`, the bot will report it as not answering with a `Host key verification failed`.
+> Steps 2, 3 and 4 are done **on the bot's machine, not inside the container**. The bot cannot accept a new fingerprint for you: there is no terminal to answer "yes" on, and `.ssh` is mapped read-only, so it cannot write to `known_hosts`. If the remote machine is not already in your `known_hosts`, the bot will report it as unreachable with a `Host key verification failed`.
 
-**5. Give the remote user access to the socket**, if step 4 complained about permissions:
+**5. Give the remote user access to the socket** *(per machine)*, if step 4 complained about permissions:
 
 ```bash
-sudo usermod -aG docker user   # then log in over ssh again
+sudo usermod -aG docker user   # and log in over ssh again
 ```
 
-**6. Map your `.ssh` into the container** and restart the bot:
+**6. Map your `.ssh` into the container** *(once)* and restart the bot:
 
 ```yaml
 volumes:
-    - /var/run/docker.sock:/var/run/docker.sock # DON'T CHANGE
-    - /path/to/save/the/config:/app/config
+    - /var/run/docker.sock:/var/run/docker.sock # DO NOT CHANGE
+    - /path/to/store/the/configuration:/app/config
     - ~/.ssh:/root/.ssh:ro # Only if you are going to use ssh:// hosts
 ```
 
-The bot runs as `root` inside the container, so it reads `/root/.ssh`. It has to be the `.ssh` of the user you ran `ssh-copy-id` as: that is where the private key and the `known_hosts` that step 4 filled in live. Read-only on purpose, since the bot has no need to write anything there.
+The bot runs as `root` inside the container, so it reads `/root/.ssh`. It has to be the `.ssh` of the user you ran `ssh-copy-id` with: that is where the private key and the `known_hosts` that step 4 filled in live. Read-only on purpose, because the bot never needs to write there.
 
-The connection is opened by the system `ssh` client, not by an implementation of our own, so your whole `~/.ssh/config` applies: host aliases, ports, `IdentityFile`, `User`. If your config has a `Host nas`, the URL can simply be `ssh://nas`.
+The connection is opened by the system `ssh` client, not by an implementation of our own, so your whole `~/.ssh/config` is respected: host aliases, ports, `IdentityFile`, `User`. If your config has a `Host nas`, the URL can simply be `ssh://nas`.
 
 **7. Add the host in the bot.** No need to touch the docker-compose again: open `/settings`, go into **🖥️ Docker hosts**, press **➕ Add host** and send it the host in a single message, with whatever name you want to give it in front:
 
@@ -234,23 +245,19 @@ After that, pressing the host on that same screen lets you **🔄 Test again**, 
 
 ### Several servers
 
-Adding the second and the third is repeating step 3 for each. One key authorises on as many machines as you like, and that is what I would do on a home network: fewer files to manage and fewer places to get it wrong.
+It is already covered above: you repeat **step 3** pointing at each machine and that's it. One key authorises on as many as you like, and it is what I would do on a home network: fewer files to manage and fewer places to get it wrong.
 
-```bash
-ssh-copy-id -i ~/.ssh/id_ed25519.pub root@unraid
-ssh-copy-id -i ~/.ssh/id_ed25519.pub admin@synology
-```
-
-Then check each one before adding it to the bot:
+Check each one before adding it to the bot:
 
 ```bash
 ssh root@unraid docker version
 ssh admin@synology docker version
 ```
 
-#### A separate key per server
+<details>
+<summary>I'd rather have a separate key per server</summary>
 
-Worth it if you want a compromised key not to open every machine you have, or if one of them belongs to somebody else and you would rather be able to revoke it on its own. Generate one per machine:
+Worth it if you want a compromised key not to open all your machines, or if one of them belongs to somebody else and you'd rather be able to revoke it separately. You generate one per machine:
 
 ```bash
 ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_unraid   -C "dcb-unraid"
@@ -260,7 +267,7 @@ ssh-copy-id -i ~/.ssh/id_unraid.pub   root@unraid
 ssh-copy-id -i ~/.ssh/id_synology.pub admin@synology
 ```
 
-And tell `ssh` which one to use for each, in `~/.ssh/config`:
+And you tell `ssh` which one to use with each, in `~/.ssh/config`:
 
 ```
 Host unraid
@@ -275,10 +282,12 @@ Host synology
     IdentityFile ~/.ssh/id_synology
 ```
 
-That buys two things beyond the keys. The URLs become plain **`ssh://unraid`** and **`ssh://synology`** — the user, the port and the key all come from the config. And `ssh unraid docker version` is still the check, so what you verify in the terminal is exactly what the bot will do.
+That has two advantages beyond the keys. The first is that the URLs stay as plain **`ssh://unraid`** and **`ssh://synology`**: the user, the port and the key all come from the config. The second is that `ssh unraid docker version` is still the check, so what you verify in the terminal is exactly what the bot is going to do.
+
+</details>
 
 > [!NOTE]
-> `~/.ssh/config` is mapped into the container too, since you are already mapping the whole directory. Nothing to add to the docker-compose.
+> The `~/.ssh/config` file is mapped into the container too, because you are already mapping the whole directory. Nothing needs adding to the docker-compose.
 
 ### Step by step with `tcp://` through a socket proxy
 
@@ -313,86 +322,6 @@ If it answers, add it in the bot the same way as an ssh one — `/settings` → 
 > [!WARNING]
 > This carries **no TLS and no authentication**: the proxy limits what can be done, not who can do it. Publish the port only on a network you trust — Tailscale, WireGuard, an isolated VLAN — never on the internet. If you need it exposed beyond that, use TLS.
 
-### Step by step with `tcp://` + TLS
-
-More work, but it does not depend on ssh. On the **remote machine**:
-
-**1. Generate the CA and the certificates.** Replace `machine.local` with the name or IP the bot will call it by:
-
-```bash
-openssl genrsa -aes256 -out ca-key.pem 4096
-openssl req -new -x509 -days 3650 -key ca-key.pem -sha256 -out ca.pem
-
-openssl genrsa -out server-key.pem 4096
-openssl req -subj "/CN=machine.local" -sha256 -new -key server-key.pem -out server.csr
-echo "subjectAltName = DNS:machine.local,IP:192.168.1.50" > extfile.cnf
-echo "extendedKeyUsage = serverAuth" >> extfile.cnf
-openssl x509 -req -days 3650 -sha256 -in server.csr -CA ca.pem -CAkey ca-key.pem \
-  -CAcreateserial -out server-cert.pem -extfile extfile.cnf
-
-openssl genrsa -out key.pem 4096
-openssl req -subj "/CN=client" -new -key key.pem -out client.csr
-echo "extendedKeyUsage = clientAuth" > extfile-client.cnf
-openssl x509 -req -days 3650 -sha256 -in client.csr -CA ca.pem -CAkey ca-key.pem \
-  -CAcreateserial -out cert.pem -extfile extfile-client.cnf
-```
-
-**2. Configure the daemon** in `/etc/docker/daemon.json`:
-
-```json
-{
-  "tlsverify": true,
-  "tlscacert": "/etc/docker/certs/ca.pem",
-  "tlscert": "/etc/docker/certs/server-cert.pem",
-  "tlskey": "/etc/docker/certs/server-key.pem",
-  "hosts": ["unix:///var/run/docker.sock", "tcp://0.0.0.0:2376"]
-}
-```
-
-Under systemd the `-H` the unit ships with has to go, or `dockerd` complains the host is defined twice:
-
-```bash
-sudo mkdir -p /etc/systemd/system/docker.service.d
-printf '[Service]\nExecStart=\nExecStart=/usr/bin/dockerd\n' | \
-  sudo tee /etc/systemd/system/docker.service.d/override.conf
-sudo systemctl daemon-reload && sudo systemctl restart docker
-```
-
-**3. Copy `ca.pem`, `cert.pem` and `key.pem`** to the bot's machine and map them:
-
-```yaml
-volumes:
-    - /path/to/the/certs:/certs:ro
-```
-
-**4. Check before configuring the bot:**
-
-```bash
-docker --tlsverify --tlscacert=ca.pem --tlscert=cert.pem --tlskey=key.pem   -H tcp://machine.local:2376 version
-```
-
-**5. Declare the host by hand.** This is the one route that **cannot** be added from `/settings`: the add-host screen only asks for a URL, and a TLS host also needs the paths of the three certificates. It goes into `settings.json`, inside the volume you mapped, in the `hosts` list:
-
-```json
-{
-    "id": "h_tls1",
-    "alias": "machine",
-    "url": "tcp://machine.local:2376",
-    "local": false,
-    "tls": {
-        "ca": "/certs/ca.pem",
-        "cert": "/certs/cert.pem",
-        "key": "/certs/key.pem",
-        "verify": true
-    }
-}
-```
-
-The paths are the ones **inside the container**, that is the right-hand side of the volume from step 3. The `id` is yours to pick and its value does not matter as long as it is unique: it only has to be stable, because it is what schedules and the update cache are tied to.
-
-> [!IMPORTANT]
-> Editing `settings.json` by hand **requires restarting the container**: the bot reads it at start-up and keeps it in memory. After the restart the host shows up in `/settings` → **🖥️ Docker hosts** like any other, and can be tested, renamed and removed from there.
-
 ### Synology, UnRAID and other NAS
 
 **None of them expose the Docker port by default**, and rightly so: doing it without TLS would leave the machine wide open. So `ssh://` is the way in both cases.
@@ -410,7 +339,7 @@ If that answers, your URL is `ssh://root@unraid`.
 1. Enable SSH in *Control Panel → Terminal & SNMP → Enable SSH service*.
 2. Try `ssh your_user@synology docker version`.
 
-The two usual stumbling blocks are that Container Manager's `docker` is not on the PATH of an ssh session, and that the socket belongs to `root` while your administrator user cannot reach it. Modern DSM disables direct root login, so if you hit that, the practical ways out are a **socket proxy** container on the Synology itself (which also lets you limit what the bot can do) or the `tcp://` + TLS route above.
+The two usual stumbling blocks are that Container Manager's `docker` is not on the PATH of an ssh session, and that the socket belongs to `root` while your administrator user cannot reach it. Modern DSM disables direct root login, so if you hit that, the practical way out is a **socket proxy** container on the Synology itself, which also lets you limit what the bot can do.
 
 > [!TIP]
 > If your machines are on a private network such as Tailscale or WireGuard, plain `tcp://` over it saves you both the certificates and the ssh setup, because the mesh provides the encryption and the authentication. It is the most comfortable option when you already have one.
@@ -580,6 +509,95 @@ ssh user@machine docker version
 ```
 
 The message it gives you there is the same one the bot is giving you, but with all the detail. The usual causes are in the table under [How to reach a remote host](#the-check-that-settles-it).
+
+</details>
+
+<details>
+<summary>🔐 I want to use `tcp://` but encrypted with TLS, can I?</summary>
+
+You can, yes, and here is the procedure. But first the honest part: **it is fairly advanced and I don't consider it necessary.**
+
+TLS solves one specific problem: crossing a network you don't trust. If your machines are at home, `ssh://` gives you exactly the same protection — encryption and key-based authentication — without generating a single certificate, and reusing the ssh you already have set up. And if you need to reach them from outside, setting up Tailscale or WireGuard is less work than a PKI and serves everything else on your network, not just this.
+
+That said: if your case really calls for it, or you just feel like it, it works perfectly well. Bear in mind that **it is the one route that cannot be added from the bot** and the host has to be written by hand into `settings.json`, as shown in step 5.
+
+Everything below goes on the **remote machine**, except where it says otherwise.
+
+**1. Generate the CA and the certificates.** Replace `machine.local` with the name or IP the bot will call it by:
+
+```bash
+openssl genrsa -aes256 -out ca-key.pem 4096
+openssl req -new -x509 -days 3650 -key ca-key.pem -sha256 -out ca.pem
+
+openssl genrsa -out server-key.pem 4096
+openssl req -subj "/CN=machine.local" -sha256 -new -key server-key.pem -out server.csr
+echo "subjectAltName = DNS:machine.local,IP:192.168.1.50" > extfile.cnf
+echo "extendedKeyUsage = serverAuth" >> extfile.cnf
+openssl x509 -req -days 3650 -sha256 -in server.csr -CA ca.pem -CAkey ca-key.pem \
+  -CAcreateserial -out server-cert.pem -extfile extfile.cnf
+
+openssl genrsa -out key.pem 4096
+openssl req -subj "/CN=client" -new -key key.pem -out client.csr
+echo "extendedKeyUsage = clientAuth" > extfile-client.cnf
+openssl x509 -req -days 3650 -sha256 -in client.csr -CA ca.pem -CAkey ca-key.pem \
+  -CAcreateserial -out cert.pem -extfile extfile-client.cnf
+```
+
+**2. Configure the daemon** in `/etc/docker/daemon.json`:
+
+```json
+{
+  "tlsverify": true,
+  "tlscacert": "/etc/docker/certs/ca.pem",
+  "tlscert": "/etc/docker/certs/server-cert.pem",
+  "tlskey": "/etc/docker/certs/server-key.pem",
+  "hosts": ["unix:///var/run/docker.sock", "tcp://0.0.0.0:2376"]
+}
+```
+
+Under systemd the `-H` the unit ships with has to go, or `dockerd` complains the host is defined twice:
+
+```bash
+sudo mkdir -p /etc/systemd/system/docker.service.d
+printf '[Service]\nExecStart=\nExecStart=/usr/bin/dockerd\n' | \
+  sudo tee /etc/systemd/system/docker.service.d/override.conf
+sudo systemctl daemon-reload && sudo systemctl restart docker
+```
+
+**3. Copy `ca.pem`, `cert.pem` and `key.pem`** to the bot's machine and map them:
+
+```yaml
+volumes:
+    - /path/to/the/certs:/certs:ro
+```
+
+**4. Check before configuring the bot:**
+
+```bash
+docker --tlsverify --tlscacert=ca.pem --tlscert=cert.pem --tlskey=key.pem   -H tcp://machine.local:2376 version
+```
+
+**5. Declare the host by hand.** This is the one route that **cannot** be added from `/settings`: the add-host screen only asks for a URL, and a TLS host also needs the paths of the three certificates. It goes into `settings.json`, inside the volume you mapped, in the `hosts` list:
+
+```json
+{
+    "id": "h_tls1",
+    "alias": "machine",
+    "url": "tcp://machine.local:2376",
+    "local": false,
+    "tls": {
+        "ca": "/certs/ca.pem",
+        "cert": "/certs/cert.pem",
+        "key": "/certs/key.pem",
+        "verify": true
+    }
+}
+```
+
+The paths are the ones **inside the container**, that is the right-hand side of the volume from step 3. The `id` is yours to pick and its value does not matter as long as it is unique: it only has to be stable, because it is what schedules and the update cache are tied to.
+
+> [!IMPORTANT]
+> Editing `settings.json` by hand **requires restarting the container**: the bot reads it at start-up and keeps it in memory. After the restart the host shows up in `/settings` → **🖥️ Docker hosts** like any other, and can be tested, renamed and removed from there.
 
 </details>
 
