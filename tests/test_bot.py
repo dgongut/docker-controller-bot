@@ -48,12 +48,12 @@ def test_settings_are_seeded_from_the_environment():
 
 def test_the_language_applies_without_a_restart():
 	store.set("bot.language", "EN")
-	assert dcb.get_text("check_for_updates") == i18n.load_locale("en")["check_for_updates"]
+	assert dcb.get_text("starting_updates_off") == i18n.load_locale("en")["starting_updates_off"]
 	store.set("bot.language", "IT")
-	assert dcb.get_text("check_for_updates") == i18n.load_locale("it")["check_for_updates"]
+	assert dcb.get_text("starting_updates_off") == i18n.load_locale("it")["starting_updates_off"]
 	# An unsupported value falls back rather than crashing on a missing file.
 	store.set("bot.language", "XX")
-	assert dcb.get_text("check_for_updates") == i18n.load_locale("es")["check_for_updates"]
+	assert dcb.get_text("starting_updates_off") == i18n.load_locale("es")["starting_updates_off"]
 	store.set("bot.language", "ES")
 
 
@@ -1177,6 +1177,75 @@ def test_every_button_works_pressed_through_the_dispatcher():
 		f"  {name}: {type(e).__name__}: {e}" for name, e in broken)
 	missing = sorted(set(callback_registry.specs()) - ran)
 	assert not missing, f"estos handlers no llegaron a ejecutarse: {missing}"
+
+
+def test_the_starting_message_reports_the_hosts_it_reached():
+	"""
+	It used to report two of the eight settings — update checking and
+	multi-selection — because those were 4.x's two environment variables. A
+	menu preference has no business in a boot report, and the rest is one tap
+	away in /settings.
+
+	What only a boot report can tell you, and what is most likely to be wrong
+	after a change, is whether the bot reached your machines. So that is the
+	body of it now.
+	"""
+	import host_registry
+
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	original = (dcb.DockerManager.list_containers, host_registry.status_snapshot)
+	dcb.DockerManager.list_containers = lambda self, comando="": [
+		_container("nginx", "running"), _container("plex", "exited")]
+	host_registry.status_snapshot = lambda *a, **k: {"h_local": (True, ""), "h_nas": (False, "timeout")}
+	try:
+		message = dcb.build_starting_message()
+		assert "casa" in message, message
+		assert "nas" in message, message
+		# The one that answered shows its count; the one that did not says so.
+		assert i18n.get_text("starting_host", "casa", 2) in message, message
+		assert i18n.get_text("starting_host_down", "nas") in message, message
+		# And the setting that belongs here, with its interval.
+		assert i18n.get_text("starting_updates_on",
+								dcb._format_interval(store.get("bot.check_update_every_hours"))) in message
+		# Not the ones that do not.
+		assert i18n.get_text("multi_selection") not in message, message
+	finally:
+		dcb.DockerManager.list_containers, host_registry.status_snapshot = original
+		_restore_hosts()
+
+
+def test_the_starting_message_says_nothing_about_hosts_with_one_host():
+	"""The golden rule, on the very first thing the bot ever says."""
+	import host_registry
+
+	_with_hosts([HOST_FIXTURE[0]], unreachable=())
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": [
+		_container("nginx", "running"), _container("plex", "exited")]
+	try:
+		message = dcb.build_starting_message()
+		assert "casa" not in message, message
+		assert "🖥" not in message, message
+		assert i18n.get_text("starting_containers", 2, 1, 1) in message, message
+	finally:
+		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
+def test_a_dead_host_does_not_hold_the_starting_message():
+	"""
+	Reachability comes from the parallel snapshot with a deadline, not from
+	listing each host in turn: an unplugged machine would otherwise hold the
+	message — and with it the start of polling — for its whole timeout.
+	"""
+	import ast
+	import inspect
+
+	source = inspect.getsource(dcb.build_starting_message)
+	assert "status_snapshot" in source, source
+	tree = ast.parse(source.replace("\ndef ", "\ndef ", 1).strip())
+	calls = [ast.unparse(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)]
+	assert "host_registry.hosts" in calls, calls
 
 
 def _press_every_command(**arguments):

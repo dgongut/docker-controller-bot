@@ -2736,6 +2736,65 @@ START_ROOT = (
 	("category", "about"),
 )
 
+def build_starting_message():
+	"""
+	What the bot says when it comes up.
+
+	It used to report two of the eight settings — whether it checks for
+	updates, and whether menus stay open for multi-selection — because those
+	were the two environment variables 4.x had. With `/settings` in place that
+	is just inheritance: a menu preference has no business in a boot report,
+	and anyone can read the rest from the menu.
+
+	What a boot report is for is the part you can only learn here, and the part
+	most likely to be wrong after a change: whether it reached your machines.
+	So the hosts are the body of it now.
+
+	Reachability comes from the parallel snapshot with a deadline, not from
+	listing each host in turn: a machine that is unplugged would otherwise hold
+	the message — and with it the start of polling — for its whole timeout.
+	"""
+	lines = [f"🫡 <b>{CONTAINER_NAME}</b>  ·  <i>v{VERSION}</i>", ""]
+
+	configured = host_registry.hosts()
+	statuses = host_registry.status_snapshot()
+	if len(configured) <= 1:
+		# The golden rule: with one host there is no host level to speak of, so
+		# this reads as it always did — what it can see, and nothing about
+		# machines.
+		try:
+			containers = manager(host_registry.local_host_id()).list_containers()
+			running = sum(1 for c in containers if c.status in ("running", "restarting"))
+			lines.append(get_text("starting_containers", len(containers), running,
+									len(containers) - running))
+		except Exception as e:
+			debug(f"Could not count containers at start-up: {e}")
+			lines.append(get_text("starting_no_docker"))
+	else:
+		for entry in configured:
+			ok, reason = statuses.get(entry["id"], (False, ""))
+			if not ok:
+				lines.append(get_text("starting_host_down", host_alias(entry["id"])))
+				continue
+			try:
+				total = len(manager(entry["id"]).list_containers())
+				lines.append(get_text("starting_host", host_alias(entry["id"]), total))
+			except Exception as e:
+				debug(f"Could not count containers on {entry['id']}: {e}")
+				lines.append(get_text("starting_host_down", host_alias(entry["id"])))
+
+	lines.append("")
+	# The one setting that belongs here: it is the only one that changes what
+	# the bot does on its own while nobody is looking.
+	if store.get("bot.check_updates"):
+		lines.append(get_text("starting_updates_on",
+								_format_interval(store.get("bot.check_update_every_hours"))))
+	else:
+		lines.append(get_text("starting_updates_off"))
+	lines.append(get_text("channel"))
+	return "\n".join(lines)
+
+
 def _start_summary():
 	"""
 	Container counts for the header, across every reachable host.
@@ -6999,18 +7058,7 @@ def main():
 	delete_updater()
 	check_CONTAINER_NAME()
 	check_mute()
-	starting_message = f"🫡 <b>{CONTAINER_NAME}</b>\n{get_text('active')}"
-	if store.get("bot.check_updates"):
-		starting_message += f"\n✅ {get_text('check_for_updates')}"
-	else:
-		starting_message += f"\n❌ {get_text('check_for_updates')}"
-	if store.get("bot.multi_selection"):
-		starting_message += f"\n✅ {get_text('multi_selection')}"
-	else:
-		starting_message += f"\n❌ {get_text('multi_selection')}"
-	starting_message += f"\n<i>⚙️ v{VERSION}</i>"
-	starting_message += f"\n{get_text('channel')}"
-	send_message(message=starting_message)
+	send_message(message=build_starting_message())
 	if _migration.ask_for_language:
 		ask_initial_language()
 	bot.infinity_polling(timeout=60)
