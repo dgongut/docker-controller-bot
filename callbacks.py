@@ -303,8 +303,8 @@ def cb_updateSelected(ctx):
 		# machines, so they cannot all be looked up on the local one.
 		owner, container = core.find_container(ref)
 		if container is None:
-			core.send_message(message=f'{core.host_label(core.ref_host(ref))}'
-										f'{get_text("container_does_not_exist", core.ref_id(ref))}')
+			core.send_message(message=f'{get_text("container_does_not_exist", core.ref_id(ref))}'
+										f'{core.host_suffix(core.ref_host(ref))}')
 			core.debug(f"Container {ref} not found")
 			continue
 		if core.update_available(container, owner.host_id):
@@ -364,7 +364,7 @@ def cb_enterComposeProject(ctx):
 	project_info = core.project_info_or_none(ctx.hostId, project_name)
 
 	if not project_info:
-		core.send_message(message=f'{core.host_label(ctx.hostId)}{get_text("error_project_not_found", project_name)}')
+		core.send_message(message=f'{get_text("error_project_not_found", project_name)}{core.host_suffix(ctx.hostId)}')
 		return
 
 	# Build Level 2 keyboard
@@ -442,7 +442,7 @@ def cb_confirmDeleteWholeProject(ctx):
 	project_info = core.project_info_or_none(ctx.hostId, project_name)
 
 	if not project_info:
-		core.send_message(message=f'{core.host_label(ctx.hostId)}{get_text("error_project_not_found", project_name)}')
+		core.send_message(message=f'{get_text("error_project_not_found", project_name)}{core.host_suffix(ctx.hostId)}')
 		return
 
 	container_count = project_info.get_container_count()

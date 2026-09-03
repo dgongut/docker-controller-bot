@@ -40,6 +40,44 @@ def test_a_single_host_is_never_named_in_a_message():
 	store.set("hosts", ONE_HOST)
 
 
+def test_an_event_notification_names_its_host_at_the_end():
+	"""
+	These are the messages the user sees most: the bot telling them a
+	container went down. They read as one statement, so the machine goes where
+	a person would put it — at the end — and not in front like a log line.
+	"""
+	import i18n
+
+	store.set("hosts", TWO_HOSTS)
+	dcb.host_registry.reset()
+	sent = []
+	original = dcb.send_message_to_notification_channel
+	dcb.send_message_to_notification_channel = lambda message="", **kw: sent.append(message)
+	monitor = dcb.DockerEventMonitor("h_nas")
+	events = [{"Type": "container", "Action": "die",
+				"Actor": {"Attributes": {"name": "plex"}}}]
+
+	class Stream:
+		def events(self, decode=True):
+			return iter(events)
+
+	original_client = dcb.host_registry.client
+    # noqa
+	dcb.host_registry.client = lambda host_id: Stream()
+	try:
+		monitor.detectar_eventos_contenedores()
+		assert len(sent) == 1, sent
+		message = sent[0]
+		assert "plex" in message and "nas" in message, message
+		assert message.startswith(i18n.get_text("stopped_container", "plex")), message
+		assert message.endswith(dcb.host_suffix("h_nas")), message
+	finally:
+		dcb.send_message_to_notification_channel = original
+		dcb.host_registry.client = original_client
+		store.set("hosts", ONE_HOST)
+		dcb.host_registry.reset()
+
+
 def test_the_supervisor_runs_one_monitor_per_host():
 	store.set("hosts", TWO_HOSTS)
 	started = []

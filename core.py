@@ -720,7 +720,7 @@ class DockerManager:
 				markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{container_ref(self.host_id, container)}"))
 				has_update = True
 				sent_message = send_message(
-					message=f'{host_label(self.host_id)}{get_text("available_update", container.name)}',
+					message=f'{get_text("available_update", container.name)}{host_suffix(self.host_id)}',
 					reply_markup=markup)
 				# Save container cache for this notification
 				if sent_message:
@@ -989,7 +989,10 @@ class DockerEventMonitor:
 				message = get_text("created_container", container_name)
 
 			if message:
-				message = f"{host_label(self.host_id)}{message}"
+				# Las tres claves de arriba son una frase sola, así que el host
+				# va al final. Y este es el sitio por donde llega la mayoría de
+				# estos avisos, que es lo que se queda en el chat.
+				message = f"{message}{host_suffix(self.host_id)}"
 				try:
 					if is_muted():
 						debug(f"Message [{message}] omitted because muted")
@@ -1204,7 +1207,7 @@ class DockerUpdateMonitor:
 						markup = InlineKeyboardMarkup(row_width = 1)
 						markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{container_ref(host_id, container)}"))
 						if not is_muted() and not cold_cache:
-							sent_message = send_message(message=f'{host_label(host_id)}{get_text("available_update", container.name)}', reply_markup=markup)
+							sent_message = send_message(message=f'{get_text("available_update", container.name)}{host_suffix(host_id)}', reply_markup=markup)
 							# Save container cache for this notification
 							if sent_message:
 								save_container_cache(sent_message.chat.id, sent_message.message_id, [container], host_id)
@@ -1232,7 +1235,7 @@ class DockerUpdateMonitor:
 			markup = build_generic_keyboard(grouped_updates_containers, set(), None, "Update",
 											get_text("button_update"), get_text("button_update_all"))
 			if not is_muted():
-				message = send_message(message=f'{host_label(host_id)}{get_text("available_updates", len(grouped_updates_containers))}', reply_markup=markup)
+				message = send_message(message=f'{get_text("available_updates", len(grouped_updates_containers))}{host_suffix(host_id)}', reply_markup=markup)
 				if message:
 					save_update_data(message.chat.id, message.message_id, grouped_updates_containers)
 					# Also populate the container name cache so the callback parser
@@ -2964,8 +2967,8 @@ def button_controller(call):
 				ctx.containerName = get_container_name(chatId, messageId, ctx.containerId)
 				if not ctx.containerName:
 					close_multi_action_menu(chatId, messageId)
-					send_message(message=f'{host_label(ctx.hostId)}'
-										f'{get_text("container_does_not_exist", ref_id(ctx.containerId))}')
+					send_message(message=f'{get_text("container_does_not_exist", ref_id(ctx.containerId))}'
+										f'{host_suffix(ctx.hostId)}')
 					debug(f"Container {ctx.containerId} not found in cache or Docker")
 					return
 
@@ -2986,8 +2989,8 @@ def button_controller(call):
 				ctx.containerId = make_ref(ctx.hostId, current_id)
 			else:
 				close_multi_action_menu(chatId, messageId)
-				send_message(message=f'{host_label(ctx.hostId)}'
-									f'{get_text("container_does_not_exist", ctx.containerName)}')
+				send_message(message=f'{get_text("container_does_not_exist", ctx.containerName)}'
+									f'{host_suffix(ctx.hostId)}')
 				debug(f"Container {ctx.containerName} (stale {ctx.containerId}) not found on {ctx.hostId}")
 				return
 
@@ -4913,8 +4916,8 @@ def handle_enter_project_level2(action_type, project_name, chatId, messageId, ma
 	menu = build_project_level2_menu(action_type, project_name, chatId, messageId, marked_names, host_id)
 
 	if not menu:
-		send_message(message=f'{host_label(host_id or host_registry.local_host_id())}'
-							f'{get_text("error_project_not_found", project_name)}')
+		send_message(message=f'{get_text("error_project_not_found", project_name)}'
+							f'{host_suffix(host_id or host_registry.local_host_id())}')
 		return
 
 	markup, text = menu
