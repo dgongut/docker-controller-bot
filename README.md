@@ -232,11 +232,9 @@ Hay dos formas, y para la mayoría de la gente la primera es la respuesta:
 | `ssh://usuario@maquina` | Nada en el host remoto salvo su `sshd` de siempre | **La recomendada.** Si ya entras por ssh a esa máquina, ya está medio hecho |
 | `tcp://maquina:2375` | Un socket proxy en la máquina remota | Si tus máquinas ya están en una red privada (Tailscale, WireGuard, una VLAN aislada) |
 
-> [!WARNING]
-> `tcp://` sin TLS **no tiene autenticación de ningún tipo**: cualquiera que alcance ese puerto controla el Docker de esa máquina por completo, con permisos equivalentes a root. Solo dentro de una red en la que confíes, nunca expuesto a internet.
+> ⚠️ **Aviso:** `tcp://` sin TLS **no tiene autenticación de ningún tipo**: cualquiera que alcance ese puerto controla el Docker de esa máquina por completo, con permisos equivalentes a root. Solo dentro de una red en la que confíes, nunca expuesto a internet.
 
-> [!NOTE]
-> Docker también admite `tcp://` cifrado con TLS. Es bastante más trabajo y con `ssh://` disponible no le veo la necesidad, pero si tu caso lo pide está explicado en la [FAQ](#-preguntas-frecuentes-faq), en «*Quiero usar `tcp://` pero cifrado con TLS*».
+> ℹ️ **Nota:** Docker también admite `tcp://` cifrado con TLS. Es bastante más trabajo y con `ssh://` disponible no le veo la necesidad, pero si tu caso lo pide está explicado en la [FAQ](#-preguntas-frecuentes-faq), en «*Quiero usar `tcp://` pero cifrado con TLS*».
 
 ### La prueba que lo decide
 
@@ -260,8 +258,7 @@ El motivo es que el bot no habla un protocolo propio: abre una sesión ssh y eje
 <details>
 <summary>🔑 Paso a paso con <code>ssh://</code> (recomendado)</summary>
 
-> [!IMPORTANT]
-> **Una sola clave vale para todos tus servidores.** No generes una por máquina: creas la clave una vez y la autorizas en cada máquina que quieras añadir. Abajo cada paso lleva marcado si es *una vez* o *por cada máquina*, para que no lo repitas de más.
+> ❗ **Importante — una sola clave vale para todos tus servidores.** No generes una por máquina: creas la clave una vez y la autorizas en cada máquina que quieras añadir. Abajo cada paso lleva marcado si es *una vez* o *por cada máquina*, para que no lo repitas de más.
 
 **1. Habilita SSH en la máquina remota.** *(por cada máquina)* En un Linux normal ya está. En un NAS suele ser un interruptor en su panel (ver más abajo).
 
@@ -290,8 +287,7 @@ ssh-copy-id -i ~/.ssh/id_ed25519.pub admin@synology
 ssh usuario@maquina docker version
 ```
 
-> [!IMPORTANT]
-> Los pasos 2, 3 y 4 se hacen **en la máquina del bot, no dentro del contenedor**. El bot no puede aceptar una huella nueva por ti: no hay terminal donde responder «yes», y el `.ssh` se mapea en solo lectura, así que no puede escribir en `known_hosts`. Si la máquina remota no está ya en tu `known_hosts`, el bot dirá que no responde con un `Host key verification failed`.
+> ❗ **Importante:** los pasos 2, 3 y 4 se hacen **en la máquina del bot, no dentro del contenedor**. El bot no puede aceptar una huella nueva por ti: no hay terminal donde responder «yes», y el `.ssh` se mapea en solo lectura, así que no puede escribir en `known_hosts`. Si la máquina remota no está ya en tu `known_hosts`, el bot dirá que no responde con un `Host key verification failed`.
 
 **5. Da acceso al socket al usuario remoto** *(por cada máquina)*, si el paso 4 se quejó de permisos:
 
@@ -375,8 +371,7 @@ Eso tiene dos ventajas más allá de las claves. La primera es que las URLs se q
 
 </details>
 
-> [!NOTE]
-> El fichero `~/.ssh/config` también se mapea al contenedor, porque ya estás mapeando el directorio entero. No hace falta añadir nada al docker-compose.
+> ℹ️ **Nota:** el fichero `~/.ssh/config` también se mapea al contenedor, porque ya estás mapeando el directorio entero. No hace falta añadir nada al docker-compose.
 
 </details>
 
@@ -411,8 +406,7 @@ docker -H tcp://maquina:2375 version
 
 Si responde, añádelo en el bot igual que uno por ssh —`/settings` → **🖥️ Hosts de Docker** → **➕ Añadir host**— mandándole `nas tcp://maquina:2375`.
 
-> [!WARNING]
-> Esto **no lleva TLS ni autenticación**: el proxy acota qué se puede hacer, no quién puede hacerlo. Publica el puerto solo en una red en la que confíes —Tailscale, WireGuard, una VLAN aislada—, nunca en internet. Si necesitas exponerlo fuera, usa TLS (ver FAQ).
+> ⚠️ **Aviso:** esto **no lleva TLS ni autenticación**: el proxy acota qué se puede hacer, no quién puede hacerlo. Publica el puerto solo en una red en la que confíes —Tailscale, WireGuard, una VLAN aislada—, nunca en internet. Si necesitas exponerlo fuera, usa TLS (ver FAQ).
 
 </details>
 
@@ -436,8 +430,7 @@ Si eso responde, tu URL es `ssh://root@unraid`.
 
 Los dos tropiezos habituales son que el `docker` de Container Manager no está en el PATH de una sesión ssh, y que el socket es de `root` y tu usuario administrador no lo alcanza. En DSM moderno el login directo como root está deshabilitado, así que si te topas con eso la salida práctica es un contenedor **socket proxy** en el propio Synology, que además te deja limitar qué puede hacer el bot.
 
-> [!TIP]
-> Si tienes tus máquinas en una red privada tipo Tailscale o WireGuard, `tcp://` a secas sobre esa red te evita tanto los certificados como el ssh, porque el cifrado y la autenticación los pone la malla. Es lo más cómodo cuando ya la tienes montada.
+> 💡 **Consejo:** si tienes tus máquinas en una red privada tipo Tailscale o WireGuard, `tcp://` a secas sobre esa red te evita tanto los certificados como el ssh, porque el cifrado y la autenticación los pone la malla. Es lo más cómodo cuando ya la tienes montada.
 
 </details>
 
@@ -668,8 +661,7 @@ docker --tlsverify --tlscacert=ca.pem --tlscert=cert.pem --tlskey=key.pem   -H t
 
 Las rutas son **las de dentro del contenedor**, o sea la parte derecha del volumen del paso 3. El `id` lo eliges tú y da igual cuál sea, siempre que no se repita: solo tiene que ser estable, porque es lo que atan las programaciones y la caché de actualizaciones.
 
-> [!IMPORTANT]
-> Editar `settings.json` a mano **requiere reiniciar el contenedor**: el bot lo lee al arrancar y lo mantiene en memoria. Después del reinicio el host aparece en `/settings` → **🖥️ Hosts de Docker** como cualquier otro, y ya se puede probar, renombrar y quitar desde ahí.
+> ❗ **Importante:** editar `settings.json` a mano **requiere reiniciar el contenedor**: el bot lo lee al arrancar y lo mantiene en memoria. Después del reinicio el host aparece en `/settings` → **🖥️ Hosts de Docker** como cualquier otro, y ya se puede probar, renombrar y quitar desde ahí.
 
 </details>
 
