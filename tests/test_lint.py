@@ -523,3 +523,41 @@ def test_nothing_the_bot_starts_outlives_it():
 
 	assert not problems, (
 		"hilos que impedirían al proceso salir:\n" + "\n".join(problems))
+
+
+def test_a_shadowed_builtin_is_never_called_before_its_definition():
+	"""
+	`store` defines its own `set()` and, twelve lines above the definition,
+	needed the builtin `set()`. That worked only because of the order the
+	module executes in: move either line, or run the module body twice, and it
+	becomes a TypeError about missing arguments — which points nowhere near the
+	cause.
+
+	A call *after* the definition unambiguously means the module's own
+	function, and `store.toggle()` does exactly that on purpose. What is not
+	fine is a bare call *before* it, where which one you get depends on a line
+	number. Those have to say `builtins.set()` and mean it.
+	"""
+	import builtins as builtins_module
+
+	names = set(dir(builtins_module))
+	problems = []
+	for filename in SOURCES:
+		path = os.path.join(harness.REPO, filename)
+		tree = ast.parse(io.open(path, encoding="utf-8").read())
+		defined_at = {node.name: node.lineno for node in tree.body
+						if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+						and node.name in names}
+		if not defined_at:
+			continue
+		for node in ast.walk(tree):
+			if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+				continue
+			line = defined_at.get(node.func.id)
+			if line is not None and node.lineno < line:
+				problems.append(
+					f"  {filename}:{node.lineno}  llama a {node.func.id}() antes de "
+					f"definirlo en la línea {line}: cuál gana depende del orden")
+
+	assert not problems, (
+		"incorporados tapados y llamados antes de su definición:\n" + "\n".join(problems))

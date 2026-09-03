@@ -17,6 +17,7 @@ Every write goes to a temporary file and is moved into place with os.replace,
 which is atomic on POSIX. A reader never sees a half-written document.
 """
 
+import builtins
 import json
 import os
 import threading
@@ -68,8 +69,14 @@ _state = None
 _updates = None
 
 # Files whose writes are being coalesced by batch(), and whether each changed.
+#
+# `builtins.set` y no `set` a secas: este módulo define su propio `set()` unas
+# líneas más abajo, y aquí hace falta el incorporado. Funciona por el orden
+# —esta línea se ejecuta antes que el def— pero solo por eso: mover una de las
+# dos, o volver a ejecutar el módulo, convierte esto en un TypeError. Decirlo
+# explícitamente cuesta una palabra y quita la trampa.
 _batch_depth = 0
-_batch_dirty = set()
+_batch_dirty = builtins.set()
 
 
 # ---------------------------------------------------------------------------

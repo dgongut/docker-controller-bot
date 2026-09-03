@@ -8,9 +8,38 @@ Implements:
 
 import queue
 import time
-from threading import Thread, Lock
+from threading import Thread
 
 from logger import debug, error, warning
+
+
+# Lo que Telegram va a contestar igual por muchas veces que se le pregunte.
+# Reintentar esto cuesta la espera y la llamada y no cambia nada, y la cola es
+# serie: cada segundo que se pasa aquí lo esperan todos los demás mensajes.
+#
+# El caso corriente es un mensaje que ya no está —el usuario cerró el menú, o
+# lo borró el propio bot— y ahí el borrado o la edición no se pueden hacer por
+# definición.
+PERMANENT_FAILURES = (
+	"message is not modified",
+	"message to edit not found",
+	"message to delete not found",
+	"message can't be edited",
+	"message can't be deleted",
+	"message identifier is not specified",
+	"message thread not found",
+	"chat not found",
+	"bot was blocked by the user",
+	"user is deactivated",
+	"bot is not a member",
+	"not enough rights",
+)
+
+
+def _is_permanent(error_message):
+	"""Whether asking again would get the same answer."""
+	lowered = error_message.lower()
+	return any(marker in lowered for marker in PERMANENT_FAILURES)
 
 
 class MessageQueue:
@@ -18,7 +47,6 @@ class MessageQueue:
 		self.queue = queue.Queue()
 		self.delay_between_messages = delay_between_messages
 		self.max_retries = max_retries
-		self.lock = Lock()
 		self.running = True
 		self.worker_thread = Thread(target=self._process_queue, daemon=True)
 		self.worker_thread.start()
@@ -56,6 +84,14 @@ class MessageQueue:
 					return result
 				except Exception as e:
 					error_msg = str(e)
+					# Nothing to gain from asking again, and the queue is
+					# serial: give up now instead of sleeping through two more
+					# attempts while every other message waits.
+					if _is_permanent(error_msg):
+						debug(f"Not retrying, Telegram will answer the same: {error_msg}")
+						if result_queue:
+							result_queue.put(None)
+						return None
 					# Detect Telegram rate limiting
 					if "Too Many Requests" in error_msg or "429" in error_msg:
 						if attempt < self.max_retries - 1:

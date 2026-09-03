@@ -1042,6 +1042,52 @@ def test_the_update_result_carries_its_host_and_the_failure_keeps_the_prefix():
 	assert 'f"{label}{result}"' in source, "el fallo ya no lleva el prefijo"
 
 
+def test_the_queue_gives_up_on_what_telegram_will_refuse_again():
+	"""
+	The queue is serial and it slept between retries: 1s then 2s. A message
+	that is gone —the user closed the menu, or the bot deleted it— cannot be
+	edited or deleted by definition, so those three seconds were spent to get
+	the same answer while every other message waited behind them.
+	"""
+	import message_queue as mq
+
+	calls = []
+
+	def always_missing(*args, **kwargs):
+		calls.append(1)
+		raise Exception("Bad Request: message to edit not found")
+
+	queue = mq.MessageQueue(delay_between_messages=0)
+	try:
+		started = time.monotonic()
+		assert queue.add_message(always_missing, wait_for_result=True) is None
+		spent = time.monotonic() - started
+		assert len(calls) == 1, f"lo ha intentado {len(calls)} veces"
+		assert spent < 1, f"ha tardado {spent:.1f}s, así que ha dormido"
+	finally:
+		queue.shutdown()
+
+
+def test_the_queue_still_retries_a_rate_limit():
+	"""The backoff is the whole point of the queue; only the futile part goes."""
+	import message_queue as mq
+
+	calls = []
+
+	def rate_limited(*args, **kwargs):
+		calls.append(1)
+		if len(calls) < 2:
+			raise Exception("Too Many Requests: retry after 1")
+		return "enviado"
+
+	queue = mq.MessageQueue(delay_between_messages=0)
+	try:
+		assert queue.add_message(rate_limited, wait_for_result=True) == "enviado"
+		assert len(calls) == 2, calls
+	finally:
+		queue.shutdown()
+
+
 def _press_every_command(**arguments):
 	"""Runs every command with the given arguments; returns the ones that raised."""
 	broken = []
