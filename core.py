@@ -1373,7 +1373,8 @@ class DockerScheduleMonitor:
 					fichero_temporal = get_temporal_file(data, prune_label)
 					x = send_message(message=get_text("loading_file"))
 					send_document(document=fichero_temporal, reply_markup=markup, caption=result_message)
-					delete_message(x.message_id)
+					if x:
+						delete_message(x.message_id)
 				else:
 					debug(f"Scheduled prune executed: {result_message}")
 
@@ -3628,7 +3629,8 @@ def info(containerId, containerName):
 	markup = InlineKeyboardMarkup(row_width = 1)
 	x = send_message(message=get_text("obtaining_info", containerName))
 	result, possible_update = manager_for(containerId).get_info(container_id=ref_id(containerId), container_name=containerName)
-	delete_message(x.message_id)
+	if x:
+		delete_message(x.message_id)
 	if possible_update:
 		markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{containerId}"))
 	markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
@@ -6336,6 +6338,28 @@ def delete_message(message_id, chat_id=None):
 	if chat_id is None:
 		chat_id = get_reply_chat_id()
 	message_queue.add_message(_delete_message_direct, chat_id, message_id, wait_for_result=False)
+
+def delete_message_later(sent, seconds):
+	"""
+	Removes a message after a delay, without holding a thread meanwhile.
+
+	The self-destructing messages used to sleep in line, which parks one of
+	telebot's workers for as long as the message is meant to last — 45 seconds
+	for /donate, and /start now puts both of them one tap away.
+
+	The chat is captured now rather than looked up when the timer fires: the
+	reply context is thread-local and a timer thread has none, so it would fall
+	back to TELEGRAM_GROUP and delete in the wrong chat.
+	"""
+	if not sent:
+		return None
+	chat_id = sent.chat.id
+	message_id = sent.message_id
+	timer = threading.Timer(seconds, lambda: delete_message(message_id, chat_id))
+	timer.daemon = True
+	timer.start()
+	return timer
+
 
 def send_message(chat_id=None, message=None, reply_markup=None, parse_mode="html", disable_web_page_preview=True):
 	"""Sends a message using the queue (waits for result to get the message_id)"""

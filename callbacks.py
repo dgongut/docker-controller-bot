@@ -179,7 +179,8 @@ def cb_delete(ctx):
 	x = core.send_message(message=get_text("deleting", ctx.containerName))
 	result = core.manager_for(ctx.containerId).delete(
 		container_id=core.ref_id(ctx.containerId), container_name=ctx.containerName)
-	core.delete_message(x.message_id)
+	if x:
+		core.delete_message(x.message_id)
 	core.send_message(message=result)
 
 @callback(

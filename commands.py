@@ -12,8 +12,6 @@ Importing this module is what registers the commands, so the entry point has
 to import it before polling starts.
 """
 
-import time
-
 import store
 
 from i18n import get_text
@@ -24,7 +22,7 @@ from core import (
 	VERSION, ask_command, ask_text_input,
 	build_generic_keyboard, build_hierarchical_keyboard, change_tag_container,
 	compose, confirm_delete, container_ref, create_simple_keyboard,
-	delete_message, display_all_hosts,
+	delete_message_later, display_all_hosts,
 	info, log_file, logs,
 	mute, print_donors, restart,
 	run, save_container_refs, save_multi_action,
@@ -153,16 +151,12 @@ def cmd_prune(user_id=None, chat_id=None, container_id=None, container_name=None
 	send_prune_menu()
 
 def cmd_version(user_id=None, chat_id=None, container_id=None, container_name=None, argument=None):
-	x = send_message(message=get_text("version", VERSION))
-	if x:
-		time.sleep(15)
-		delete_message(x.message_id)
+	# Self-destructing, but on a timer rather than by sleeping here: waiting in
+	# line parks one of telebot's workers for the whole life of the message.
+	delete_message_later(send_message(message=get_text("version", VERSION)), 15)
 
 def cmd_donate(user_id=None, chat_id=None, container_id=None, container_name=None, argument=None):
-	x = send_message(message=get_text("donate"))
-	if x:
-		time.sleep(45)
-		delete_message(x.message_id)
+	delete_message_later(send_message(message=get_text("donate")), 45)
 
 def cmd_donors(user_id=None, chat_id=None, container_id=None, container_name=None, argument=None):
 	print_donors()

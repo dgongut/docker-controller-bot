@@ -696,6 +696,62 @@ def test_a_picker_with_nothing_anywhere_says_so():
 		_restore_hosts()
 
 
+def test_a_self_destructing_message_does_not_park_a_worker():
+	"""
+	/version and /donate remove themselves after 15 and 45 seconds. Sleeping
+	through that in line holds one of telebot's workers for the whole time, and
+	/start now puts both of them one tap away.
+	"""
+	sent = MagicMock()
+	sent.message_id = 4242
+	sent.chat.id = -100777
+
+	deleted = []
+	original = (commands.send_message, dcb.delete_message)
+	commands.send_message = lambda *a, **k: sent
+	dcb.delete_message = lambda message_id, chat_id=None: deleted.append((message_id, chat_id))
+	try:
+		started = time.monotonic()
+		commands.cmd_version()
+		assert time.monotonic() - started < 1, "el comando no puede esperar a que caduque"
+		assert deleted == [], "y tampoco borrar de inmediato"
+
+		# The timer itself, run now rather than in fifteen seconds.
+		timer = dcb.delete_message_later(sent, 0)
+		timer.join(5)
+		assert deleted == [(4242, -100777)], deleted
+	finally:
+		commands.send_message, dcb.delete_message = original
+
+
+def test_a_deferred_delete_remembers_which_chat_it_was_for():
+	"""
+	The reply context is thread-local and a timer thread has none, so looking
+	the chat up when the timer fires would fall back to TELEGRAM_GROUP and
+	delete somebody else's message. It has to be captured up front.
+	"""
+	sent = MagicMock()
+	sent.message_id = 7
+	sent.chat.id = 12345          # un chat privado, no el grupo
+
+	deleted = []
+	original = dcb.delete_message
+	dcb.delete_message = lambda message_id, chat_id=None: deleted.append((message_id, chat_id))
+	try:
+		dcb.set_reply_context(12345)
+		timer = dcb.delete_message_later(sent, 0)
+		dcb.clear_reply_context()
+		timer.join(5)
+		assert deleted == [(7, 12345)], deleted
+	finally:
+		dcb.delete_message = original
+
+
+def test_deferring_a_message_that_was_never_sent_does_nothing():
+	"""send_message returns None on a failed send, and None has no chat."""
+	assert dcb.delete_message_later(None, 0) is None
+
+
 def _capture_updateall():
 	"""Runs /updateall and returns the message and keyboard it sent."""
 	captured = {}

@@ -273,3 +273,98 @@ def test_container_buttons_never_carry_a_bare_id():
 
 	assert not problems, (
 		"botones de contenedor con id suelto en vez de referencia:\n" + "\n".join(problems))
+
+
+# The calls that hand back a message object, and therefore hand back None when
+# Telegram is saturated or the network drops. Nothing else the bot sends waits
+# for a result.
+MESSAGE_SENDERS = ("send_message", "send_message_to_notification_channel")
+
+
+def _sends_a_message(node):
+	"""Whether an expression is a call to something that returns a message."""
+	if not isinstance(node, ast.Call):
+		return False
+	target = node.func
+	if isinstance(target, ast.Attribute):
+		return target.attr in MESSAGE_SENDERS
+	return isinstance(target, ast.Name) and target.id in MESSAGE_SENDERS
+
+
+def _parents(tree):
+	"""Each node's parent, so a check can be looked for above a use."""
+	table = {}
+	for node in ast.walk(tree):
+		for child in ast.iter_child_nodes(node):
+			table[child] = node
+	return table
+
+
+def _names_in(node):
+	return {sub.id for sub in ast.walk(node) if isinstance(sub, ast.Name)}
+
+
+def _is_guarded(node, name, parents):
+	"""
+	Whether a use of `name` sits behind a check that it is not None.
+
+	Walks up from the use, so all three shapes the bot writes count: the
+	`if x:` block the commands use, the `x.message_id if x else None` of the
+	schedule flow, and `x and x.message_id`.
+	"""
+	child = node
+	parent = parents.get(child)
+	while parent is not None:
+		if isinstance(parent, ast.If) and child in parent.body:
+			if name in _names_in(parent.test):
+				return True
+		elif isinstance(parent, ast.IfExp) and child is parent.body:
+			if name in _names_in(parent.test):
+				return True
+		elif isinstance(parent, ast.BoolOp) and isinstance(parent.op, ast.And):
+			earlier = parent.values[:parent.values.index(child)] if child in parent.values else []
+			if any(name in _names_in(value) for value in earlier):
+				return True
+		child, parent = parent, parents.get(parent)
+	return False
+
+
+def test_a_message_that_was_never_sent_is_not_dereferenced():
+	"""
+	send_message returns None when the send fails, and reading .message_id off
+	it raises inside whatever was running. That is how a scheduled prune with
+	output could lose its whole execution to a moment of Telegram saturation:
+	the guard the manual commands had was missing there.
+	"""
+	problems = []
+	for filename in ("core.py", "commands.py", "callbacks.py"):
+		path = os.path.join(harness.REPO, filename)
+		tree = ast.parse(io.open(path, encoding="utf-8").read())
+		parents = _parents(tree)
+		for function in ast.walk(tree):
+			if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+				continue
+
+			# Names in this function that hold the result of a send.
+			held = set()
+			for node in ast.walk(function):
+				if isinstance(node, ast.Assign) and _sends_a_message(node.value):
+					for target in node.targets:
+						if isinstance(target, ast.Name):
+							held.add(target.id)
+			if not held:
+				continue
+
+			for node in ast.walk(function):
+				if not isinstance(node, ast.Attribute) or node.attr != "message_id":
+					continue
+				if not isinstance(node.value, ast.Name) or node.value.id not in held:
+					continue
+				if _is_guarded(node, node.value.id, parents):
+					continue
+				problems.append(
+					f"  {filename}:{node.lineno}  {function.name}() lee "
+					f"{node.value.id}.message_id sin comprobar que se envió")
+
+	assert not problems, (
+		"mensajes sin enviar usados como si existieran:\n" + "\n".join(problems))
