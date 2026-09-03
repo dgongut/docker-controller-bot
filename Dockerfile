@@ -23,7 +23,7 @@ RUN apk add --no-cache python3 py3-pip tzdata curl unzip py3-paramiko openssh-cl
     mv /tmp/docker-controller-bot-${VERSION}/docker_update.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/docker_compose_manager.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/compose_generator.py /app && \
-    mv /tmp/docker-controller-bot-${VERSION}/schedule_flow.py /app && \
+    mv /tmp/docker-controller-bot-${VERSION}/own_container.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/schedule_manager.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/port_manager.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/logger.py /app && \
