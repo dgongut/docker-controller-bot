@@ -861,6 +861,73 @@ _ARG_FOR = {
 }
 
 
+def _press_every_command(**arguments):
+	"""Runs every command with the given arguments; returns the ones that raised."""
+	broken = []
+	for name in sorted(n for n in dir(commands) if n.startswith("cmd_")):
+		try:
+			getattr(commands, name)(user_id=1, chat_id=1, **arguments)
+		except Exception as e:
+			broken.append((name, e))
+	return broken
+
+
+def test_every_command_runs_in_its_three_shapes():
+	"""
+	Eighteen of the twenty-one commands were never called by any test. Each one
+	answers in three shapes — bare for a menu, with a container to act
+	directly, and with a typed argument — and only the bare one had ever run.
+	"""
+	local = dcb.host_registry.local_host_id()
+	undo, restore = _quiet_bot(), _snapshot_settings()
+	original_later = dcb.delete_message_later
+	dcb.delete_message_later = lambda *a, **k: None
+	try:
+		shapes = {
+			"sin argumentos": {},
+			"con contenedor": {"container_id": f"{local}:abc12", "container_name": "nginx"},
+			"con argumento": {"argument": "nginx"},
+		}
+		broken = {label: _press_every_command(**args) for label, args in shapes.items()}
+	finally:
+		dcb.delete_message_later = original_later
+		undo(); restore()
+	problems = [f"  {label}: {name}: {type(e).__name__}: {e}"
+				for label, items in broken.items() for name, e in items]
+	assert not problems, "comandos que revientan:\n" + "\n".join(problems)
+
+
+def test_every_command_survives_the_host_being_down():
+	"""Same promise as the buttons: a machine that is gone degrades, not crashes."""
+	import docker
+
+	down = Exception("no route to host")
+
+	def dead(*args, **kwargs):
+		fake = MagicMock()
+		for attribute in ("ping", "info", "version", "df"):
+			getattr(fake, attribute).side_effect = down
+		for collection in ("containers", "images", "volumes", "networks"):
+			for method in ("list", "get", "prune"):
+				getattr(getattr(fake, collection), method).side_effect = down
+		return fake
+
+	local = dcb.host_registry.local_host_id()
+	undo, restore = _quiet_bot(), _snapshot_settings()
+	original_later, original_sdk = dcb.delete_message_later, docker.DockerClient
+	dcb.delete_message_later = lambda *a, **k: None
+	docker.DockerClient = dead
+	dcb.host_registry.reset(); dcb.forget_managers()
+	try:
+		broken = _press_every_command(container_id=f"{local}:abc12", container_name="nginx")
+	finally:
+		docker.DockerClient = original_sdk
+		dcb.delete_message_later = original_later
+		undo(); restore()
+	assert not broken, "comandos que revientan con el host caído:\n" + "\n".join(
+		f"  {name}: {type(e).__name__}: {e}" for name, e in broken)
+
+
 def _press_every_callback():
 	"""
 	Runs every registered handler with a plausible context, and returns the

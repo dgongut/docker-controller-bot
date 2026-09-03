@@ -486,3 +486,37 @@ def test_the_module_that_locks_last_depends_on_nothing_above_it():
 	assert not problems, (
 		"un módulo con lock propio depende de otro que se toma antes:\n"
 		+ "\n".join(problems))
+
+
+def test_nothing_the_bot_starts_outlives_it():
+	"""
+	A non-daemon thread or timer keeps the interpreter from exiting: it waits
+	to join it. The two `/mute` timers were the only ones in the project
+	missing the flag, so muting for an hour left the container unable to shut
+	down until Docker gave up and sent SIGKILL — taking whatever the message
+	queue still had in flight with it.
+	"""
+	problems = []
+	for filename in SOURCES:
+		path = os.path.join(harness.REPO, filename)
+		source = io.open(path, encoding="utf-8").read()
+		tree = ast.parse(source)
+		spans = _function_spans(tree)
+		for node in ast.walk(tree):
+			if not isinstance(node, ast.Call):
+				continue
+			target = node.func
+			name = ast.unparse(target) if isinstance(target, ast.Attribute) else getattr(target, "id", "")
+			if name not in ("threading.Thread", "threading.Timer"):
+				continue
+			# Either passed as an argument, or set on the object right after.
+			if any(kw.arg == "daemon" for kw in node.keywords):
+				continue
+			span = _function_around(spans, node.lineno)
+			body = source.splitlines()[node.lineno - 1:(span[1] if span else node.lineno + 4)]
+			if any(".daemon = True" in line for line in body[:5]):
+				continue
+			problems.append(f"  {filename}:{node.lineno}  {name} sin daemon")
+
+	assert not problems, (
+		"hilos que impedirían al proceso salir:\n" + "\n".join(problems))

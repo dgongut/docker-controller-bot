@@ -3650,7 +3650,11 @@ def mute(minutes):
 				send_message(message=get_text("muted_singular"))
 			else:
 				send_message(message=get_text("muted", minutes))
+		# Daemon como todo lo demás que el bot arranca: sin eso el intérprete
+		# espera a unirlo al salir, así que un /mute de una hora dejaba al
+		# contenedor sin apagarse hasta que Docker lo mataba a SIGKILL.
 		_unmute_timer = threading.Timer(minutes * 60, unmute)
+		_unmute_timer.daemon = True
 		_unmute_timer.start()
 
 def unmute():
@@ -3693,6 +3697,7 @@ def check_mute():
 	elif _unmute_timer is None:
 		# Still muted: re-arm the timer for whatever is left of it.
 		_unmute_timer = threading.Timer(mute_until - time.time(), unmute)
+		_unmute_timer.daemon = True
 		_unmute_timer.start()
 
 def compose(containerId, containerName):
