@@ -22,6 +22,13 @@ DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 
 # Variables the bot refuses to start without. The values only have to be
 # well-formed: nothing here ever reaches Telegram.
+#
+# CONTAINER_NAME is in here on purpose even though the bot no longer needs it:
+# the tests run outside a container, where there is no /proc/self/mountinfo to
+# read, so this is what keeps the fallback path — matching the name on the
+# local host — under test. The detection path itself is covered by
+# test_identity.py against captured /proc files, and by the tests that stand in
+# for own_container_ids().
 BOOTSTRAP_ENV = {
 	"TELEGRAM_TOKEN": "111111:test-token",
 	"TELEGRAM_ADMIN": "4405089",

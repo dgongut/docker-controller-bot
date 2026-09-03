@@ -1429,6 +1429,44 @@ def test_a_daemon_that_answers_the_wrong_container_is_not_believed():
 		_restore_hosts()
 
 
+def test_everything_still_works_with_no_container_name_at_all():
+	"""
+	The new default: no CONTAINER_NAME anywhere, identity worked out from
+	/proc. The suite runs outside a container so the variable is set in the
+	harness to keep the fallback under test — this is the other half, and it
+	is what a fresh 5.0.0 install actually looks like.
+	"""
+	_with_hosts([HOST_FIXTURE[0]], unreachable=())
+	me = _container("cualquier-nombre", "running")
+	me.id = "9" * 64
+	previous_name = dcb.CONTAINER_NAME
+	undo = _pretend_to_be(me)
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": [me, _container("nginx", "running")]
+	dcb.CONTAINER_NAME = None
+	try:
+		for owner in dcb.managers():
+			owner.client.containers.get = lambda _id, _me=me: _me
+		# Se identifica sin la variable...
+		assert dcb.own_container() == ("h_local", me.id, me.name)
+		assert dcb.own_container_name() == "cualquier-nombre"
+		# ...las salvaguardas funcionan...
+		local = dcb.manager("h_local")
+		refusal = i18n.get_text("error_can_not_do_that")
+		assert local.stop_container(me.id, me.name) == refusal
+		assert local.delete(me.id, me.name) == refusal
+		# ...y otro contenedor sigue siendo gestionable.
+		assert local.stop_container("abc12", "nginx") != refusal
+		# El guarda de arranque no se queja, porque no hay nada de qué.
+		dcb.check_own_container()
+		# Y el mensaje de arranque usa el nombre averiguado.
+		assert "cualquier-nombre" in dcb.build_starting_message()
+	finally:
+		dcb.CONTAINER_NAME = previous_name
+		dcb.DockerManager.list_containers = original
+		undo(); _restore_hosts()
+
+
 def _press_every_command(**arguments):
 	"""Runs every command with the given arguments; returns the ones that raised."""
 	broken = []
