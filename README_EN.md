@@ -36,6 +36,7 @@ Have controll of your docker containers from one single place.
 - ✅ List ports used by containers, check whether a specific port is free and generate random available ports
 - ✅ Show detailed information for a container or a whole Compose project
 - ✅ Schedule tasks with cron expressions: run, stop, restart, exec, prune and mute
+- ✅ Several Docker hosts from a single bot, over `ssh://`, `tcp://` or TLS: added from the chat itself, and with a single host everything looks exactly as it always did
 - ✅ Settings editable from the bot itself with `/settings`, without touching the docker-compose or restarting
 - ✅ Button-based main menu in `/start`, grouped into categories; typed commands keep working exactly as before
 - ✅ Mute notifications temporarily
@@ -71,7 +72,7 @@ Most commands can be used in two ways: typing the command alone (`/run`) to let 
 | `/exec` | Run a command inside a container |
 | `/logs` `/logfile` | Logs in the chat or as a file |
 | `/checkupdate` | Check whether a container has an update available |
-| `/updateall` | Update every container |
+| `/updateall` | Update every container, across every host at once |
 | `/changetag` | Change the image tag (rollback or jump to another version) |
 | `/compose` | Extract the `docker-compose` of a container or a project |
 | `/info` | Show detailed information of a container or a project |
@@ -79,7 +80,7 @@ Most commands can be used in two ways: typing the command alone (`/run`) to let 
 | `/prune` | Clean up unused containers, images, networks or volumes |
 | `/mute <minutes>` | Mute notifications for a number of minutes |
 | `/schedule` | Menu to create, edit and delete scheduled tasks |
-| `/settings` | Bot settings: language, columns, update checking and notification channel |
+| `/settings` | Bot settings: language, columns, update checking, notification channel and **Docker hosts** |
 | `/version` `/donate` `/donors` | Current version / donate / list of donors |
 
 ## Docker Compose support
@@ -94,6 +95,7 @@ From `/schedule` you can create tasks that run on a cron schedule.
 
 - Supported actions: `run`, `stop`, `restart`, `exec`, `prune` and `mute`.
 - Accepts standard cron expressions (`0 */4 * * *`) and shortcuts: `@yearly`, `@monthly`, `@weekly`, `@daily`, `@hourly` and `@reboot`.
+- With several hosts the bot asks which one the task runs on, and the host shows up in the summary and in the listing. `mute` is the exception: it silences the bot's own notifications, so it belongs to no machine.
 - Schedules are persisted under `/app/config` (don't forget to map that volume).
 
 ## Docker Compose variables
@@ -123,6 +125,7 @@ Everything else is configured from the bot itself and stored in `settings.json`,
 |Check interval| Hours between checks. Decimals are accepted. Default is 4 |
 |Stopped containers| Whether stopped containers are checked for updates too. Enabled by default |
 |Notification channel| Channel where container status changes are exclusively published (start, stop, creation and automatic updates). Management still happens in the private chat with the bot or in TELEGRAM_GROUP. The bot verifies it can post there before saving it |
+|Docker hosts| The machines the bot manages. Added, tested, renamed and removed from here. See [Remote hosts](#remote-hosts) |
 
 Changes made from `/settings` apply immediately, without restarting the container. If you prefer to edit `settings.json` by hand, a restart is needed for it to be read.
 
@@ -212,6 +215,23 @@ The bot runs as `root` inside the container, so it reads `/root/.ssh`. It has to
 
 The connection is opened by the system `ssh` client, not by an implementation of our own, so your whole `~/.ssh/config` applies: host aliases, ports, `IdentityFile`, `User`. If your config has a `Host nas`, the URL can simply be `ssh://nas`.
 
+**7. Add the host in the bot.** No need to touch the docker-compose again: open `/settings`, go into **🖥️ Docker hosts**, press **➕ Add host** and send it the host in a single message, with whatever name you want to give it in front:
+
+```
+nas ssh://user@nas
+```
+
+The name is optional; leave it out and the bot takes it from the URL. It tests the connection before saving, so if something is wrong it tells you there and then and saves nothing:
+
+| What the bot answers | What it means |
+|:---|:---|
+| `✅ Host nas added` | Done. Its containers show up in `/list` from that moment |
+| `❌ I could not connect` | The reason comes right below it. It is the same one the step 4 check would give you |
+| `❌ I don't know how to connect to...` | The URL does not start with `ssh://`, `tcp://` or `unix://` |
+| `❌ is already registered` | That machine is already added; adding it twice would show its containers duplicated |
+
+After that, pressing the host on that same screen lets you **🔄 Test again**, **✏️ Rename** or **🗑️ Remove host**. The 🟢 and 🔴 in the list tell you at a glance which one answers.
+
 ### Several servers
 
 Adding the second and the third is repeating step 3 for each. One key authorises on as many machines as you like, and that is what I would do on a home network: fewer files to manage and fewer places to get it wrong.
@@ -288,6 +308,8 @@ The URL for the bot is then `tcp://machine:2375`. Check it first from the bot's 
 docker -H tcp://machine:2375 version
 ```
 
+If it answers, add it in the bot the same way as an ssh one — `/settings` → **🖥️ Docker hosts** → **➕ Add host** — sending it `nas tcp://machine:2375`. See [step 7](#step-by-step-with-ssh).
+
 > [!WARNING]
 > This carries **no TLS and no authentication**: the proxy limits what can be done, not who can do it. Publish the port only on a network you trust — Tailscale, WireGuard, an isolated VLAN — never on the internet. If you need it exposed beyond that, use TLS.
 
@@ -346,9 +368,30 @@ volumes:
 **4. Check before configuring the bot:**
 
 ```bash
-docker --tlsverify --tlscacert=ca.pem --tlscert=cert.pem --tlskey=key.pem \
-  -H tcp://machine.local:2376 version
+docker --tlsverify --tlscacert=ca.pem --tlscert=cert.pem --tlskey=key.pem   -H tcp://machine.local:2376 version
 ```
+
+**5. Declare the host by hand.** This is the one route that **cannot** be added from `/settings`: the add-host screen only asks for a URL, and a TLS host also needs the paths of the three certificates. It goes into `settings.json`, inside the volume you mapped, in the `hosts` list:
+
+```json
+{
+    "id": "h_tls1",
+    "alias": "machine",
+    "url": "tcp://machine.local:2376",
+    "local": false,
+    "tls": {
+        "ca": "/certs/ca.pem",
+        "cert": "/certs/cert.pem",
+        "key": "/certs/key.pem",
+        "verify": true
+    }
+}
+```
+
+The paths are the ones **inside the container**, that is the right-hand side of the volume from step 3. The `id` is yours to pick and its value does not matter as long as it is unique: it only has to be stable, because it is what schedules and the update cache are tied to.
+
+> [!IMPORTANT]
+> Editing `settings.json` by hand **requires restarting the container**: the bot reads it at start-up and keeps it in memory. After the restart the host shows up in `/settings` → **🖥️ Docker hosts** like any other, and can be tested, renamed and removed from there.
 
 ### Synology, UnRAID and other NAS
 
@@ -401,6 +444,7 @@ services:
         volumes:
             - /var/run/docker.sock:/var/run/docker.sock # DON'T CHANGE
             - /path/to/save/the/config:/app/config # CHANGE THE LEFT PATH
+            #- ~/.ssh:/root/.ssh:ro # Only if you are going to use remote ssh:// hosts
             #- ~/.docker/config.json:/root/.docker/config.json # ONLY IF YOU NEED LOGIN
         image: dgongut/docker-controller-bot:latest
         container_name: docker-controller-bot
@@ -510,6 +554,36 @@ Every other message (command results, interactive menus, available-update notice
 </details>
 
 <details>
+<summary>🖥️ I have several hosts, how do I know which machine a container is on?</summary>
+
+The bot tells you, and only when it needs to.
+
+With **a single host** the host level shows up nowhere: `/list` and every menu look exactly as they did before hosts existed. There is nothing to learn and nothing changes.
+
+As soon as you have **two or more**, it appears where it matters: `/list` groups containers by machine under a header, every action message says which host it is talking about, and the `/run`, `/stop`, `/logs`… menus ask you for the host first — unless only one of them has anything to offer, in which case the question is skipped and it goes straight there.
+
+If two machines have a container with the same name and you type `/logs nginx`, the bot does not guess: it asks you which of the two.
+
+</details>
+
+<details>
+<summary>🔌 A host shows up 🔴 red, what do I do?</summary>
+
+Go into `/settings` → **🖥️ Docker hosts** and press it: the host screen tells you the exact reason it failed, and gives you a **🔄 Test again** to retry without leaving the screen.
+
+The important part is that **one machine being down does not break the rest**: `/list` keeps working and shows the hosts that do answer, flagging the one that does not. Commands and update checks skip the one that is out.
+
+To diagnose it, the same old check from the bot's machine is worth more than any menu:
+
+```bash
+ssh user@machine docker version
+```
+
+The message it gives you there is the same one the bot is giving you, but with all the detail. The usual causes are in the table under [How to reach a remote host](#the-check-that-settles-it).
+
+</details>
+
+<details>
 <summary>💬 Where can I control the bot from?</summary>
 
 From the private chat with the bot and from the group (or the specific supergroup topic) you configured in `TELEGRAM_GROUP` and `TELEGRAM_THREAD`.
@@ -546,10 +620,29 @@ docker-controller-bot/
     ├── LICENSE
     ├── requirements.txt
     ├── README.md
-    ├── config.py
-    ├── docker-controller-bot.py
     ├── Dockerfile_local
-    ├── docker-compose.yaml
+    ├── docker-compose.debug.yaml
+    ├── docker-controller-bot.py   # entry point: imports and starts
+    ├── core.py                    # the core: DockerManager, monitors, keyboards, UI
+    ├── commands.py                # one `cmd_*` per command
+    ├── callbacks.py               # one `cb_*` per button
+    ├── callback_registry.py       # the `@callback` decorator and the parsing
+    ├── host_registry.py           # the Docker hosts and their client cache
+    ├── store.py                   # settings.json, state and caches
+    ├── migration.py               # start-up migrations (4.x -> 5.0)
+    ├── config.py                  # start-up variables and constants
+    ├── i18n.py                    # locale loading and `get_text`
+    ├── docker_update.py
+    ├── docker_compose_manager.py
+    ├── compose_generator.py
+    ├── port_manager.py
+    ├── schedule_manager.py
+    ├── schedule_flow.py
+    ├── message_queue.py
+    ├── logger.py
+    ├── tests
+    │   ├── run_all.py
+    │   └── ...
     └── locale
         ├── en.json
         ├── es.json
@@ -561,10 +654,20 @@ docker-controller-bot/
         └── it.json
 ```
 
-To start it up, run the following command in the directory: `docker compose -f docker-compose.debug.yaml up -d --build --force-recreate`
+To bring it up, run in that path: `docker compose -f docker-compose.debug.yaml up  -d --build --force-recreate`
 To stop and remove it: `docker compose down --rmi`
 
-To test new changes, simply save your modifications — the changes will hot reload automatically.
+To try out new changes, just save. Changes are reloaded on the fly.
+
+### The tests
+
+```bash
+python3 tests/run_all.py
+```
+
+They need no Docker: the SDK is stubbed and the settings are written into a temporary directory, so they run anywhere. A good part of them checks things that only show up at runtime — names a module does not define, locale keys nothing renders, buttons that would carry an id without its host, markup that drifted in one language — so if you touch code, run them before proposing the change.
+
+You can filter by module: `python3 tests/run_all.py test_hosts`.
 
 ### Debugging with VS Code
 
