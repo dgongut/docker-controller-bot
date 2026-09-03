@@ -6,3 +6,6 @@
 __pycache__
 cache
 schedule
+# Notas de trabajo de la 5.0.0: no son documentación del proyecto.
+NOTAS-*.md
+PLAN-*.md
