@@ -368,3 +368,82 @@ def test_a_message_that_was_never_sent_is_not_dereferenced():
 
 	assert not problems, (
 		"mensajes sin enviar usados como si existieran:\n" + "\n".join(problems))
+
+
+# Locale keys whose text names a container, a project or one of its services.
+# A message built from one of these is about a single machine, and the name
+# alone does not say which: two hosts can run the same container or the same
+# stack. So it has to carry host_label(), which is empty with a single host and
+# therefore costs nothing there.
+#
+# Progress messages with no identity of their own ("loading_file",
+# "fetching_image_data") are not on the list: they say nothing about what they
+# are working on and are deleted a moment later.
+HOST_SCOPED_TEXTS = (
+	"stopped_container", "restarted_container", "started_container",
+	"error_pulling_image", "container_does_not_exist", "confirm_delete",
+	"prompt_enter_command", "confirm_exec", "executed_command",
+	"confirm_change_tag", "change_tag", "error_changing_tag",
+	"error_getting_tags", "confirm_update", "logs", "compose", "deleting",
+	"error_project_not_found", "restarting_project", "starting_project",
+	"stopping_project", "project_restarted_success", "project_started_success",
+	"project_stopped_success", "deleting_project", "project_deleted_success",
+	"deleting_service", "error_deleting_service", "stopping_service",
+	"starting_service", "error_stopping_service", "error_starting_service",
+)
+
+# What counts as saying it. The label is often computed once at the top of a
+# function that sends several of these, so the variable holding it counts too.
+HOST_LABELLERS = ("host_label", "{label}", "host_alias")
+
+# Where a message reaches the user.
+DELIVERY = ("send_message", "send_message_to_notification_channel",
+			"send_document", "edit_message_text")
+
+# The one place with no host to name. A project button carries a short hash of
+# the project name to fit Telegram's 64 bytes, and the hash resolves to the
+# host as well; when it resolves to nothing, neither the project nor the
+# machine is known, and the message names the hash for lack of anything better.
+NO_HOST_TO_NAME = {("core.py", "button_controller", "error_project_not_found")}
+
+
+def test_a_message_about_one_host_says_which():
+	"""
+	The mistake behind three of the reported bugs: a message naming a container
+	or a project, sent from an operation that knew the host and did not mention
+	it. With several machines configured the user cannot tell which one
+	answered, and the names are not unique across them.
+	"""
+	import re
+
+	problems = []
+	key_pattern = re.compile(r"""get_text\(\s*['"]([a-z_]+)['"]""")
+	for filename in ("core.py", "commands.py", "callbacks.py"):
+		path = os.path.join(harness.REPO, filename)
+		source = io.open(path, encoding="utf-8").read()
+		tree = ast.parse(source)
+		spans = _function_spans(tree)
+		for node in ast.walk(tree):
+			if not isinstance(node, ast.Call):
+				continue
+			target = node.func
+			name = target.attr if isinstance(target, ast.Attribute) else getattr(target, "id", None)
+			if name not in DELIVERY:
+				continue
+			segment = ast.get_source_segment(source, node) or ""
+			keys = set(key_pattern.findall(segment)) & set(HOST_SCOPED_TEXTS)
+			if not keys:
+				continue
+			if any(labeller in segment for labeller in HOST_LABELLERS):
+				continue
+			span = _function_around(spans, node.lineno)
+			sender = span[2] if span else "<module>"
+			keys -= {key for key in keys if (filename, sender, key) in NO_HOST_TO_NAME}
+			if not keys:
+				continue
+			problems.append(
+				f"  {filename}:{node.lineno}  {sender}() con "
+				f"{sorted(keys)} y sin host_label")
+
+	assert not problems, (
+		"mensajes de una sola máquina que no dicen cuál:\n" + "\n".join(problems))

@@ -176,12 +176,15 @@ def cb_cancelExec(ctx):
 	params=('containerId',),
 )
 def cb_delete(ctx):
-	x = core.send_message(message=get_text("deleting", ctx.containerName))
+	label = core.host_label(ctx.hostId)
+	x = core.send_message(message=f'{label}{get_text("deleting", ctx.containerName)}')
 	result = core.manager_for(ctx.containerId).delete(
 		container_id=core.ref_id(ctx.containerId), container_name=ctx.containerName)
 	if x:
 		core.delete_message(x.message_id)
-	core.send_message(message=result)
+	# delete() builds its message from the short id alone; the host is known
+	# here, so this is where it gets said.
+	core.send_message(message=f'{label}{result}')
 
 @callback(
 	name='changeTagContainer',
@@ -300,7 +303,8 @@ def cb_updateSelected(ctx):
 		# machines, so they cannot all be looked up on the local one.
 		owner, container = core.find_container(ref)
 		if container is None:
-			core.send_message(message=get_text("container_does_not_exist", core.ref_id(ref)))
+			core.send_message(message=f'{core.host_label(core.ref_host(ref))}'
+										f'{get_text("container_does_not_exist", core.ref_id(ref))}')
 			core.debug(f"Container {ref} not found")
 			continue
 		if core.update_available(container, owner.host_id):
@@ -360,7 +364,7 @@ def cb_enterComposeProject(ctx):
 	project_info = core.manager(ctx.hostId).get_project_info(project_name)
 
 	if not project_info:
-		core.send_message(message=get_text("error_project_not_found", project_name))
+		core.send_message(message=f'{core.host_label(ctx.hostId)}{get_text("error_project_not_found", project_name)}')
 		return
 
 	# Build Level 2 keyboard
@@ -437,7 +441,7 @@ def cb_confirmDeleteWholeProject(ctx):
 	project_info = core.manager(ctx.hostId).get_project_info(project_name)
 
 	if not project_info:
-		core.send_message(message=get_text("error_project_not_found", project_name))
+		core.send_message(message=f'{core.host_label(ctx.hostId)}{get_text("error_project_not_found", project_name)}')
 		return
 
 	container_count = project_info.get_container_count()

@@ -752,6 +752,46 @@ def test_deferring_a_message_that_was_never_sent_does_nothing():
 	assert dcb.delete_message_later(None, 0) is None
 
 
+def _capture_send(call, *args, **kwargs):
+	"""Runs something that sends one message and returns the text it sent."""
+	captured = {}
+	original = dcb.send_message
+	dcb.send_message = lambda message="", reply_markup=None, **kw: captured.setdefault(
+		"message", message) and None
+	try:
+		call(*args, **kwargs)
+	finally:
+		dcb.send_message = original
+	return captured.get("message", "")
+
+
+def test_a_question_about_one_container_says_which_host_it_is_on():
+	"""
+	Two machines can hold a container of the same name, and this one deletes
+	it. The name alone is not enough to know what is about to go.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	try:
+		asked = _capture_send(dcb.confirm_delete, "h_nas:abc12", "nginx")
+		assert "nas" in asked, asked
+		assert "nginx" in asked, asked
+	finally:
+		_restore_hosts()
+
+
+def test_the_same_question_names_no_host_when_there_is_only_one():
+	"""
+	The golden rule. With one host the text has to be exactly what it was
+	before hosts existed — not merely similar.
+	"""
+	_with_hosts([HOST_FIXTURE[0]], unreachable=())
+	try:
+		asked = _capture_send(dcb.confirm_delete, "h_local:abc12", "nginx")
+		assert asked == i18n.get_text("confirm_delete", "nginx"), asked
+	finally:
+		_restore_hosts()
+
+
 def _capture_updateall():
 	"""Runs /updateall and returns the message and keyboard it sent."""
 	captured = {}

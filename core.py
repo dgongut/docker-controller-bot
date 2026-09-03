@@ -320,7 +320,7 @@ class DockerManager:
 			# Send confirmation only for manual commands when muted: the event
 			# monitor is silent while muted, so the user gets no other feedback
 			if from_schedule is False and is_muted():
-				send_message(message=get_text("stopped_container", container_name))
+				send_message(message=f'{host_label(self.host_id)}{get_text("stopped_container", container_name)}')
 			return None
 		except Exception as e:
 			error(f"Could not stop container {container_name}. Error: [{e}]")
@@ -335,7 +335,7 @@ class DockerManager:
 			# Send confirmation only for manual commands when muted: the event
 			# monitor is silent while muted, so the user gets no other feedback
 			if from_schedule is False and is_muted():
-				send_message(message=get_text("restarted_container", container_name))
+				send_message(message=f'{host_label(self.host_id)}{get_text("restarted_container", container_name)}')
 			return None
 		except Exception as e:
 			error(f"Could not restart container {container_name}. Error: [{e}]")
@@ -350,7 +350,7 @@ class DockerManager:
 			# Send confirmation only for manual commands when muted: the event
 			# monitor is silent while muted, so the user gets no other feedback
 			if from_schedule is False and is_muted():
-				send_message(message=get_text("started_container", container_name))
+				send_message(message=f'{host_label(self.host_id)}{get_text("started_container", container_name)}')
 			return None
 		except Exception as e:
 			error(f"Could not start container {container_name}. Error: [{e}]")
@@ -681,7 +681,7 @@ class DockerManager:
 					if loading_msg:
 						delete_message(loading_msg.message_id)
 						loading_msg = None
-					send_message(message=get_text("error_pulling_image", image_with_tag))
+					send_message(message=f'{host_label(self.host_id)}{get_text("error_pulling_image", image_with_tag)}')
 					return
 			except docker.errors.ImageNotFound:
 				error(f"Image {image_with_tag} not found in registry. Check the image name.")
@@ -690,7 +690,7 @@ class DockerManager:
 				if loading_msg:
 					delete_message(loading_msg.message_id)
 					loading_msg = None
-				send_message(message=get_text("error_pulling_image", image_with_tag))
+				send_message(message=f'{host_label(self.host_id)}{get_text("error_pulling_image", image_with_tag)}')
 				return
 			except docker.errors.APIError as e:
 				error(f"Error pulling image {image_with_tag}. Error: [{e}]")
@@ -699,7 +699,7 @@ class DockerManager:
 				if loading_msg:
 					delete_message(loading_msg.message_id)
 					loading_msg = None
-				send_message(message=get_text("error_pulling_image", image_with_tag))
+				send_message(message=f'{host_label(self.host_id)}{get_text("error_pulling_image", image_with_tag)}')
 				return
 
 			local_image_normalized = local_image.replace('sha256:', '')
@@ -2879,7 +2879,8 @@ def button_controller(call):
 				ctx.containerName = get_container_name(chatId, messageId, ctx.containerId)
 				if not ctx.containerName:
 					close_multi_action_menu(chatId, messageId)
-					send_message(message=get_text("container_does_not_exist", ref_id(ctx.containerId)))
+					send_message(message=f'{host_label(ctx.hostId)}'
+										f'{get_text("container_does_not_exist", ref_id(ctx.containerId))}')
 					debug(f"Container {ctx.containerId} not found in cache or Docker")
 					return
 
@@ -2900,7 +2901,8 @@ def button_controller(call):
 				ctx.containerId = make_ref(ctx.hostId, current_id)
 			else:
 				close_multi_action_menu(chatId, messageId)
-				send_message(message=get_text("container_does_not_exist", ctx.containerName))
+				send_message(message=f'{host_label(ctx.hostId)}'
+									f'{get_text("container_does_not_exist", ctx.containerName)}')
 				debug(f"Container {ctx.containerName} (stale {ctx.containerId}) not found on {ctx.hostId}")
 				return
 
@@ -3039,7 +3041,8 @@ def _execute_container_action(action, containerId, containerName, from_schedule=
 		return f"Unknown action: {action}"
 
 	debug(f"Running command: {config['debug']} for container {containerName}")
-	x = send_message(message=get_text(config['message_key'], containerName))
+	label = host_label(ref_host(containerId))
+	x = send_message(message=f"{label}{get_text(config['message_key'], containerName)}")
 	try:
 		owner = manager_for(containerId)
 	except host_registry.HostUnavailable as e:
@@ -3051,7 +3054,9 @@ def _execute_container_action(action, containerId, containerName, from_schedule=
 	if x:
 		delete_message(x.message_id)
 	if result:
-		send_message(message=result)
+		# The methods build their errors without a host, having only the short
+		# id: this is where the host is known, so it is where it gets said.
+		send_message(message=f"{label}{result}")
 	return result
 
 def run(containerId, containerName, from_schedule=False):
@@ -3074,16 +3079,21 @@ def _execute_compose_project_action(action, project_name, show_extended=True, ho
 	"""
 	debug(f"Running command: {action}_compose_project for project {project_name}")
 
+	host_id = host_id or host_registry.local_host_id()
+	# Every message this sends is about one machine's project, and a project
+	# name says nothing about which: two hosts can run the same stack.
+	label = host_label(host_id)
+
 	# Get project information, on the host the project lives on. A broad except
 	# because a host can build its client and fail on the next call.
 	try:
-		owner = manager(host_id or host_registry.local_host_id())
+		owner = manager(host_id)
 		project_info = owner.get_project_info(project_name)
 	except Exception as e:
 		debug(f"Could not read project {project_name}: {e}")
 		project_info = None
 	if not project_info:
-		send_message(message=get_text("error_project_not_found", project_name))
+		send_message(message=f'{label}{get_text("error_project_not_found", project_name)}')
 		return
 
 	# Get containers sorted by dependencies
@@ -3092,60 +3102,60 @@ def _execute_compose_project_action(action, project_name, show_extended=True, ho
 
 	# Per-action configuration
 	if action == 'restart':
-		send_message(message=get_text("restarting_project", project_name))
+		send_message(message=f'{label}{get_text("restarting_project", project_name)}')
 		# Stop containers in reverse order
 		for container in reversed(sorted_containers):
 			service_name = container.labels.get('com.docker.compose.service', container.name)
 			if store.get("bot.extended_messages") and show_extended:
-				send_message(message=get_text("stopping_service", service_name))
+				send_message(message=f'{label}{get_text("stopping_service", service_name)}')
 			try:
 				container.stop(timeout=10)
 			except Exception as e:
 				debug(f"Error stopping {service_name}: {e}")
 				if show_extended:
-					send_message(message=get_text("error_stopping_service", service_name))
+					send_message(message=f'{label}{get_text("error_stopping_service", service_name)}')
 		# Start containers in the correct order
 		for container in sorted_containers:
 			service_name = container.labels.get('com.docker.compose.service', container.name)
 			if store.get("bot.extended_messages") and show_extended:
-				send_message(message=get_text("starting_service", service_name))
+				send_message(message=f'{label}{get_text("starting_service", service_name)}')
 			try:
 				container.start()
 			except Exception as e:
 				debug(f"Error starting {service_name}: {e}")
 				if show_extended:
-					send_message(message=get_text("error_starting_service", service_name))
-		send_message(message=get_text("project_restarted_success", project_name))
+					send_message(message=f'{label}{get_text("error_starting_service", service_name)}')
+		send_message(message=f'{label}{get_text("project_restarted_success", project_name)}')
 
 	elif action == 'run':
-		send_message(message=get_text("starting_project", project_name))
+		send_message(message=f'{label}{get_text("starting_project", project_name)}')
 		# Start containers in the correct order
 		for container in sorted_containers:
 			service_name = container.labels.get('com.docker.compose.service', container.name)
 			if store.get("bot.extended_messages") and show_extended:
-				send_message(message=get_text("starting_service", service_name))
+				send_message(message=f'{label}{get_text("starting_service", service_name)}')
 			try:
 				container.start()
 			except Exception as e:
 				debug(f"Error starting {service_name}: {e}")
 				if show_extended:
-					send_message(message=get_text("error_starting_service", service_name))
-		send_message(message=get_text("project_started_success", project_name))
+					send_message(message=f'{label}{get_text("error_starting_service", service_name)}')
+		send_message(message=f'{label}{get_text("project_started_success", project_name)}')
 
 	elif action == 'stop':
-		send_message(message=get_text("stopping_project", project_name))
+		send_message(message=f'{label}{get_text("stopping_project", project_name)}')
 		# Stop containers in reverse order
 		for container in reversed(sorted_containers):
 			service_name = container.labels.get('com.docker.compose.service', container.name)
 			if store.get("bot.extended_messages") and show_extended:
-				send_message(message=get_text("stopping_service", service_name))
+				send_message(message=f'{label}{get_text("stopping_service", service_name)}')
 			try:
 				container.stop(timeout=10)
 			except Exception as e:
 				debug(f"Error stopping {service_name}: {e}")
 				if show_extended:
-					send_message(message=get_text("error_stopping_service", service_name))
-		send_message(message=get_text("project_stopped_success", project_name))
+					send_message(message=f'{label}{get_text("error_stopping_service", service_name)}')
+		send_message(message=f'{label}{get_text("project_stopped_success", project_name)}')
 
 def restart_compose_project(project_name, host_id=None):
 	"""Restarts a complete Docker Compose project respecting dependency order."""
@@ -3486,14 +3496,19 @@ def delete_compose_project(project_name, host_id=None):
 	"""
 	debug(f"Running command: delete_compose_project for project {project_name}")
 
+	host_id = host_id or host_registry.local_host_id()
+	# This deletes containers and there is no undo, so every message says which
+	# machine it is deleting them from.
+	label = host_label(host_id)
+
 	# Get project information, on the host the project lives on
 	try:
-		project_info = manager(host_id or host_registry.local_host_id()).get_project_info(project_name)
+		project_info = manager(host_id).get_project_info(project_name)
 	except Exception as e:
 		debug(f"Could not read project {project_name}: {e}")
 		project_info = None
 	if not project_info:
-		send_message(message=get_text("error_project_not_found", project_name))
+		send_message(message=f'{label}{get_text("error_project_not_found", project_name)}')
 		return
 
 	# Get the project's containers
@@ -3501,21 +3516,21 @@ def delete_compose_project(project_name, host_id=None):
 	container_count = len(containers)
 
 	# Initial message
-	send_message(message=get_text("deleting_project", project_name, container_count))
+	send_message(message=f'{label}{get_text("deleting_project", project_name, container_count)}')
 
 	# Delete each container
 	for container in containers:
 		service_name = container.labels.get('com.docker.compose.service', container.name)
 		if store.get("bot.extended_messages"):
-			send_message(message=get_text("deleting_service", service_name))
+			send_message(message=f'{label}{get_text("deleting_service", service_name)}')
 		try:
 			container.remove(force=True)
 		except Exception as e:
 			debug(f"Error deleting {service_name}: {e}")
-			send_message(message=get_text("error_deleting_service", service_name))
+			send_message(message=f'{label}{get_text("error_deleting_service", service_name)}')
 
 	# Final message
-	send_message(message=get_text("project_deleted_success", project_name, container_count))
+	send_message(message=f'{label}{get_text("project_deleted_success", project_name, container_count)}')
 
 def logs(containerId, containerName):
 	debug(f"Running command: logs for container {containerName}")
@@ -3529,7 +3544,10 @@ def log_file(containerId, containerName):
 	if isinstance(result, str):
 		fichero_temporal = get_temporal_file(result, f'logs_{containerName}')
 		x = send_message(message=get_text("loading_file"))
-		send_document(document=fichero_temporal, reply_markup=markup, caption=get_text("logs", containerName))
+		# The file stays in the chat long after the menu that asked for it, so
+		# its caption is the only thing left saying which machine it came from.
+		send_document(document=fichero_temporal, reply_markup=markup,
+					caption=f'{host_label(ref_host(containerId))}{get_text("logs", containerName)}')
 		if x:
 			delete_message(x.message_id)
 	else:
@@ -3618,7 +3636,8 @@ def compose(containerId, containerName):
 		fichero_temporal = io.BytesIO(result.encode('utf-8'))
 		fichero_temporal.name = "docker-compose.txt"
 		x = send_message(message=get_text("loading_file"))
-		send_document(document=fichero_temporal, reply_markup=markup, caption=get_text("compose", containerName))
+		send_document(document=fichero_temporal, reply_markup=markup,
+					caption=f'{host_label(ref_host(containerId))}{get_text("compose", containerName)}')
 		if x:
 			delete_message(x.message_id)
 	else:
@@ -3661,12 +3680,14 @@ def confirm_prune(prune_type, host_id=None):
 def confirm_delete(containerId, containerName):
 	debug(f"Running command: confirm_delete for container {containerName}")
 	markup = create_confirm_cancel_keyboard(f"delete|{containerId}", "button_confirm_delete")
-	send_message(message=get_text("confirm_delete", containerName), reply_markup=markup)
+	send_message(message=f'{host_label(ref_host(containerId))}{get_text("confirm_delete", containerName)}',
+				reply_markup=markup)
 
 def ask_command(userId, containerId, containerName):
 	debug(f"Running command: ask_command for container {containerName}")
 	markup = create_simple_keyboard("button_cancel", "cancelAskCommand")
-	x = send_message(message=get_text("prompt_enter_command", containerName), reply_markup=markup)
+	x = send_message(message=f'{host_label(ref_host(containerId))}{get_text("prompt_enter_command", containerName)}',
+					reply_markup=markup)
 	if x:
 		save_command_request_state(userId, containerId, containerName, x.message_id)
 
@@ -3674,7 +3695,8 @@ def confirm_execute_command(containerId, containerName, command):
 	debug(f"Running command: confirm_exec for container {containerName} with command [{command}]")
 	commandId = save_command_cache(command)
 	markup = create_confirm_cancel_keyboard(f"exec|{containerId}|{commandId}", "button_confirm", f"cancelExec|{commandId}")
-	send_message(message=get_text("confirm_exec", containerName, html.escape(command)), reply_markup=markup)
+	send_message(message=f'{host_label(ref_host(containerId))}{get_text("confirm_exec", containerName, html.escape(command))}',
+				reply_markup=markup)
 
 def execute_command(containerId, containerName, command, sendMessage=True):
 	debug(f"Running command: exec for container {containerName} with command [{command}]")
@@ -3682,11 +3704,12 @@ def execute_command(containerId, containerName, command, sendMessage=True):
 	if sendMessage:
 		max_length = 3500
 		escaped_command = html.escape(command)
+		label = host_label(ref_host(containerId))
 		if len(result) <= max_length:
-			send_message(message=get_text("executed_command", containerName, escaped_command, html.escape(result)))
+			send_message(message=f'{label}{get_text("executed_command", containerName, escaped_command, html.escape(result))}')
 		else:
 			first_part = result[:max_length]
-			send_message(message=get_text("executed_command", containerName, escaped_command, html.escape(first_part)))
+			send_message(message=f'{label}{get_text("executed_command", containerName, escaped_command, html.escape(first_part))}')
 			for i in range(max_length, len(result), max_length):
 				part = result[i:i + max_length]
 				send_message(message=f"<pre><code>{html.escape(part)}</code></pre>")
@@ -3707,13 +3730,14 @@ def confirm_change_tag(containerId, containerName, tag):
 	if not comparison:
 		# Fallback to simple confirmation if comparison fails
 		markup = create_confirm_cancel_keyboard(f"changeTag|{containerId}|{tag}", f"button_confirm_change_tag", "cerrar", "button_cancel")
-		send_message(message=get_text("confirm_change_tag", containerName, tag), reply_markup=markup)
+		send_message(message=f'{host_label(ref_host(containerId))}{get_text("confirm_change_tag", containerName, tag)}',
+					reply_markup=markup)
 		return
 
 	# Check if images are identical
 	if comparison['current_digest'] == comparison['new_digest']:
 		# Same image, just show info
-		message = f"""📦 <b>{containerName}</b>
+		message = f"""{host_label(ref_host(containerId))}📦 <b>{containerName}</b>
 
 ℹ️ <b>Información:</b>
    {get_text('update_tag')}: <code>{comparison['current_tag']}</code> → <code>{comparison['new_tag']}</code>
@@ -3738,7 +3762,7 @@ def confirm_change_tag(containerId, containerName, tag):
 		else:
 			changes_text = "\n   " + changes[0]
 
-		message = f"""📦 <b>{containerName}</b>
+		message = f"""{host_label(ref_host(containerId))}📦 <b>{containerName}</b>
 
 📌 <b>{get_text('update_current_image')}:</b>
    {get_text('update_tag')}: <code>{comparison['current_tag']}</code>
@@ -3780,7 +3804,7 @@ def change_tag_container(containerId, containerName):
 
 		if not tags:
 			error(f"Could not get tags for image {repo}")
-			send_message(message=get_text("error_getting_tags", repo))
+			send_message(message=f'{host_label(ref_host(containerId))}{get_text("error_getting_tags", repo)}')
 			return
 
 		botones = []
@@ -3793,10 +3817,11 @@ def change_tag_container(containerId, containerName):
 
 		markup.add(*botones)
 		markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
-		send_message(message=get_text("change_tag", containerName), reply_markup=markup)
+		send_message(message=f'{host_label(ref_host(containerId))}{get_text("change_tag", containerName)}',
+					reply_markup=markup)
 	except Exception as e:
 		error(f"Error changing tag for container {containerName}. Error: [{e}]")
-		send_message(message=get_text("error_changing_tag", containerName))
+		send_message(message=f'{host_label(ref_host(containerId))}{get_text("error_changing_tag", containerName)}')
 
 def get_image_comparison(containerId, containerName, new_tag=None):
 	"""
@@ -4067,7 +4092,8 @@ def confirm_update(containerId, containerName):
 	if not comparison:
 		# Fallback to simple confirmation if comparison fails
 		markup = create_confirm_cancel_keyboard(f"update|{containerId}", "button_confirm_update")
-		send_message(message=get_text("confirm_update", containerName), reply_markup=markup)
+		send_message(message=f'{host_label(ref_host(containerId))}{get_text("confirm_update", containerName)}',
+					reply_markup=markup)
 		return
 
 	# Check if images are identical (no update available)
@@ -4093,7 +4119,7 @@ def confirm_update(containerId, containerName):
 		changes_text = "\n   " + changes[0]
 
 	# Build detailed message
-	message = f"""📦 <b>{containerName}</b>
+	message = f"""{host_label(ref_host(containerId))}📦 <b>{containerName}</b>
 
 📌 <b>{get_text('update_current_image')}:</b>
    {get_text('update_tag')}: <code>{comparison['current_tag']}</code>
@@ -4782,7 +4808,8 @@ def handle_enter_project_level2(action_type, project_name, chatId, messageId, ma
 	menu = build_project_level2_menu(action_type, project_name, chatId, messageId, marked_names, host_id)
 
 	if not menu:
-		send_message(message=get_text("error_project_not_found", project_name))
+		send_message(message=f'{host_label(host_id or host_registry.local_host_id())}'
+							f'{get_text("error_project_not_found", project_name)}')
 		return
 
 	markup, text = menu
@@ -5006,12 +5033,13 @@ def build_back_to_level1_keyboard(action_type, chatId, messageId, bot_container_
 		return None
 
 	# Check if no containers or only bot container
+	label = host_label(host_id)
 	if not containers:
-		send_message(message=get_text(config['no_containers_key']))
+		send_message(message=f'{label}{get_text(config["no_containers_key"])}')
 		return None
 
 	if config['check_only_bot'] and all(c.name == bot_container_name for c in containers):
-		send_message(message=get_text(config['no_containers_key']))
+		send_message(message=f'{label}{get_text(config["no_containers_key"])}')
 		return None
 
 	# Build hierarchical keyboard
