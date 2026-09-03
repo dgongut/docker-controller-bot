@@ -4,6 +4,7 @@
   "starting_containers": "📦 <b>$1</b> контейнеров · 🟢 $2 · 🔴 $3",
   "starting_host": "🖥️ <b>$1</b> · $2 контейнеров",
   "starting_host_down": "🔴 <b>$1</b> не отвечает",
+  "starting_legacy_volume": "📁 Вы используете <code>$1</code> — старый путь. Замените эту строку в docker-compose на <code>$2</code> (левая часть та же) и пересоздайте контейнер. Файлы не перемещаются.",
   "starting_no_docker": "🔴 Не удалось связаться с Docker",
   "starting_updates_on": "⏱️ Проверка обновлений каждые $1 ч",
   "starting_updates_off": "⏸️ Проверка обновлений отключена",

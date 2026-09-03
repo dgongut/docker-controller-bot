@@ -1467,6 +1467,33 @@ def test_everything_still_works_with_no_container_name_at_all():
 		undo(); _restore_hosts()
 
 
+def test_the_old_volume_is_pointed_out_where_it_will_be_read():
+	"""
+	Moving from /app/schedule to /app/config cannot be done for the user: with
+	only the old path mapped, the new one is inside the image, so copying the
+	files there would leave them somewhere the next recreate deletes. The
+	volume mapping *is* the migration, and only its owner can change it.
+
+	So the bot's job is to ask, once, somewhere it will be seen. A DEBUG line
+	saying "when convenient" — which is what this was — is a line nobody reads
+	and a change nobody makes.
+	"""
+	previous = store._legacy_root_in_use
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": [_container("nginx", "running")]
+	try:
+		store._legacy_root_in_use = False
+		assert store.LEGACY_ROOT not in dcb.build_starting_message()
+
+		store._legacy_root_in_use = True
+		message = dcb.build_starting_message()
+		assert store.LEGACY_ROOT in message, message
+		assert store.CONFIG_ROOT in message, message
+	finally:
+		store._legacy_root_in_use = previous
+		dcb.DockerManager.list_containers = original
+
+
 def _press_every_command(**arguments):
 	"""Runs every command with the given arguments; returns the ones that raised."""
 	broken = []

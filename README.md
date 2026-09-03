@@ -356,7 +356,16 @@ En `settings.json` solo va la URL y, para TLS, las rutas de los certificados. Ni
 > Será necesario mapear un volumen para almacenar lo que el bot escribe en /app/config (ajustes, programaciones y caché de actualizaciones)
 
 > [!NOTE]
-> Si tu docker-compose mapea `/app/schedule` (la ruta que se usaba hasta la 4.x) el bot lo detecta y sigue usándolo, así que actualizar no requiere cambiar nada. Puedes pasarlo a `/app/config` cuando te venga bien.
+> Si tu docker-compose mapea `/app/schedule` (la ruta que se usaba hasta la 4.x) el bot lo detecta y sigue usándolo, así que **actualizar no requiere cambiar nada** y no perderás ni un ajuste.
+>
+> Cuando quieras pasarlo a `/app/config`, es cambiar una letra de la línea del volumen:
+>
+> ```diff
+> -  - /tu/ruta:/app/schedule
+> +  - /tu/ruta:/app/config
+> ```
+>
+> **La misma parte izquierda, y no se mueve ningún fichero**: los ficheros ya están en tu volumen y se llaman igual. Después, `docker compose up -d` para recrear el contenedor. Mientras no lo hagas, el bot te lo recuerda en su mensaje de arranque.
 
 > [!NOTE]
 > Si se requiere tener la sesión iniciada en algún registro como DockerHub, GitHub Registry o alguno privado (docker login) es posible trasladar ese login al contenedor mapeando el `~/.docker/config.json` a `/root/.docker/config.json`

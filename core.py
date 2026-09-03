@@ -2889,6 +2889,15 @@ def build_starting_message():
 				lines.append(get_text("starting_host_down", host_alias(entry["id"])))
 
 	lines.append("")
+	# The one thing the bot cannot do for the user. Said here and not only in
+	# the log because it needs an edit to the docker-compose: with only
+	# /app/schedule mapped, /app/config is inside the image, so copying the
+	# files there would put them somewhere the next recreate deletes. The
+	# volume mapping is the migration, and only its owner can change it.
+	if store.uses_legacy_root():
+		lines.append(get_text("starting_legacy_volume", store.LEGACY_ROOT, store.CONFIG_ROOT))
+		lines.append("")
+
 	# The one setting that belongs here: it is the only one that changes what
 	# the bot does on its own while nobody is looking.
 	if store.get("bot.check_updates"):

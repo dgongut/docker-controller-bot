@@ -4,6 +4,7 @@
   "starting_containers": "📦 <b>$1</b> containers · 🟢 $2 · 🔴 $3",
   "starting_host": "🖥️ <b>$1</b> · $2 containers",
   "starting_host_down": "🔴 <b>$1</b> is not answering",
+  "starting_legacy_volume": "📁 You are using <code>$1</code>, the old path. Change that line in your docker-compose to <code>$2</code> — same left-hand side — and recreate the container. No files are moved.",
   "starting_no_docker": "🔴 I could not talk to Docker",
   "starting_updates_on": "⏱️ Checking for updates every $1 h",
   "starting_updates_off": "⏸️ Update checking is off",

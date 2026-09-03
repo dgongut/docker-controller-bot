@@ -356,7 +356,16 @@ The two usual stumbling blocks are that Container Manager's `docker` is not on t
 > You need to map a volume to /app/config for persistent storage of your bot's data (settings, schedules and the update cache)
 
 > [!NOTE]
-> If your docker-compose maps `/app/schedule` (the path used up to 4.x) the bot detects it and keeps using it, so updating requires no changes. You can move it to `/app/config` whenever it suits you.
+> If your docker-compose maps `/app/schedule` (the path used up to 4.x) the bot detects it and keeps using it, so **upgrading requires no changes** and you will not lose a single setting.
+>
+> When you want to move to `/app/config`, it is one word on the volume line:
+>
+> ```diff
+> -  - /your/path:/app/schedule
+> +  - /your/path:/app/config
+> ```
+>
+> **Same left-hand side, and no files are moved**: they are already in your volume and keep their names. Then `docker compose up -d` to recreate the container. Until you do, the bot reminds you in its start-up message.
 
 > [!NOTE]
 > If you require login on a registry like DockerHub, GitHub Registry or a private registry (docker login), you can map that login file into the container `~/.docker/config.json` to `/root/.docker/config.json`

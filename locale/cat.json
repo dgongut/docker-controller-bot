@@ -4,6 +4,7 @@
   "starting_containers": "📦 <b>$1</b> contenidors · 🟢 $2 · 🔴 $3",
   "starting_host": "🖥️ <b>$1</b> · $2 contenidors",
   "starting_host_down": "🔴 <b>$1</b> no respon",
+  "starting_legacy_volume": "📁 Estàs fent servir <code>$1</code>, el camí antic. Canvia aquesta línia del teu docker-compose per <code>$2</code> —la mateixa part esquerra— i torna a crear el contenidor. No es mou cap fitxer.",
   "starting_no_docker": "🔴 No he pogut parlar amb Docker",
   "starting_updates_on": "⏱️ Comprovant actualitzacions cada $1 h",
   "starting_updates_off": "⏸️ Comprovació d'actualitzacions desactivada",

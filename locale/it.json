@@ -4,6 +4,7 @@
   "starting_containers": "📦 <b>$1</b> contenitori · 🟢 $2 · 🔴 $3",
   "starting_host": "🖥️ <b>$1</b> · $2 contenitori",
   "starting_host_down": "🔴 <b>$1</b> non risponde",
+  "starting_legacy_volume": "📁 Stai usando <code>$1</code>, il vecchio percorso. Cambia quella riga del tuo docker-compose in <code>$2</code> — stessa parte sinistra — e ricrea il contenitore. Nessun file viene spostato.",
   "starting_no_docker": "🔴 Non sono riuscito a contattare Docker",
   "starting_updates_on": "⏱️ Controllo gli aggiornamenti ogni $1 h",
   "starting_updates_off": "⏸️ Controllo aggiornamenti disattivato",

@@ -4,6 +4,7 @@
   "starting_containers": "📦 <b>$1</b> contenedores · 🟢 $2 · 🔴 $3",
   "starting_host": "🖥️ <b>$1</b> · $2 contenedores",
   "starting_host_down": "🔴 <b>$1</b> no responde",
+  "starting_legacy_volume": "📁 Estás usando <code>$1</code>, la ruta antigua. Cambia esa línea de tu docker-compose por <code>$2</code> —misma parte izquierda— y recrea el contenedor. No se mueve ningún fichero.",
   "starting_no_docker": "🔴 No he podido hablar con Docker",
   "starting_updates_on": "⏱️ Comprobando actualizaciones cada $1 h",
   "starting_updates_off": "⏸️ Comprobación de actualizaciones desactivada",

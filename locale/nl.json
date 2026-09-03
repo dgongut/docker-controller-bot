@@ -4,6 +4,7 @@
   "starting_containers": "📦 <b>$1</b> containers · 🟢 $2 · 🔴 $3",
   "starting_host": "🖥️ <b>$1</b> · $2 containers",
   "starting_host_down": "🔴 <b>$1</b> antwoordt niet",
+  "starting_legacy_volume": "📁 Je gebruikt <code>$1</code>, het oude pad. Verander die regel in je docker-compose naar <code>$2</code> — dezelfde linkerkant — en maak de container opnieuw aan. Er worden geen bestanden verplaatst.",
   "starting_no_docker": "🔴 Ik kon Docker niet bereiken",
   "starting_updates_on": "⏱️ Elke $1 uur controleren op updates",
   "starting_updates_off": "⏸️ Controle op updates staat uit",
