@@ -86,7 +86,6 @@
   "executed_command": "⚡️ La següent ordre s'ha executat al contenidor <b>$1</b>.\n\n<pre><code>$2</code></pre>\n\nResultat:\n<pre><code>$3</code></pre>",
   "select_container_from_project": "Selecciona un contenidor del projecte <b>$1</b>:",
   "no_containers_for_exec": "No hi ha contenidors disponibles per executar comandes",
-  "feature_coming_soon": "🚧 Funció en desenvolupament: $1",
   "health": "Salut",
   "health_healthy": "Correcte",
   "health_starting": "Iniciant",

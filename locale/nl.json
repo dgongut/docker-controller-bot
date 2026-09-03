@@ -86,7 +86,6 @@
   "executed_command": "⚡️ De volgende opdracht is uitgevoerd in container <b>$1</b>.\n\n<pre><code>$2</code></pre>\n\nResultaat:\n<pre><code>$3</code></pre>",
   "select_container_from_project": "Selecteer een container uit project <b>$1</b>:",
   "no_containers_for_exec": "Geen containers beschikbaar om commando's uit te voeren",
-  "feature_coming_soon": "🚧 Functie in ontwikkeling: $1",
   "health": "Gezondheid",
   "health_healthy": "Gezond",
   "health_starting": "Starten",

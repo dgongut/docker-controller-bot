@@ -86,7 +86,6 @@
   "executed_command": "⚡️ Il seguente comando è stato eseguito nel contenitore <b>$1</b>.\n\n<pre><code>$2</code></pre>\n\nRisultato:\n<pre><code>$3</code></pre>",
   "select_container_from_project": "Seleziona un contenitore dal progetto <b>$1</b>:",
   "no_containers_for_exec": "Nessun contenitore disponibile per eseguire comandi",
-  "feature_coming_soon": "🚧 Funzione in sviluppo: $1",
   "health": "Salute",
   "health_healthy": "Sano",
   "health_starting": "Avvio",

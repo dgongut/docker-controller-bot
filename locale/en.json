@@ -86,7 +86,6 @@
   "executed_command": "⚡️ The following command has been executed in container <b>$1</b>.\n\n<pre><code>$2</code></pre>\n\nResult:\n<pre><code>$3</code></pre>",
   "select_container_from_project": "Select a container from project <b>$1</b>:",
   "no_containers_for_exec": "No containers available to execute commands",
-  "feature_coming_soon": "🚧 Feature in development: $1",
   "health": "Health",
   "health_healthy": "Healthy",
   "health_starting": "Starting",

@@ -86,7 +86,6 @@
   "executed_command": "⚡️ Der folgende Befehl wurde im Container <b>$1</b> ausgeführt.\n\n<pre><code>$2</code></pre>\n\nErgebnis:\n<pre><code>$3</code></pre>",
   "select_container_from_project": "Wähle einen Container aus Projekt <b>$1</b>:",
   "no_containers_for_exec": "Keine Container verfügbar, um Befehle auszuführen",
-  "feature_coming_soon": "🚧 Funktion in Entwicklung: $1",
   "health": "Gesundheit",
   "health_healthy": "Gesund",
   "health_starting": "Wird gestartet",

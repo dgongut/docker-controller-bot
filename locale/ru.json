@@ -86,7 +86,6 @@
   "executed_command": "⚡️ Следующая команда была выполнена в контейнере <b>$1</b>.\n\n<pre><code>$2</code></pre>\n\nРезультат:\n<pre><code>$3</code></pre>",
   "select_container_from_project": "Выберите контейнер из проекта <b>$1</b>:",
   "no_containers_for_exec": "Нет доступных контейнеров для выполнения команд",
-  "feature_coming_soon": "🚧 Функция в разработке: $1",
   "health": "Здоровье",
   "health_healthy": "Здоров",
   "health_starting": "Запуск",

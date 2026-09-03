@@ -51,9 +51,6 @@ DEFAULTS = {
 	# The id is generated once and never changes, so cache entries and
 	# schedules survive an alias rename or a change of connection URL.
 	"hosts": [],
-	# Host paths later features need to write into (stacks, backups), keyed by
-	# host id.
-	"paths": {},
 }
 
 STATE_DEFAULTS = {
