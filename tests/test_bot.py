@@ -1088,6 +1088,97 @@ def test_the_queue_still_retries_a_rate_limit():
 		queue.shutdown()
 
 
+def _press_every_button_through_the_dispatcher():
+	"""
+	Sends a synthetic press for every callback through button_controller, and
+	returns (which handlers actually ran, which raised).
+
+	Through the dispatcher and not straight at the handler, because the
+	dispatcher does real work first: it checks the caller, resolves the host
+	from the reference, looks the container name up in the cache, re-resolves a
+	stale id against the live container, and turns a project hash back into a
+	name. None of that was exercised by calling handlers directly.
+
+	It also reports what ran, which matters: the first version of this test
+	pressed as user 1, every press bounced off the "not an administrator"
+	guard, and it reported a very green nothing.
+	"""
+	admin = int(str(dcb.TELEGRAM_ADMIN).split(",")[0])
+	local = dcb.host_registry.local_host_id()
+	assert dcb.is_admin(admin), "el fixture no es administrador, no se probaría nada"
+	project_hash = dcb.register_project_hash("media", local)
+
+	values = dict(_VALUE_FOR, generatePort="host", checkPort="host")
+	arguments = dict(_ARG_FOR, containerName=project_hash, scheduleHash=project_hash)
+
+	ran, broken = set(), []
+	specs = callback_registry.specs()
+	original = {name: spec.handler for name, spec in specs.items()}
+
+	def watched(name, handler):
+		def wrapper(ctx):
+			ran.add(name)
+			return handler(ctx)
+		return wrapper
+
+	for name, spec in specs.items():
+		spec.handler = watched(name, spec.handler)
+	try:
+		for name in sorted(specs):
+			parts = [name]
+			for param in specs[name].params:
+				if param == "value":
+					value = values.get(name, "x")
+					parts.append(local if value == "host" else value)
+				elif param == "containerId":
+					parts.append(f"{local}:abc12")
+				else:
+					parts.append(arguments.get(param, "x"))
+			data = "|".join(str(part) for part in parts)
+			assert len(data.encode()) <= 64, f"{name}: {len(data.encode())} bytes de callback_data"
+			press = MagicMock()
+			press.data, press.id = data, "q1"
+			press.message.id, press.message.chat.id = 2, 1
+			press.from_user.id, press.from_user.username = admin, "test"
+			try:
+				dcb.button_controller(press)
+			except Exception as e:
+				broken.append((name, e))
+	finally:
+		for name, handler in original.items():
+			specs[name].handler = handler
+	return ran, broken
+
+
+def test_every_button_works_pressed_through_the_dispatcher():
+	"""
+	The other button test calls handlers directly. This one goes in the front
+	door, so the dispatcher's own work is covered too — and it asserts that
+	every handler was actually reached, because a press that stops earlier
+	proves nothing.
+	"""
+	nginx = _container("nginx", "running", image="nginx:1.27")
+	nginx.id = "abc12abc12"
+	undo, restore = _quiet_bot(), _snapshot_settings()
+	originals = (dcb.find_container_id_on_host, dcb.DockerManager.list_containers,
+					dcb.DockerManager.container_named, dcb.delete_message_later)
+	dcb.find_container_id_on_host = lambda host_id, name: "abc12"
+	dcb.DockerManager.list_containers = lambda self, comando="": [nginx]
+	dcb.DockerManager.container_named = lambda self, name: nginx
+	dcb.delete_message_later = lambda *a, **k: None
+	try:
+		ran, broken = _press_every_button_through_the_dispatcher()
+	finally:
+		(dcb.find_container_id_on_host, dcb.DockerManager.list_containers,
+			dcb.DockerManager.container_named, dcb.delete_message_later) = originals
+		undo(); restore()
+
+	assert not broken, "botones que revientan por el despachador:\n" + "\n".join(
+		f"  {name}: {type(e).__name__}: {e}" for name, e in broken)
+	missing = sorted(set(callback_registry.specs()) - ran)
+	assert not missing, f"estos handlers no llegaron a ejecutarse: {missing}"
+
+
 def _press_every_command(**arguments):
 	"""Runs every command with the given arguments; returns the ones that raised."""
 	broken = []
