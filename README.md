@@ -9,7 +9,6 @@
 ![Github forks](https://badgen.net/github/forks/dgongut/docker-controller-bot?icon=github&label=forks)
 ![Github last-commit](https://img.shields.io/github/last-commit/dgongut/docker-controller-bot)
 ![Github last-commit](https://badgen.net/github/license/dgongut/docker-controller-bot)
-![alt text](https://github.com/dgongut/pictures/blob/main/Docker-Controller-Bot/mockup.png)
 
 <h3 align="center">
   ReadMe en Español
@@ -19,7 +18,100 @@
   <a href="https://t.me/dockercontrollerbotnews">Canal de Noticias en Telegram</a>
 </h3>
 
-Lleva el control de tus contenedores docker desde un único lugar.
+> Lleva el control de tus contenedores Docker desde un único lugar: tu Telegram.
+
+![Docker-Controller-Bot](https://github.com/dgongut/pictures/blob/main/Docker-Controller-Bot/mockup.png)
+
+¿Lo buscas en [![](https://badgen.net/badge/icon/docker?icon=docker&label)](https://hub.docker.com/r/dgongut/docker-controller-bot)?
+
+**NUEVO** Canal de novedades en [![](https://badgen.net/badge/icon/telegram?icon=telegram&label)](https://t.me/dockercontrollerbotnews)
+
+## 🚀 Empieza en 5 minutos
+
+Solo hay dos pasos: crear tu bot y arrancarlo. Todo lo demás se configura después desde el propio chat.
+
+### 1. Crea tu bot en Telegram (2 min)
+
+1. Abre [@BotFather](https://t.me/BotFather) en Telegram y envía `/newbot`. Sigue las instrucciones (un nombre y un username acabado en `bot`).
+2. BotFather te devolverá el token del bot. Guárdalo: irá en la variable `TELEGRAM_TOKEN`.
+3. Para conocer tu propio chat ID (lo necesitas para `TELEGRAM_ADMIN`), habla con [@MissRose_bot](https://t.me/MissRose_bot) y envíale `/id`. Te responderá con un número, ese es tu ID.
+4. *(Opcional)* Si vas a usar el bot dentro de un grupo, añádelo, hazlo administrador y obtén el chat ID del grupo de la misma forma; ese valor irá en `TELEGRAM_GROUP`.
+5. *(Opcional)* Si quieres ponerle el icono oficial al bot, descarga la imagen en alta resolución [aquí](https://raw.githubusercontent.com/dgongut/pictures/main/Docker-Controller-Bot/Docker-Controller-Bot.png) y envíasela a [@BotFather](https://t.me/BotFather) usando la opción `/setuserpic`.
+
+### 2. Arranca el contenedor (2 min)
+
+Copia este `docker-compose.yml`, rellena las 3 variables y levántalo:
+
+```yaml
+services:
+    docker-controller-bot:
+        environment:
+            - TELEGRAM_TOKEN=
+            - TELEGRAM_ADMIN=
+            - TZ=Europe/Madrid
+            #- TELEGRAM_GROUP=
+            #- TELEGRAM_THREAD=1
+        volumes:
+            - /var/run/docker.sock:/var/run/docker.sock # NO CAMBIAR
+            - /ruta/para/guardar/la/configuracion:/app/config # CAMBIAR LA PARTE IZQUIERDA
+            #- ~/.ssh:/root/.ssh:ro # Solo si vas a usar hosts remotos por ssh://
+            #- ~/.docker/config.json:/root/.docker/config.json # Solo si se requiere iniciar sesión en algún registro
+        image: dgongut/docker-controller-bot:latest
+        container_name: docker-controller-bot
+        restart: always
+        network_mode: host
+        tty: true
+```
+
+```bash
+docker compose up -d
+```
+
+Abre Telegram, busca tu bot y envíale `/start`. Verás el menú principal con botones. Ya está: `/list` te muestra tus contenedores.
+
+> [!WARNING]
+> Es obligatorio mapear un volumen en `/app/config`: ahí se guardan los ajustes, las programaciones y la caché de actualizaciones. Sin ese volumen lo pierdes todo al recrear el contenedor.
+
+<details>
+<summary>🔄 ¿Vienes de la 4.x? No tienes que cambiar nada</summary>
+
+- Si tu docker-compose mapea `/app/schedule` (la ruta que se usaba hasta la 4.x) el bot lo detecta y sigue usándolo, así que **actualizar no requiere cambiar nada** y no perderás ni un ajuste.
+- Cuando quieras pasarlo a `/app/config`, es cambiar una letra de la línea del volumen:
+
+  ```diff
+  -  - /tu/ruta:/app/schedule
+  +  - /tu/ruta:/app/config
+  ```
+
+  **La misma parte izquierda, y no se mueve ningún fichero**: los ficheros ya están en tu volumen y se llaman igual. Después, `docker compose up -d` para recrear el contenedor. Mientras no lo hagas, el bot te lo recuerda en su mensaje de arranque.
+- **`CONTAINER_NAME` ya no hace falta.** Hasta la 4.x había que decirle al bot cómo se llamaba su propio contenedor, para que supiera no pararse ni eliminarse a sí mismo. Ahora lo averigua solo: lee su id en `/proc/self/mountinfo` y le pregunta a Docker cuál es. Si la tienes puesta el bot arranca igual y te avisa en el log de que puedes quitarla.
+- En el primer arranque el bot importa los valores de tus variables de entorno a `settings.json` y los conserva tal cual. A partir de ahí manda `settings.json`, y esas variables ya no se leen; el log te avisa de las que puedes borrar del docker-compose.
+
+</details>
+
+<details>
+<summary>🔐 ¿Necesitas <code>docker login</code> (DockerHub, GHCR, registro privado)?</summary>
+
+Si se requiere tener la sesión iniciada en algún registro, traslada ese login al contenedor mapeando tu `~/.docker/config.json` a `/root/.docker/config.json`:
+
+```yaml
+volumes:
+    - ~/.docker/config.json:/root/.docker/config.json
+```
+
+</details>
+
+## ✨ ¿Qué puede hacer?
+
+- 📦 **Contenedores:** listar, arrancar, parar, reiniciar y eliminar. Con selección múltiple en `/run`, `/stop` y `/restart`.
+- 🧩 **Compose:** detecta tus proyectos y los agrupa (proyecto → contenedores).
+- 📊 **Diagnóstico:** logs en el chat o como fichero, `exec` dentro del contenedor, puertos e info detallada.
+- 🔄 **Actualizaciones:** te avisa si hay imagen nueva, actualiza uno o todos, cambia de tag (rollback) y auto-actualiza con labels.
+- ⏰ **Automatización:** tareas programadas con cron + silencio temporal con `/mute` + limpieza con `/prune`.
+- 🖥️ **Multi-host y ajustes:** varios servidores desde un solo bot y todo configurable con `/settings`, sin reiniciar.
+
+<details>
+<summary>📋 Ver lista completa de funciones</summary>
 
 - ✅ Listar contenedores
 - ✅ Arrancar, parar y eliminar contenedores
@@ -44,25 +136,13 @@ Lleva el control de tus contenedores docker desde un único lugar.
 - ✅ Imagen multiarquitectura (amd64, arm64, armv7…) compatible con Raspberry Pi, NAS y servidores estándar
 - ✅ Soporte de idiomas (Spanish, English, Dutch, German, Russian, Galician, Italian, Catalan)
 
-¿Lo buscas en [![](https://badgen.net/badge/icon/docker?icon=docker&label)](https://hub.docker.com/r/dgongut/docker-controller-bot)?
+</details>
 
-**NUEVO** Canal de novedades en [![](https://badgen.net/badge/icon/telegram?icon=telegram&label)](https://t.me/dockercontrollerbotnews)
+## 📋 Comandos
 
-## Crear tu bot de Telegram
+Casi todos funcionan de dos formas: escribe el comando solo (`/run`) y el bot te muestra un menú con botones, o pásale el nombre directamente (`/run nginx`) para actuar sin menús.
 
-Antes de levantar el contenedor necesitas un bot propio en Telegram y conocer tu identificador de usuario.
-
-1. Abre [@BotFather](https://t.me/BotFather) en Telegram y envía `/newbot`. Sigue las instrucciones (un nombre y un username acabado en `bot`).
-2. BotFather te devolverá el token del bot. Guárdalo: irá en la variable `TELEGRAM_TOKEN`.
-3. Para conocer tu propio chat ID (lo necesitas para `TELEGRAM_ADMIN`), habla con [@MissRose_bot](https://t.me/MissRose_bot) y envíale `/id`. Te responderá con un número, ese es tu ID.
-4. *(Opcional)* Si vas a usar el bot dentro de un grupo, añádelo, hazlo administrador y obtén el chat ID del grupo de la misma forma; ese valor irá en `TELEGRAM_GROUP`.
-5. *(Opcional)* Si quieres ponerle el icono oficial al bot, descarga la imagen en alta resolución [aquí](https://raw.githubusercontent.com/dgongut/pictures/main/Docker-Controller-Bot/Docker-Controller-Bot.png) y envíasela a [@BotFather](https://t.me/BotFather) usando la opción `/setuserpic`.
-
-## Comandos disponibles
-
-Casi todos los comandos pueden ejecutarse en dos modos: escribiendo el comando solo (`/run`) para que el bot muestre un menú interactivo con botones, o pasando directamente el nombre del contenedor (`/run nginx`) para actuar sin menús.
-
-`/start` abre el menú principal, con los comandos agrupados en categorías (Contenedores, Diagnóstico, Actualizaciones, Sistema, Automatización, Ajustes y Acerca de). Pulsar un botón hace exactamente lo mismo que escribir el comando a secas, así que puedes usar el menú o teclear, como prefieras.
+`/start` abre el menú principal, con todo agrupado por categorías (Contenedores, Diagnóstico, Actualizaciones, Sistema, Automatización, Ajustes y Acerca de). Pulsar un botón hace exactamente lo mismo que escribir el comando a secas.
 
 | Comando | Descripción |
 |---|---|
@@ -84,13 +164,17 @@ Casi todos los comandos pueden ejecutarse en dos modos: escribiendo el comando s
 | `/settings` | Ajustes del bot: idioma, columnas, comprobación de actualizaciones, canal de notificaciones y **hosts de Docker** |
 | `/version` `/donate` `/donors` | Versión actual / donar / lista de donantes |
 
-## Soporte para Docker Compose
+<details>
+<summary>🧩 Mis contenedores son de <code>docker compose</code>, ¿cómo se ven?</summary>
 
 Si tus contenedores fueron creados con `docker compose`, el bot los reconoce automáticamente como un **proyecto** y los presenta agrupados.
 
 En comandos como `/run`, `/stop`, `/restart`, `/delete`, `/info` o `/compose` verás primero la lista de proyectos y, al pulsar uno, sus contenedores. En `/run` y `/stop` solo se ofrecen los servicios sobre los que la acción tiene sentido (parados y arrancados respectivamente), igual que ya indicaba el contador del botón del proyecto. Las acciones de inicio, parada, reinicio y borrado se pueden aplicar al **proyecto entero** o a un contenedor individual.
 
-## Programaciones (`/schedule`)
+</details>
+
+<details>
+<summary>⏰ Automatizar tareas con <code>/schedule</code></summary>
 
 Desde `/schedule` puedes crear tareas que se ejecuten en cron.
 
@@ -99,7 +183,12 @@ Desde `/schedule` puedes crear tareas que se ejecuten en cron.
 - Si tienes varios hosts, el bot te pregunta en cuál se ejecuta la tarea, y el host aparece en el resumen y en el listado. `mute` es la excepción: silencia las notificaciones del propio bot, así que no pertenece a ninguna máquina.
 - Las programaciones se persisten en `/app/config` (recuerda mapear ese volumen).
 
-## Configuración en las variables del Docker Compose
+</details>
+
+<details>
+<summary>⚙️ Configuración avanzada y <code>/settings</code></summary>
+
+Aquí solo quedan las variables que el bot necesita **antes** de poder leer sus propios ajustes: cómo llegar a Telegram y quién puede hablarle. La regla es sencilla: si ponerla mal te puede dejar sin acceso al bot, va en el docker-compose, porque lo que impide que el chat funcione no se puede arreglar desde el chat.
 
 | CLAVE  | OBLIGATORIO | VALOR |
 |:------------- |:---------------:| :-------------|
@@ -108,13 +197,6 @@ Desde `/schedule` puedes crear tareas que se ejecuten en cron.
 |TELEGRAM_GROUP |❌| ChatId del grupo. Si este bot va a formar parte de un grupo, es necesario especificar el chatId de dicho grupo. Es necesario que el bot sea administrador del grupo |
 |TELEGRAM_THREAD |❌| Thread del tema dentro de un supergrupo; valor numérico (2,3,4..). Por defecto 1. Se utiliza en conjunción con la variable TELEGRAM_GROUP |
 |TZ |✅| Timezone (Por ejemplo Europe/Madrid) |
-
-Aquí solo quedan las variables que el bot necesita **antes** de poder leer sus propios ajustes: cómo llegar a Telegram y quién puede hablarle. La regla es sencilla: si ponerla mal te puede dejar sin acceso al bot, va en el docker-compose, porque lo que impide que el chat funcione no se puede arreglar desde el chat.
-
-> [!NOTE]
-> **`CONTAINER_NAME` ya no hace falta.** Hasta la 4.x había que decirle al bot cómo se llamaba su propio contenedor, para que supiera no pararse ni eliminarse a sí mismo. Ahora lo averigua solo: lee su id en `/proc/self/mountinfo` y le pregunta a Docker cuál es. Si la tienes puesta el bot arranca igual y te avisa en el log de que puedes quitarla.
-
-### Ajustes (`/settings`)
 
 Todo lo demás se configura desde el propio bot y se guarda en `settings.json`, dentro del volumen mapeado:
 
@@ -128,14 +210,14 @@ Todo lo demás se configura desde el propio bot y se guarda en `settings.json`, 
 |Intervalo de comprobación| Horas entre comprobaciones. Acepta decimales. Por defecto 4 |
 |Contenedores parados| Si comprueba también las actualizaciones de los contenedores detenidos. Por defecto activado |
 |Canal de notificaciones| Canal donde se publicarán exclusivamente los cambios de estado de los contenedores (arranque, parada, creación y actualizaciones automáticas). La gestión se sigue haciendo desde el chat privado con el bot o desde TELEGRAM_GROUP. El bot comprueba que puede publicar ahí antes de guardarlo |
-|Hosts de Docker| Las máquinas que gestiona el bot. Se añaden, se prueban, se renombran y se quitan desde aquí. Ver [Hosts remotos](#hosts-remotos) |
+|Hosts de Docker| Las máquinas que gestiona el bot. Se añaden, se prueban, se renombran y se quitan desde aquí. Ver desplegable de hosts remotos |
 
 Los cambios hechos desde `/settings` se aplican al momento, sin reiniciar el contenedor. Si prefieres editar `settings.json` a mano, hará falta reiniciar para que los lea.
 
-> [!NOTE]
-> Si vienes de la 4.x no tienes que hacer nada: en el primer arranque el bot importa los valores de tus variables de entorno a `settings.json` y los conserva tal cual. A partir de ahí manda `settings.json`, y esas variables ya no se leen; el log te avisa de las que puedes borrar del docker-compose.
+</details>
 
-## Hosts remotos
+<details>
+<summary>🖥️ ¿Tienes más de un servidor? Gestiona varios hosts Docker</summary>
 
 A partir de la 5.0.0 el bot puede gestionar varios hosts Docker. Se definen en los ajustes, no en variables de entorno, así que se añaden desde el propio bot sin tocar el docker-compose.
 
@@ -175,7 +257,8 @@ El motivo es que el bot no habla un protocolo propio: abre una sesión ssh y eje
 | `permission denied ... /var/run/docker.sock` | El usuario no está en el grupo `docker` |
 | `Host key verification failed` | Falta la máquina en `known_hosts` |
 
-### Paso a paso con `ssh://`
+<details>
+<summary>🔑 Paso a paso con <code>ssh://</code> (recomendado)</summary>
 
 > [!IMPORTANT]
 > **Una sola clave vale para todos tus servidores.** No generes una por máquina: creas la clave una vez y la autorizas en cada máquina que quieras añadir. Abajo cada paso lleva marcado si es *una vez* o *por cada máquina*, para que no lo repitas de más.
@@ -246,9 +329,12 @@ El nombre es opcional; si no lo pones, el bot lo saca de la URL. Antes de guarda
 
 Después, pulsando el host en esa misma pantalla puedes **🔄 Probar de nuevo**, **✏️ Renombrar** o **🗑️ Quitar host**. El 🟢 y el 🔴 de la lista te dicen de un vistazo cuál responde.
 
-### Varios servidores
+</details>
 
-Ya está cubierto arriba: repites el **paso 3** apuntando a cada máquina y listo. Una sola clave autoriza en todas las que quieras, y es lo que yo haría en una red doméstica: menos ficheros que gestionar y menos sitios donde equivocarse.
+<details>
+<summary>🗂️ Tengo varios servidores, ¿repito todo?</summary>
+
+No: repites el **paso 3** apuntando a cada máquina y listo. Una sola clave autoriza en todas las que quieras, y es lo que yo haría en una red doméstica: menos ficheros que gestionar y menos sitios donde equivocarse.
 
 Comprueba cada una antes de añadirla al bot:
 
@@ -292,7 +378,10 @@ Eso tiene dos ventajas más allá de las claves. La primera es que las URLs se q
 > [!NOTE]
 > El fichero `~/.ssh/config` también se mapea al contenedor, porque ya estás mapeando el directorio entero. No hace falta añadir nada al docker-compose.
 
-### Paso a paso con `tcp://` mediante socket proxy
+</details>
+
+<details>
+<summary>🔌 Prefiero <code>tcp://</code> con socket proxy</summary>
 
 Si tus máquinas ya están en una red privada, esta es la vía más corta: en lugar de exponer el socket entero, se expone un proxy que solo deja pasar lo que le indiques. En la **máquina remota**:
 
@@ -320,12 +409,15 @@ La URL para el bot es entonces `tcp://maquina:2375`. Compruébalo antes desde la
 docker -H tcp://maquina:2375 version
 ```
 
-Si responde, añádelo en el bot igual que uno por ssh —`/settings` → **🖥️ Hosts de Docker** → **➕ Añadir host**— mandándole `nas tcp://maquina:2375`. Ver el [paso 7](#paso-a-paso-con-ssh).
+Si responde, añádelo en el bot igual que uno por ssh —`/settings` → **🖥️ Hosts de Docker** → **➕ Añadir host**— mandándole `nas tcp://maquina:2375`.
 
 > [!WARNING]
-> Esto **no lleva TLS ni autenticación**: el proxy acota qué se puede hacer, no quién puede hacerlo. Publica el puerto solo en una red en la que confíes —Tailscale, WireGuard, una VLAN aislada—, nunca en internet. Si necesitas exponerlo fuera, usa TLS.
+> Esto **no lleva TLS ni autenticación**: el proxy acota qué se puede hacer, no quién puede hacerlo. Publica el puerto solo en una red en la que confíes —Tailscale, WireGuard, una VLAN aislada—, nunca en internet. Si necesitas exponerlo fuera, usa TLS (ver FAQ).
 
-### Synology, UnRAID y otros NAS
+</details>
+
+<details>
+<summary>💾 Synology, UnRAID y otros NAS</summary>
 
 **Ninguno expone el puerto de Docker por defecto**, y es lo correcto: hacerlo sin TLS sería dejar la máquina abierta. Así que la vía es `ssh://` en los dos casos.
 
@@ -347,56 +439,23 @@ Los dos tropiezos habituales son que el `docker` de Container Manager no está e
 > [!TIP]
 > Si tienes tus máquinas en una red privada tipo Tailscale o WireGuard, `tcp://` a secas sobre esa red te evita tanto los certificados como el ssh, porque el cifrado y la autenticación los pone la malla. Es lo más cómodo cuando ya la tienes montada.
 
+</details>
+
 ### Las credenciales nunca se guardan en los ajustes
 
 En `settings.json` solo va la URL y, para TLS, las rutas de los certificados. Ni claves ni contraseñas: el material sensible son ficheros que tú mapeas, y así ningún mensaje de Telegram acaba llevándolo dentro.
 
-## Anotaciones
-> [!WARNING]
-> Será necesario mapear un volumen para almacenar lo que el bot escribe en /app/config (ajustes, programaciones y caché de actualizaciones)
+</details>
 
-> [!NOTE]
-> Si tu docker-compose mapea `/app/schedule` (la ruta que se usaba hasta la 4.x) el bot lo detecta y sigue usándolo, así que **actualizar no requiere cambiar nada** y no perderás ni un ajuste.
->
-> Cuando quieras pasarlo a `/app/config`, es cambiar una letra de la línea del volumen:
->
-> ```diff
-> -  - /tu/ruta:/app/schedule
-> +  - /tu/ruta:/app/config
-> ```
->
-> **La misma parte izquierda, y no se mueve ningún fichero**: los ficheros ya están en tu volumen y se llaman igual. Después, `docker compose up -d` para recrear el contenedor. Mientras no lo hagas, el bot te lo recuerda en su mensaje de arranque.
-
-> [!NOTE]
-> Si se requiere tener la sesión iniciada en algún registro como DockerHub, GitHub Registry o alguno privado (docker login) es posible trasladar ese login al contenedor mapeando el `~/.docker/config.json` a `/root/.docker/config.json`
-
-## Ejemplo de Docker-Compose para su ejecución normal
-
-```yaml
-services:
-    docker-controller-bot:
-        environment:
-            - TELEGRAM_TOKEN=
-            - TELEGRAM_ADMIN=
-            - TZ=Europe/Madrid
-            #- TELEGRAM_GROUP=
-            #- TELEGRAM_THREAD=1
-        volumes:
-            - /var/run/docker.sock:/var/run/docker.sock # NO CAMBIAR
-            - /ruta/para/guardar/la/configuracion:/app/config # CAMBIAR LA PARTE IZQUIERDA
-            #- ~/.ssh:/root/.ssh:ro # Solo si vas a usar hosts remotos por ssh://
-            #- ~/.docker/config.json:/root/.docker/config.json # Solo si se requiere iniciar sesión en algún registro
-        image: dgongut/docker-controller-bot:latest
-        container_name: docker-controller-bot
-        restart: always
-        network_mode: host
-        tty: true
-```
-
-## Funciones Extra mediante Labels/Etiquetas en otros contenedores
+<details>
+<summary>🏷️ Funciones extra con labels en otros contenedores</summary>
 
 - Añadiendo la etiqueta `DCB-Ignore-Check-Updates` a un contenedor, no se comprobarán actualizaciones para él.
 - Añadiendo la etiqueta `DCB-Auto-Update` a un contenedor, se actualizará automáticamente sin preguntar.
+
+Ver ejemplo completo en la FAQ: *«He visto que se pueden añadir labels…»*.
+
+</details>
 
 ## Agradecimientos
 
@@ -410,6 +469,8 @@ services:
 - Readme en inglés: [phampyk](https://github.com/phampyk)
 
 ## ❓ Preguntas Frecuentes (FAQ)
+
+> Pulsa cada pregunta para ver la respuesta.
 
 <details>
 <summary>🧭 ¿Puede el programa decirme de qué versión a qué versión se actualizó una imagen?</summary>
@@ -519,12 +580,12 @@ Para diagnosticarlo, la prueba de siempre desde la máquina del bot vale más qu
 ssh usuario@maquina docker version
 ```
 
-El mensaje que te dé ahí es el mismo que te está dando el bot, pero con todo el detalle. Las causas habituales están en la tabla de [Cómo conectar con un host remoto](#la-prueba-que-lo-decide).
+El mensaje que te dé ahí es el mismo que te está dando el bot, pero con todo el detalle. Las causas habituales están en la tabla de *La prueba que lo decide* (desplegable 🖥️ de arriba).
 
 </details>
 
 <details>
-<summary>🔐 Quiero usar `tcp://` pero cifrado con TLS, ¿se puede?</summary>
+<summary>🔐 Quiero usar <code>tcp://</code> pero cifrado con TLS, ¿se puede?</summary>
 
 Se puede, sí, y aquí tienes el procedimiento. Pero antes lo honesto: **es bastante avanzado y yo no lo considero necesario.**
 
@@ -633,7 +694,9 @@ Si le añades la label `DCB-Auto-Update` a su `docker-compose.yml`, se actualiza
 </details>
 
 ---
-## Solo para desarrolladores
+
+<details>
+<summary>🧑‍💻 Solo para desarrolladores</summary>
 
 ### Ejecución con código local
 
@@ -727,3 +790,5 @@ Abre la carpeta del repositorio en [Visual Studio Code](https://code.visualstudi
 #### Conclusión de la Depuración
 
 - Para detener la sesión de depuración, ve a `Run > Stop Debugging` o presiona `Shift+F5`
+
+</details>
