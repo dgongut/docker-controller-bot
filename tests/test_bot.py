@@ -957,6 +957,45 @@ def test_the_schedule_flow_state_lives_in_the_volume():
 	assert dcb.load_schedule_state(4242) is None
 
 
+def test_an_absurd_mute_does_not_silence_the_bot_for_good():
+	"""
+	`/mute 999999999999999999999` passed the only check there was — that it
+	parses as an integer — and then killed the timer that gives the bot its
+	voice back with an OverflowError, inside that timer's own thread. The
+	command answered normally, the mute was applied, and nothing was ever
+	going to undo it.
+
+	A scheduled mute reaches the same place with whatever minutes the stored
+	task carries, which is why the clamp is in mute() and not only in the
+	command.
+	"""
+	# En el espacio de nombres de commands: cmd_mute importó send_message al
+	# suyo, así que sustituirlo en core no lo intercepta.
+	original = (commands.send_message, dcb.send_message, dcb.delete_message)
+	messages = []
+	commands.send_message = lambda message="", **kw: messages.append(message) or None
+	dcb.send_message = lambda message="", **kw: None
+	dcb.delete_message = lambda *a, **k: None
+	try:
+		for hostile in ("999999999999999999999", "-5", "abc", ""):
+			messages.clear()
+			commands.cmd_mute(user_id=1, chat_id=1, argument=hostile)
+			assert not dcb.is_muted(), f"{hostile!r} ha silenciado el bot"
+			assert messages, f"{hostile!r} no ha dicho nada"
+
+		# mute() itself clamps, because a stored schedule reaches it directly.
+		dcb.mute(10 ** 20)
+		assert store.state_get("mute_until") - time.time() <= dcb.MUTE_MAX_MINUTES * 60 + 5
+		dcb.mute("no es un número")   # no debe lanzar
+
+		# And a sane one still works.
+		dcb.mute(30)
+		assert dcb.is_muted()
+	finally:
+		commands.send_message, dcb.send_message, dcb.delete_message = original
+		dcb.unmute()
+
+
 def _press_every_command(**arguments):
 	"""Runs every command with the given arguments; returns the ones that raised."""
 	broken = []

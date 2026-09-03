@@ -14,6 +14,7 @@ to import it before polling starts.
 
 import store
 
+from config import MUTE_MAX_MINUTES
 from i18n import get_text
 from core import (
 	send_prune_menu,
@@ -177,6 +178,11 @@ def cmd_mute(user_id=None, chat_id=None, container_id=None, container_name=None,
 	try:
 		minutes = int(argument)
 	except (TypeError, ValueError):
+		send_message(message=get_text("error_use_mute_command"))
+		return
+	# Fuera de rango se dice, no se acota en silencio: quien teclea un número
+	# de veinte cifras se ha equivocado, y merece saberlo.
+	if minutes < 0 or minutes > MUTE_MAX_MINUTES:
 		send_message(message=get_text("error_use_mute_command"))
 		return
 	mute(minutes)

@@ -3633,6 +3633,15 @@ def mute(minutes):
 		return
 
 	# Use lock to prevent race conditions with unmute timer
+	# Acotado aquí, que es por donde pasan tanto /mute como una programación
+	# de mute: los minutos de una tarea guardada pueden ser cualquier cosa, y
+	# un número absurdo mata el temporizador y deja al bot mudo sin retorno.
+	try:
+		minutes = max(0, min(int(minutes), MUTE_MAX_MINUTES))
+	except (TypeError, ValueError):
+		warning(f"Ignoring a mute of {minutes!r}: not a number of minutes")
+		return
+
 	with _mute_lock:
 		# Cancel any existing unmute timer
 		if _unmute_timer is not None:

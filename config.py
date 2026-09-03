@@ -93,6 +93,12 @@ docker_architectures = {
 # rather than a hardcoded row of buttons: the screen also prints what each one
 # does, and the two drifting apart is how `prune` ended up with a button and no
 # explanation.
+# Techo del silencio, en minutos: treinta días. No es una preferencia sino un
+# límite técnico — el temporizador que devuelve la voz al bot se programa con
+# ese número, y uno absurdo lo mata con OverflowError dentro de su hilo, con lo
+# que el bot se queda callado para siempre y sin nada que lo despierte.
+MUTE_MAX_MINUTES = 60 * 24 * 30
+
 SCHEDULE_ACTIONS = ("run", "stop", "restart", "mute", "exec", "prune")
 
 HOST_SCOPED_SCHEDULE_ACTIONS = frozenset({"run", "stop", "restart", "exec", "prune"})
