@@ -1290,7 +1290,10 @@ class DockerScheduleMonitor:
 			True if successful, False if failed
 		"""
 		try:
-			action = schedule.get("action", "").lower()
+			# `or ""` y no el segundo argumento de get(): get devuelve el valor
+			# guardado cuando la clave existe, aunque sea None, así que el
+			# default no protege de una tarea con action a nulo.
+			action = (schedule.get("action") or "").lower()
 			container = schedule.get("container", "")
 			# Tasks created before hosts existed carry none, and mean the local
 			# machine: that is where they were set up to run.
@@ -2425,7 +2428,9 @@ def schedules_on_host(host_id):
 	for schedule in schedule_manager.get_all_schedules():
 		if not schedule.get("enabled", True):
 			continue
-		if schedule.get("action", "").lower() not in HOST_SCOPED_SCHEDULE_ACTIONS:
+		# Igual que en el ejecutor: get() con default no protege de un None
+		# guardado, y una sola tarea así rompía la pantalla de quitar host.
+		if (schedule.get("action") or "").lower() not in HOST_SCOPED_SCHEDULE_ACTIONS:
 			continue
 		if (schedule.get("host") or local) != host_id:
 			continue
@@ -4809,11 +4814,7 @@ def build_project_level2_menu(action_type, project_name, chatId, messageId, mark
 		tuple: (markup, text) or None if the project does not exist
 	"""
 	host_id = host_id or host_registry.local_host_id()
-	try:
-		project_info = manager(host_id).get_project_info(project_name)
-	except host_registry.HostUnavailable as e:
-		debug(f"Cannot reach {host_id} for project {project_name}: {e.reason}")
-		return None
+	project_info = project_info_or_none(host_id, project_name)
 
 	if not project_info:
 		return None
@@ -5084,6 +5085,14 @@ def build_back_to_level1_keyboard(action_type, chatId, messageId, bot_container_
 		containers = manager(host_id).list_containers()
 	except host_registry.HostUnavailable as e:
 		debug(f"Cannot rebuild the menu for {host_id}: {e.reason}")
+		return None
+	except Exception as e:
+		# Same as above: the client builds and the call fails. Every "back to
+		# the list" button in the project menus comes through here, so leaving
+		# this uncaught broke twenty-five of them at once.
+		warning(f"Could not rebuild the menu for {host_alias(host_id)}: {e}")
+		host_registry.drop(host_id)
+		forget_managers()
 		return None
 
 	# Check if no containers or only bot container
@@ -5505,6 +5514,12 @@ def show_container_ports(host_id=None):
 	except host_registry.HostUnavailable as e:
 		send_message(message=get_text("host_unreachable", host_alias(host_id), html.escape(str(e.reason))))
 		return
+	except Exception as e:
+		warning(f"Could not list ports on {host_alias(host_id)}: {e}")
+		host_registry.drop(host_id)
+		forget_managers()
+		send_message(message=get_text("host_unreachable", host_alias(host_id), html.escape(str(e))))
+		return
 
 	# Sort containers: bot first, then running, then stopped (all alphabetically)
 	sorted_containers = sort_containers_by_priority(containers)
@@ -5751,6 +5766,28 @@ def find_container(ref):
 		return None, None
 
 
+def project_info_or_none(host_id, project_name):
+	"""
+	A host's project, or None when that host cannot answer right now.
+
+	Reading a project means listing containers, and a host has two ways of
+	failing at that: not giving a client at all, and giving one that fails on
+	the very next call — which is what a Docker mid-restart does. Both mean the
+	same thing to a caller, and neither should reach the person who pressed the
+	button as a stack trace.
+	"""
+	try:
+		return manager(host_id).get_project_info(project_name)
+	except host_registry.HostUnavailable as e:
+		debug(f"Cannot reach {host_id} for project {project_name}: {e.reason}")
+		return None
+	except Exception as e:
+		warning(f"Could not read project {project_name} on {host_alias(host_id)}: {e}")
+		host_registry.drop(host_id)
+		forget_managers()
+		return None
+
+
 def display_all_hosts(comando=""):
 	"""
 	The container listing for every host, one section each.
@@ -5765,6 +5802,15 @@ def display_all_hosts(comando=""):
 			containers = manager(host_id).list_containers(comando=comando)
 		except host_registry.HostUnavailable as e:
 			return get_text("list_host_unreachable", host_alias(host_id), html.escape(str(e.reason)))
+		except Exception as e:
+			# A daemon can build a client and then fail the very next call —
+			# a Docker that is restarting does exactly that. Catching only
+			# HostUnavailable left /list raising on the commonest setup there
+			# is: a single host, mid-restart.
+			warning(f"Could not list containers on {host_alias(host_id)}: {e}")
+			host_registry.drop(host_id)
+			forget_managers()
+			return get_text("list_host_unreachable", host_alias(host_id), html.escape(str(e)))
 		return display_containers(containers, host_id)
 
 	sections = hosts_with_containers(comando)

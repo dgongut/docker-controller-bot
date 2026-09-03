@@ -223,6 +223,7 @@
   "schedule_prune_volumes": "Volumes",
   "schedule_menu_title": "📋 Xestión de Programacións",
   "schedule_name_exists": "❌ O nome da programación xa existe",
+  "schedule_incomplete": "❌ Esa programación está a medias. Comézaa de novo desde /schedule.",
   "schedule_no": "Non",
   "schedule_no_schedules": "📋 Non hai programacións configuradas",
   "schedule_select_to_delete": "Selecciona unha programación para eliminar:",

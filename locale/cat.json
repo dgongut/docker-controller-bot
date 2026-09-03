@@ -223,6 +223,7 @@
   "schedule_prune_volumes": "Volums",
   "schedule_menu_title": "📋 Gestió de Programacions",
   "schedule_name_exists": "❌ El nom de la programació ja existeix",
+  "schedule_incomplete": "❌ Aquesta programació està a mitges. Torna-la a començar des de /schedule.",
   "schedule_no": "No",
   "schedule_no_schedules": "📋 No hi ha programacions configurades",
   "schedule_select_to_delete": "Selecciona una programació per eliminar:",

@@ -841,6 +841,164 @@ def test_the_same_question_names_no_host_when_there_is_only_one():
 		_restore_hosts()
 
 
+# What to hand each callback that takes a `value`, since the shape depends on
+# the callback: most want a host id, a couple want a setting.
+_VALUE_FOR = {
+	"pickHost": "host", "portsHost": "host", "pruneHost": "host", "prune": "host",
+	"settingsHost": "host", "settingsHostRename": "host", "settingsHostRemove": "host",
+	"scheduleSelectHost": "host",
+	# Deliberately a host that is not registered: this one actually removes.
+	"settingsHostRemoveConfirm": "h_nonexistent",
+	"settingsSetColumns": "2", "settingsSetLanguage": "ES",
+	"startCategory": "system", "startCommand": "list",
+	"scheduleEditValue": "0 0 * * *",
+}
+
+_ARG_FOR = {
+	"containerName": "nginx", "action": "prune Images", "scheduleHash": "deadbeef",
+	"field": "cron", "scheduleId": "1", "commandId": "cmd1", "tag": "latest",
+	"originalMessageId": "42", "containerIdx": "0", "pruneType": "images",
+}
+
+
+def _press_every_callback():
+	"""
+	Runs every registered handler with a plausible context, and returns the
+	ones that raised as (name, exception).
+
+	Handlers are called directly rather than through the dispatcher: what is
+	being exercised is the body of each one, which is where the code that
+	nothing else in this file reaches actually lives.
+	"""
+	local = dcb.host_registry.local_host_id()
+	reference = f"{local}:abc12"
+	broken = []
+	for name, spec in sorted(callback_registry.specs().items()):
+		fields = {"call": MagicMock(id="q1"), "chatId": 1, "messageId": 2,
+					"userId": 1, "comando": name, "multiAction": None,
+					"hostId": local, "containerId": reference}
+		for param in spec.params:
+			if param == "value":
+				value = _VALUE_FOR.get(name, "x")
+				fields[param] = local if value == "host" else value
+			elif param == "containerId":
+				fields[param] = reference
+			else:
+				fields[param] = _ARG_FOR.get(param, "x")
+		try:
+			spec.handler(callback_registry.Context(**fields))
+		except Exception as e:
+			broken.append((name, e))
+	return broken
+
+
+def _quiet_bot():
+	"""Silences everything that leaves the process, and returns the undo."""
+	sent = MagicMock(message_id=1)
+	sent.chat.id = 1
+	names = ("send_message", "edit_message_text", "send_document",
+				"send_message_to_notification_channel")
+	silent = ("delete_message", "edit_message_reply_markup",
+				"edit_message_reply_markup_sync", "answer_callback_quietly")
+	original = {n: getattr(dcb, n) for n in names + silent}
+	original["requests"] = dcb.requests
+	original["bot"] = dcb.bot
+	for n in names:
+		setattr(dcb, n, lambda *a, **k: sent)
+	for n in silent:
+		setattr(dcb, n, lambda *a, **k: None)
+	dcb.requests = MagicMock()   # /donors and /changetag would hit the network
+	dcb.bot = MagicMock()
+
+	def undo():
+		for n, value in original.items():
+			setattr(dcb, n, value)
+	return undo
+
+
+def _snapshot_settings():
+	"""Settings and hosts, so a handler that writes cannot leak into the next test."""
+	import copy
+	saved = (copy.deepcopy(store.get("bot")), copy.deepcopy(store.get("hosts")))
+
+    # noqa: the closure is the point
+	def restore():
+		store.set("bot", saved[0])
+		store.set("hosts", saved[1])
+		dcb.host_registry.reset()
+		dcb.forget_managers()
+	return restore
+
+
+def test_every_button_can_be_pressed():
+	"""
+	Not one of the 97 registered callbacks was reached by any test in this file
+	before this one: the suite checked keyboards, locales, the store and the
+	registry, and never actually pressed a button. Which is precisely where a
+	name that does not exist, or an attribute read off None, waits.
+	"""
+	undo, restore = _quiet_bot(), _snapshot_settings()
+	try:
+		broken = _press_every_callback()
+	finally:
+		undo(); restore()
+	assert not broken, "callbacks que revientan al pulsarlos:\n" + "\n".join(
+		f"  {name}: {type(e).__name__}: {e}" for name, e in broken)
+
+
+def test_every_button_survives_telegram_refusing_to_send():
+	"""
+	send_message returns None when the send fails, and that None then gets used
+	as if it were a message. Three handlers shipped exactly that bug; this
+	makes the whole set answer the question.
+	"""
+	undo, restore = _quiet_bot(), _snapshot_settings()
+	for name in ("send_message", "edit_message_text", "send_document",
+					"send_message_to_notification_channel"):
+		setattr(dcb, name, lambda *a, **k: None)
+	try:
+		broken = _press_every_callback()
+	finally:
+		undo(); restore()
+	assert not broken, "callbacks que revientan si el envío falla:\n" + "\n".join(
+		f"  {name}: {type(e).__name__}: {e}" for name, e in broken)
+
+
+def test_every_button_survives_the_host_being_down():
+	"""
+	The promise is that one machine being down degrades what it can and nothing
+	else. It did not hold: with the daemon refusing every call, twenty-five
+	callbacks raised instead of saying so, because the guards caught
+	HostUnavailable — which is what *building* a client raises — and a dead
+	host fails on the call after that.
+	"""
+	import docker
+
+	down = Exception("no route to host")
+
+	def dead(*args, **kwargs):
+		fake = MagicMock()
+		for attribute in ("ping", "info", "version", "df"):
+			getattr(fake, attribute).side_effect = down
+		for collection in ("containers", "images", "volumes", "networks"):
+			for method in ("list", "get", "prune"):
+				getattr(getattr(fake, collection), method).side_effect = down
+		return fake
+
+	undo, restore = _quiet_bot(), _snapshot_settings()
+	original_sdk = docker.DockerClient
+    # noqa
+	docker.DockerClient = dead
+	dcb.host_registry.reset(); dcb.forget_managers()
+	try:
+		broken = _press_every_callback()
+	finally:
+		docker.DockerClient = original_sdk
+		undo(); restore()
+	assert not broken, "callbacks que revientan con el host caído:\n" + "\n".join(
+		f"  {name}: {type(e).__name__}: {e}" for name, e in broken)
+
+
 def _capture_updateall():
 	"""Runs /updateall and returns the message and keyboard it sent."""
 	captured = {}

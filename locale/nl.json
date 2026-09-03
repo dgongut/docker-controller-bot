@@ -223,6 +223,7 @@
   "schedule_prune_volumes": "Volumes",
   "schedule_menu_title": "📋 Schemabeheer",
   "schedule_name_exists": "❌ Schemanaam bestaat al",
+  "schedule_incomplete": "❌ Die planning is niet af. Begin opnieuw via /schedule.",
   "schedule_no": "Nee",
   "schedule_no_schedules": "📋 Geen schema's geconfigureerd",
   "schedule_select_to_delete": "Selecteer een schema om te verwijderen:",

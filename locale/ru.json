@@ -223,6 +223,7 @@
   "schedule_prune_volumes": "Тома",
   "schedule_menu_title": "📋 Управление расписанием",
   "schedule_name_exists": "❌ Имя расписания уже существует",
+  "schedule_incomplete": "❌ Это расписание не завершено. Начните заново через /schedule.",
   "schedule_no": "Нет",
   "schedule_no_schedules": "�� Нет настроенных расписаний",
   "schedule_select_to_delete": "Выберите расписание для удаления:",

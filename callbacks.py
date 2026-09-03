@@ -361,7 +361,7 @@ def cb_stopWholeProject(ctx):
 )
 def cb_enterComposeProject(ctx):
 	project_name = ctx.containerName
-	project_info = core.manager(ctx.hostId).get_project_info(project_name)
+	project_info = core.project_info_or_none(ctx.hostId, project_name)
 
 	if not project_info:
 		core.send_message(message=f'{core.host_label(ctx.hostId)}{get_text("error_project_not_found", project_name)}')
@@ -438,7 +438,7 @@ def cb_showProjectInfo(ctx):
 )
 def cb_confirmDeleteWholeProject(ctx):
 	project_name = ctx.containerName
-	project_info = core.manager(ctx.hostId).get_project_info(project_name)
+	project_info = core.project_info_or_none(ctx.hostId, project_name)
 
 	if not project_info:
 		core.send_message(message=f'{core.host_label(ctx.hostId)}{get_text("error_project_not_found", project_name)}')
@@ -930,8 +930,15 @@ def cb_scheduleSelectPruneShowOutput(ctx):
 def cb_scheduleConfirm(ctx):
 	schedule_state = core.load_schedule_state(ctx.userId)
 	if schedule_state:
+		# A confirm button lives on a message, and that message outlives the
+		# flow that drew it: pressing a stale one used to persist a task with
+		# no action, which then broke the executor and the host-removal screen.
+		if any(not schedule_state.get(field) for field in ("name", "cron", "action")):
+			core.send_message(message=get_text("schedule_incomplete"))
+			core.clear_schedule_state(ctx.userId)
+			return
 		try:
-			core.schedule_manager.add_schedule(
+			added = core.schedule_manager.add_schedule(
 				name=schedule_state["name"],
 				cron=schedule_state["cron"],
 				action=schedule_state["action"],
@@ -942,6 +949,9 @@ def cb_scheduleConfirm(ctx):
 				prune_type=schedule_state.get("prune_type"),
 				host=schedule_state.get("host")
 			)
+			if not added:
+				core.send_message(message=get_text("schedule_name_exists"))
+				return
 			core.send_message(message=get_text("schedule_added_success", schedule_state["name"]))
 			core.clear_schedule_state(ctx.userId)
 			# Show the updated schedule menu

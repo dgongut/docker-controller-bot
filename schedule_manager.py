@@ -66,8 +66,15 @@ class ScheduleManager:
     def add_schedule(self, name: str, cron: str, action: str, container: str = None,
                      minutes: int = None, show_output: bool = False, command: str = None,
                      prune_type: str = None, host: str = None) -> bool:
-        """Add a new schedule. Returns True if successful, False if name already exists"""
+        """Add a new schedule. Returns True if successful, False if rejected"""
         schedules = self._read_schedules()
+
+        # A task needs a name, a cron and an action to mean anything. Refusing
+        # here rather than at every reader: a half-built one persisted from an
+        # abandoned flow used to reach the executor and the host-removal
+        # screen, and broke both.
+        if not name or not cron or not action:
+            return False
 
         # Check if name already exists (optimized with early return)
         if any(s["name"] == name for s in schedules):

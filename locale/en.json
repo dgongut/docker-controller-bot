@@ -223,6 +223,7 @@
   "schedule_prune_volumes": "Volumes",
   "schedule_menu_title": "📋 Schedule Management",
   "schedule_name_exists": "❌ Schedule name already exists",
+  "schedule_incomplete": "❌ That schedule is half-finished. Start it again from /schedule.",
   "schedule_no": "No",
   "schedule_no_schedules": "📋 No schedules configured",
   "schedule_select_to_delete": "Select a schedule to delete:",

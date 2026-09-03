@@ -223,6 +223,7 @@
   "schedule_prune_volumes": "Volumes",
   "schedule_menu_title": "📋 Zeitplanverwaltung",
   "schedule_name_exists": "❌ Zeitplanname existiert bereits",
+  "schedule_incomplete": "❌ Dieser Zeitplan ist unvollständig. Fang ihn über /schedule neu an.",
   "schedule_no": "Nein",
   "schedule_no_schedules": "📋 Keine Zeitpläne konfiguriert",
   "schedule_select_to_delete": "Wähle einen Zeitplan zum Löschen:",

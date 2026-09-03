@@ -223,6 +223,7 @@
   "schedule_prune_volumes": "Volumi",
   "schedule_menu_title": "📋 Gestione Pianificazioni",
   "schedule_name_exists": "❌ Il nome della pianificazione esiste già",
+  "schedule_incomplete": "❌ Quella pianificazione è incompleta. Ricominciala da /schedule.",
   "schedule_no": "No",
   "schedule_no_schedules": "📋 Nessuna pianificazione configurata",
   "schedule_select_to_delete": "Seleziona una pianificazione da eliminare:",
