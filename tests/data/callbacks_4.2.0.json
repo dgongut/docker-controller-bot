@@ -124,7 +124,9 @@
       "multi_action": false
     },
     "checkPort": {
-      "params": [],
+      "params": [
+        "value"
+      ],
       "keeps_message": false,
       "project_arg": false,
       "multi_action": false
@@ -308,7 +310,9 @@
       "multi_action": false
     },
     "generatePort": {
-      "params": [],
+      "params": [
+        "value"
+      ],
       "keeps_message": false,
       "project_arg": false,
       "multi_action": false
@@ -555,6 +559,8 @@
     }
   },
   "_deliberate_changes": {
-    "prune": "5.0.0 added a host argument: pruning is destructive and per host, so the callback has to say which machine it means. Was params=['action'], now ['action', 'value'] where value is the host id. Recorded here rather than silently updating the snapshot, so the change stays visible in review."
+    "prune": "5.0.0 added a host argument: pruning is destructive and per host, so the callback has to say which machine it means. Was params=['action'], now ['action', 'value'] where value is the host id. Recorded here rather than silently updating the snapshot, so the change stays visible in review.",
+    "generatePort": "5.0.0 added a host argument. A port is taken or free on one machine and says nothing about any other, so the button that was drawn on a given host's screen has to carry it: without it both answered about the bot's own machine while the user was looking at another. Was params=[], now ['value'] where value is the host id.",
+    "checkPort": "5.0.0 added a host argument. A port is taken or free on one machine and says nothing about any other, so the button that was drawn on a given host's screen has to carry it: without it both answered about the bot's own machine while the user was looking at another. Was params=[], now ['value'] where value is the host id."
   }
 }

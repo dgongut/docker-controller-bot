@@ -97,7 +97,7 @@ class PortManager:
             ports = self._get_bridge_network_ports(container)
             return (ports, False)
 
-    def check_port_availability(self, port_number: int) -> Tuple[bool, str, Optional[str]]:
+    def check_port_availability(self, port_number: int, manager=None) -> Tuple[bool, str, Optional[str]]:
         """
         Check if a specific port is available
 
@@ -109,8 +109,13 @@ class PortManager:
             - is_available: True if port is available
             - message_key: Translation key for the message
             - container_name: Name of container using the port (if any)
+
+        `manager` says which host to ask. A port is taken or free on one
+        machine and says nothing about any other, so answering from the local
+        host while the user is looking at a remote one is simply a wrong
+        answer. Defaults to the host the bot runs on.
         """
-        containers = self.docker_manager.list_containers()
+        containers = (manager or self.docker_manager).list_containers()
 
         for container in containers:
             try:
@@ -151,7 +156,7 @@ class PortManager:
         else:
             return (False, "ports_used_by_system", None)
 
-    def get_random_available_port(self, min_port: int = 5000, max_port: int = 60000, max_attempts: int = 100) -> Optional[int]:
+    def get_random_available_port(self, min_port: int = 5000, max_port: int = 60000, max_attempts: int = 100, manager=None) -> Optional[int]:
         """
         Generate a random available port
 
@@ -163,8 +168,9 @@ class PortManager:
         Returns:
             Available port number or None if no port found
         """
-        # Get all ports used by containers
-        containers = self.docker_manager.list_containers()
+        # Get all ports used by containers, on the host being asked about:
+        # a port free here says nothing about any other machine.
+        containers = (manager or self.docker_manager).list_containers()
         used_ports = set()
 
         for container in containers:

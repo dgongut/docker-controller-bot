@@ -510,9 +510,14 @@ class DockerManager:
 			image_with_tag = container_attrs.get('Image', 'N/A')
 
 			# Always read cache, regardless of the check_updates setting, which
-			# only controls automatic detection and not manual /checkupdate
+			# only controls automatic detection and not manual /checkupdate.
+			#
+			# Keyed by this host: the same image and name on two machines have
+			# two independent answers, and without it /info on a remote
+			# container reported the local machine's, so the update button
+			# appeared when there was nothing to update and hid a real one.
 			try:
-				has_update = read_container_update_status(image_with_tag, container_name)
+				has_update = read_container_update_status(image_with_tag, container_name, self.host_id)
 			except Exception as e:
 				debug(f"Queried for update {container_name} and it is not available: [{e}]")
 
@@ -3053,7 +3058,10 @@ def handle_text(message):
 				return
 
 			# Check the port
-			is_available, result_message = check_specific_port(port_number)
+			# The host the question was asked about, not whichever one the
+			# bot happens to run on.
+			is_available, result_message = check_specific_port(
+				port_number, pending_port_check.get("host"))
 			send_message(message=result_message)
 		except ValueError:
 			send_message(message=get_text("ports_invalid_number"))
@@ -5493,13 +5501,27 @@ def get_update_emoji(containerName, host_id=None):
 
 	return status
 
-def get_random_available_port():
+def get_random_available_port(host_id=None):
 	"""
-	Generate a random available port (10000-60000) that is truly available on the system
-	Checks both Docker containers and system-level port availability
-	Returns the port number or None if no available port found
+	A free port on one host, or None when none was found.
+
+	Same rule as check_specific_port: a port free on the bot's machine says
+	nothing about the machine the user is looking at, so handing that number
+	back would be a wrong answer rather than a rough one.
 	"""
-	return port_manager.get_random_available_port()
+	host_id = host_id or host_registry.local_host_id()
+	# Un botón vive en un mensaje y el mensaje sobrevive al host: pulsar uno
+	# viejo de una máquina ya quitada no puede reventar.
+	try:
+		owner = manager(host_id)
+	except host_registry.HostUnavailable as e:
+		debug(f"Cannot generate a port for {host_id}: {e.reason}")
+		return None
+	try:
+		return port_manager.get_random_available_port(manager=owner)
+	except Exception as e:
+		warning(f"Could not generate a port on {host_id}: {e}")
+		return None
 
 def show_container_ports(host_id=None):
 	"""
@@ -5555,9 +5577,11 @@ def show_container_ports(host_id=None):
 
 	# Add inline keyboard with Generate, Check and Close buttons
 	markup = InlineKeyboardMarkup(row_width=2)
+	# Con su host: generar y comprobar son preguntas sobre una máquina, y sin
+	# él contestaban siempre por la local aunque estuvieras viendo otra.
 	markup.add(
-		InlineKeyboardButton(get_text("ports_button_generate"), callback_data="generatePort"),
-		InlineKeyboardButton(get_text("ports_button_check"), callback_data="checkPort")
+		InlineKeyboardButton(get_text("ports_button_generate"), callback_data=f"generatePort|{host_id}"),
+		InlineKeyboardButton(get_text("ports_button_check"), callback_data=f"checkPort|{host_id}")
 	)
 	markup.add(
 		InlineKeyboardButton(get_text("button_close"), callback_data="cerrar")
@@ -5615,14 +5639,21 @@ def show_container_ports(host_id=None):
 		is_last = (i == len(chunks) - 1)
 		send_message(message=message, reply_markup=markup if is_last else None)
 
-def ask_port_to_check(userId):
-	"""Ask user for a port number to check"""
-	debug(f"Running command: ask_port_to_check for user {userId}")
+def ask_port_to_check(userId, host_id=None):
+	"""
+	Asks for a port number, remembering which host the answer is about.
+
+	The host is carried in the state rather than looked up when the number
+	arrives: by then the screen it came from is gone, and defaulting to the
+	local machine is how this used to answer about the wrong one.
+	"""
+	host_id = host_id or host_registry.local_host_id()
+	debug(f"Running command: ask_port_to_check for user {userId} on {host_id}")
 	markup = InlineKeyboardMarkup(row_width=1)
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cancelCheckPort"))
-	x = send_message(message=get_text("ports_ask_port"), reply_markup=markup)
+	x = send_message(message=f'{host_label(host_id)}{get_text("ports_ask_port")}', reply_markup=markup)
 	if x:
-		save_port_check_request_state(userId, x.message_id)
+		save_port_check_request_state(userId, x.message_id, host_id)
 
 def send_ports_menu():
 	"""
@@ -5644,12 +5675,25 @@ def send_ports_menu():
 	send_message(message=host_question("ports"), reply_markup=markup)
 
 
-def check_specific_port(port_number):
+def check_specific_port(port_number, host_id=None):
 	"""
-	Check if a specific port is available
-	Returns tuple (is_available, message)
+	Whether a port is free on one host, as (is_available, message).
+
+	The host is not optional in meaning, only in signature: a port is taken or
+	free on a single machine. Answering about the local one while the user is
+	looking at another is a wrong answer, not an approximation.
 	"""
-	is_available, message_key, container_name = port_manager.check_port_availability(port_number)
+	host_id = host_id or host_registry.local_host_id()
+	try:
+		owner = manager(host_id)
+	except host_registry.HostUnavailable as e:
+		return False, get_text("host_unreachable", host_alias(host_id), html.escape(str(e.reason)))
+	try:
+		is_available, message_key, container_name = port_manager.check_port_availability(
+			port_number, manager=owner)
+	except Exception as e:
+		warning(f"Could not check port {port_number} on {host_id}: {e}")
+		return False, get_text("host_unreachable", host_alias(host_id), html.escape(str(e)))
 
 	if container_name:
 		return is_available, get_text(message_key, port_number, container_name)
@@ -6134,8 +6178,9 @@ def clear_command_request_state(user_id):
 	_clear_cache("pending_command", user_id)
 
 # Port check request state functions
-def save_port_check_request_state(user_id, deleteMessage):
-	value = {"deleteMessage": deleteMessage}
+def save_port_check_request_state(user_id, deleteMessage, host_id=None):
+	value = {"deleteMessage": deleteMessage,
+			"host": host_id or host_registry.local_host_id()}
 	_save_cache("pending_port_check", user_id, value)
 
 def load_port_check_request_state(user_id):

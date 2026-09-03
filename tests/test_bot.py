@@ -846,7 +846,7 @@ def test_the_same_question_names_no_host_when_there_is_only_one():
 _VALUE_FOR = {
 	"pickHost": "host", "portsHost": "host", "pruneHost": "host", "prune": "host",
 	"settingsHost": "host", "settingsHostRename": "host", "settingsHostRemove": "host",
-	"scheduleSelectHost": "host",
+	"scheduleSelectHost": "host", "generatePort": "host", "checkPort": "host",
 	# Deliberately a host that is not registered: this one actually removes.
 	"settingsHostRemoveConfirm": "h_nonexistent",
 	"settingsSetColumns": "2", "settingsSetLanguage": "ES",
@@ -997,6 +997,90 @@ def test_every_button_survives_the_host_being_down():
 		undo(); restore()
 	assert not broken, "callbacks que revientan con el host caído:\n" + "\n".join(
 		f"  {name}: {type(e).__name__}: {e}" for name, e in broken)
+
+
+def test_info_reads_the_update_cache_of_its_own_host():
+	"""
+	The same image and name on two machines have two independent answers. /info
+	read the cache without saying which host it was asking about, so on a
+	remote container it reported the local machine's: the update button
+	appeared with nothing to update, and hid a real one.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	nginx = _container("nginx", "running", image="nginx:1.27")
+	# Pending on the NAS, up to date locally.
+	dcb.save_container_update_status("nginx:1.27", "nginx", True, "h_nas")
+	dcb.save_container_update_status("nginx:1.27", "nginx", False, "h_local")
+
+	original = dcb.DockerManager.list_containers
+	original_get = dcb.DockerManager.container_named
+	dcb.DockerManager.list_containers = lambda self, comando="": [nginx]
+	dcb.DockerManager.container_named = lambda self, name: nginx
+	captured = {}
+	original_send = dcb.send_message
+	dcb.send_message = lambda message="", reply_markup=None, **kw: captured.update(
+		message=message, reply_markup=reply_markup) or None
+	try:
+		for host_id, expected in (("h_nas", True), ("h_local", False)):
+			owner = dcb.manager(host_id)
+			owner.client.containers.get = lambda _id, _c=nginx: _c
+			_text, possible_update = owner.get_info(container_id="abc12", container_name="nginx")
+			assert possible_update is expected, (host_id, possible_update)
+	finally:
+		dcb.DockerManager.list_containers = original
+		dcb.DockerManager.container_named = original_get
+		dcb.send_message = original_send
+		_restore_hosts()
+
+
+def test_the_ports_screen_asks_about_the_host_you_are_looking_at():
+	"""
+	/ports lets you pick a host and lists that host's ports correctly. Its two
+	buttons did not: generating a free port and checking one both answered
+	about the machine the bot runs on, so on a remote host's screen the bot
+	would hand you a port that is taken there and call it free. Wrong answers,
+	not rough ones — the kind somebody deploys on top of.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	# 8080 taken on the NAS, nothing taken locally.
+	occupied = _container("plex", "running")
+	occupied.attrs = {"Config": {"Image": "plex:latest"},
+						"HostConfig": {"NetworkMode": "bridge",
+										"PortBindings": {"32400/tcp": [{"HostPort": "8080"}]}}}
+	fake = {"h_local": [], "h_nas": [occupied]}
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": fake[self.host_id]
+	try:
+		taken_on_nas, _ = dcb.check_specific_port(8080, "h_nas")
+		free_locally, _ = dcb.check_specific_port(8080, "h_local")
+		assert taken_on_nas is False, "8080 está ocupado en el nas"
+		assert free_locally is True, "y libre en el host local"
+
+		# And the buttons carry the host, or the answer above cannot be asked.
+		captured = {}
+		original_send = dcb.send_message
+		dcb.send_message = lambda message="", reply_markup=None, **kw: captured.update(
+			reply_markup=reply_markup) or None
+		try:
+			dcb.show_container_ports("h_nas")
+		finally:
+			dcb.send_message = original_send
+		callbacks_seen = harness.keyboard_callbacks(captured["reply_markup"])
+		assert "generatePort|h_nas" in callbacks_seen, callbacks_seen
+		assert "checkPort|h_nas" in callbacks_seen, callbacks_seen
+	finally:
+		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
+def test_a_port_question_about_a_host_that_is_gone_says_so():
+	"""
+	A button lives on a message and the message outlives the host: pressing an
+	old one after removing that machine used to raise.
+	"""
+	assert dcb.get_random_available_port("h_vanished") is None
+	available, message = dcb.check_specific_port(8080, "h_vanished")
+	assert available is False and message, message
 
 
 def _capture_updateall():

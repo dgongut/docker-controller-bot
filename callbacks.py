@@ -539,10 +539,11 @@ def cb_prune(ctx):
 
 @callback(
 	name='generatePort',
+	params=("value",),
 )
 def cb_generatePort(ctx):
 	# Generate a random available port
-	port = core.get_random_available_port()
+	port = core.get_random_available_port(ctx.value)
 
 	# Build the message with the generated port
 	if port:
@@ -556,10 +557,11 @@ def cb_generatePort(ctx):
 
 @callback(
 	name='checkPort',
+	params=("value",),
 )
 def cb_checkPort(ctx):
 	# Ask user for port to check
-	core.ask_port_to_check(ctx.userId)
+	core.ask_port_to_check(ctx.userId, ctx.value)
 
 @callback(
 	name='cancelCheckPort',
