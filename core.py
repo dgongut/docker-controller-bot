@@ -1200,15 +1200,11 @@ class DockerUpdateMonitor:
 			save_container_update_status(image_with_tag, container.name, has_update, host_id)
 
 		if grouped_updates_containers and should_notify:
-			markup = InlineKeyboardMarkup(row_width=button_columns())
-			markup.add(*[
-				InlineKeyboardButton(f'{ICON_CONTAINER_MARK_FOR_UPDATE} {cname}', callback_data=f'toggleUpdate|{cid}')
-				for cid, cname in grouped_updates_containers
-			])
-			markup.add(
-				InlineKeyboardButton(get_text("button_update_all"), callback_data="toggleUpdateAll"),
-				InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar")
-			)
+			# The same builder the toggles repaint with: a keyboard assembled
+			# by hand here drifts from the one that replaces it on the first
+			# tap, and both have to agree on what a button says.
+			markup = build_generic_keyboard(grouped_updates_containers, set(), None, "Update",
+											get_text("button_update"), get_text("button_update_all"))
 			if not is_muted():
 				message = send_message(message=f'{host_label(host_id)}{get_text("available_updates", len(grouped_updates_containers))}', reply_markup=markup)
 				if message:
@@ -4149,12 +4145,21 @@ def build_generic_keyboard(container_available, selected_containers, originalMes
 	container_available: list of [id, name] pairs.
 	selected_containers: set of container IDs.
 	"""
+	# The host earns a place on the button only when the list spans machines:
+	# /updateall gathers the whole fleet and two hosts can hold the same
+	# container name, while a per-host message already says which host it is
+	# about in its own text. With a single host the level does not exist.
+	spans_hosts = len({ref_host(cid) for cid, _cname in container_available}) > 1
+
 	markup = InlineKeyboardMarkup(row_width=button_columns())
 	botones = []
 	for cid, cname in container_available:
 		icono = ICON_CONTAINER_MARKED_FOR_UPDATE if cid in selected_containers else ICON_CONTAINER_MARK_FOR_UPDATE
+		# A button caption is plain text, so the alias goes in unescaped: the
+		# bold markup host_label() uses would show as literal tags here.
+		etiqueta = f"{host_registry.alias(ref_host(cid))}  ·  {cname}" if spans_hosts else cname
 		botones.append(
-			InlineKeyboardButton(f"{icono} {cname}", callback_data=f"toggle{action_type}|{cid}")
+			InlineKeyboardButton(f"{icono} {etiqueta}", callback_data=f"toggle{action_type}|{cid}")
 		)
 	markup.add(*botones)
 

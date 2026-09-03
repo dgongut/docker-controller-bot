@@ -16,22 +16,18 @@ import time
 
 import store
 
-from telebot.types import InlineKeyboardButton
-from telebot.types import InlineKeyboardMarkup
-
-from config import CONTAINER_ID_LENGTH, CONTAINER_NAME, ICON_CONTAINER_MARK_FOR_UPDATE
 from i18n import get_text
 from core import (
 	send_prune_menu,
-	send_picker, manager_for, ref_id,
+	send_picker, manager_for, managers, ref_id,
 	register_command,
 	VERSION, ask_command, ask_text_input,
-	build_hierarchical_keyboard, button_columns, change_tag_container,
-	compose, confirm_delete, create_simple_keyboard,
-	delete_message, display_all_hosts, docker_manager,
+	build_generic_keyboard, build_hierarchical_keyboard, change_tag_container,
+	compose, confirm_delete, container_ref, create_simple_keyboard,
+	delete_message, display_all_hosts,
 	info, log_file, logs,
 	mute, print_donors, restart,
-	run, save_container_cache, save_multi_action,
+	run, save_container_refs, save_multi_action,
 	save_update_data, send_message, send_settings_menu,
 	send_ports_menu, show_schedule_menu, sort_containers_by_priority,
 	stop, update_available,
@@ -117,33 +113,35 @@ def cmd_checkupdate(user_id=None, chat_id=None, container_id=None, container_nam
 	send_picker("CheckUpdate")
 
 def cmd_updateall(user_id=None, chat_id=None, container_id=None, container_name=None, argument=None):
-	containers = docker_manager.list_containers()
-	# Sort containers: bot first, then running, then stopped (all alphabetically)
-	sorted_containers = sort_containers_by_priority(containers)
-	containersToUpdate = []  # list of [id, name] pairs
-	containersToUpdateObjs = []
-	for container in sorted_containers:
-		if update_available(container):
-			containersToUpdate.append([container.id[:CONTAINER_ID_LENGTH], container.name])
-			containersToUpdateObjs.append(container)
+	# Every reachable host, one after another. The automatic update daemon has
+	# always swept the whole fleet, so a manual /updateall that only looked at
+	# the local machine disagreed with it about what needs updating — and its
+	# buttons carried bare ids, which resolve against the local host wherever
+	# the container actually lives.
+	containersToUpdate = []  # list of [reference, name] pairs
+	for owner in managers():
+		# Sorted within each host: bot first, then running, then stopped (all
+		# alphabetically). Sorting the fleet as one list would interleave
+		# machines, and the host is the coarser grouping.
+		for container in sort_containers_by_priority(owner.list_containers()):
+			if update_available(container, owner.host_id):
+				containersToUpdate.append([container_ref(owner.host_id, container), container.name])
 	if not containersToUpdate:
 		send_message(message=get_text("already_updated_all"))
 		return
 
-	markup = InlineKeyboardMarkup(row_width=button_columns())
-	markup.add(*[
-		InlineKeyboardButton(f'{ICON_CONTAINER_MARK_FOR_UPDATE} {cname}', callback_data=f'toggleUpdate|{cid}')
-		for cid, cname in containersToUpdate
-	])
-	markup.add(
-		InlineKeyboardButton(get_text("button_update_all"), callback_data="toggleUpdateAll"),
-		InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar")
-	)
+	# The same builder the toggles repaint with, so the first render and every
+	# one after it agree. Building the keyboard here by hand is how the list
+	# ended up naming its hosts only from the second tap onwards.
+	markup = build_generic_keyboard(containersToUpdate, set(), None, "Update",
+									get_text("button_update"), get_text("button_update_all"))
 	message = send_message(message=get_text("available_updates", len(containersToUpdate)), reply_markup=markup)
 	if message:
 		save_update_data(message.chat.id, message.message_id, containersToUpdate)
-		# Pre-populate name cache so callback parser can resolve names from IDs
-		save_container_cache(message.chat.id, message.message_id, containersToUpdateObjs)
+		# Pre-populate the name cache so the callback parser can resolve names
+		# from references. Per reference rather than per host: this list spans
+		# machines, so a single host id would mislabel all but one of them.
+		save_container_refs(message.chat.id, message.message_id, containersToUpdate)
 
 def cmd_changetag(user_id=None, chat_id=None, container_id=None, container_name=None, argument=None):
 	if container_id:

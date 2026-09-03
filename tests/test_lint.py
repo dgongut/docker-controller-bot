@@ -191,11 +191,37 @@ CONTAINER_CALLBACKS = (
 	"run", "stop", "restart", "confirmDelete", "delete", "logs", "logfile",
 	"info", "compose", "checkUpdate", "confirmUpdate", "update",
 	"changeTagContainer", "changeTag", "askCommand", "exec", "cancelExec",
+	"toggleUpdate",
 )
 
 # How a reference is built. Anything interpolated into a container callback
 # has to come from one of these, or already be a reference.
 REFERENCE_BUILDERS = ("container_ref(", "make_ref(", "_ref(")
+
+# How a bare short id gets built. Five hex characters off a container object
+# name a container on the local host and nowhere else, so a function that
+# builds container-callback buttons must not do this at all.
+BARE_ID_BUILDERS = (".id[:CONTAINER_ID_LENGTH]",)
+
+
+def _function_spans(tree):
+	"""Every function in a file as (first line, last line, name).
+
+	Innermost first, so a nested function wins over the one holding it.
+	"""
+	spans = [(node.lineno, node.end_lineno, node.name)
+			for node in ast.walk(tree)
+			if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+	spans.sort(key=lambda span: span[1] - span[0])
+	return spans
+
+
+def _function_around(spans, line_number):
+	"""The innermost function holding a line, or None at module level."""
+	for span in spans:
+		if span[0] <= line_number <= span[1]:
+			return span
+	return None
 
 
 def test_container_buttons_never_carry_a_bare_id():
@@ -207,11 +233,17 @@ def test_container_buttons_never_carry_a_bare_id():
 	import re
 
 	problems = []
-	pattern = re.compile(r'callback_data=f?"([^"]*)"')
+	# Both quote styles. The repo mixes them, and the version of this check
+	# that only read double quotes was blind to eight `callback_data` lines —
+	# two of them container buttons, which is how /updateall shipped bare ids.
+	pattern = re.compile(r"""callback_data=f?(['"])([^'"]*)\1""")
 	for filename in ("core.py", "commands.py", "callbacks.py"):
 		path = os.path.join(harness.REPO, filename)
-		for line_number, line in enumerate(io.open(path, encoding="utf-8"), start=1):
-			for data in pattern.findall(line):
+		source = io.open(path, encoding="utf-8").read()
+		lines = source.splitlines()
+		spans = _function_spans(ast.parse(source))
+		for line_number, line in enumerate(lines, start=1):
+			for _quote, data in pattern.findall(line):
 				name = data.split("|", 1)[0]
 				if name not in CONTAINER_CALLBACKS:
 					continue
@@ -219,11 +251,25 @@ def test_container_buttons_never_carry_a_bare_id():
 					continue
 				if any(builder in line for builder in REFERENCE_BUILDERS):
 					continue
-				# A plain {containerId} or {cid} is already a reference: it came
-				# from a callback the dispatcher resolved.
 				if re.search(r"\{(containerId|cid|container_id|ref)\}", data):
-					continue
-				problems.append(f"  {filename}:{line_number}  {line.strip()}")
+					# The name says reference and usually is one: it came from
+					# a callback the dispatcher resolved. But a name proves
+					# nothing on its own, so the function that builds the
+					# button has to be clean of bare ids for this to hold.
+					span = _function_around(spans, line_number)
+					if span is None:
+						continue
+					body = "\n".join(lines[span[0] - 1:span[1]])
+					culprit = next((builder for builder in BARE_ID_BUILDERS
+									if builder in body), None)
+					if culprit is None:
+						continue
+					problems.append(
+						f"  {filename}:{line_number}  {span[2]}() builds "
+						f"`{culprit}` and hands it to a container button:\n"
+						f"      {line.strip()}")
+				else:
+					problems.append(f"  {filename}:{line_number}  {line.strip()}")
 
 	assert not problems, (
 		"botones de contenedor con id suelto en vez de referencia:\n" + "\n".join(problems))

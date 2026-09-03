@@ -696,6 +696,101 @@ def test_a_picker_with_nothing_anywhere_says_so():
 		_restore_hosts()
 
 
+def _capture_updateall():
+	"""Runs /updateall and returns the message and keyboard it sent."""
+	captured = {}
+	original = (commands.send_message, commands.update_available,
+				commands.save_update_data, commands.save_container_refs)
+	commands.send_message = lambda message="", reply_markup=None, **kwargs: captured.update(
+		message=message, reply_markup=reply_markup) or None
+	# The update cache is not what this is about: every container has one
+	# pending, so the list is the whole fleet.
+	commands.update_available = lambda container, host_id=None: True
+	commands.save_update_data = lambda *a, **k: None
+	commands.save_container_refs = lambda *a, **k: None
+	try:
+		commands.cmd_updateall()
+	finally:
+		(commands.send_message, commands.update_available,
+			commands.save_update_data, commands.save_container_refs) = original
+	return captured.get("message", ""), captured.get("reply_markup")
+
+
+def test_updateall_lists_every_host_and_its_buttons_carry_references():
+	"""
+	The manual command has to see what the automatic daemon sees. Listing only
+	the local machine made the two disagree about what needs updating, and the
+	bare ids its buttons carried resolved against the local host wherever the
+	container actually lived.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	fake = {
+		"h_local": [_container("nginx", "running")],
+		"h_nas": [_container("plex", "running")],
+	}
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": fake[self.host_id]
+	try:
+		_text, markup = _capture_updateall()
+		callbacks = harness.keyboard_callbacks(markup)
+		toggles = [c for c in callbacks if c.startswith("toggleUpdate|")]
+		assert len(toggles) == 2, callbacks
+		assert {dcb.ref_host(c.split("|", 1)[1]) for c in toggles} == {"h_local", "h_nas"}, toggles
+		for callback in toggles:
+			reference = callback.split("|", 1)[1]
+			assert dcb.CONTAINER_REF_SEPARATOR in reference, reference
+	finally:
+		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
+def test_updateall_names_the_host_on_a_button_only_when_the_list_spans_hosts():
+	"""
+	Two machines can hold the same container name, so a fleet-wide list has to
+	say which is which. On the first render as much as on the repaint after a
+	tap: they go through the same builder for exactly that reason.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	fake = {
+		"h_local": [_container("nginx", "running")],
+		"h_nas": [_container("nginx", "running")],
+	}
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": fake[self.host_id]
+	try:
+		_text, markup = _capture_updateall()
+		labels = harness.keyboard_labels(markup)
+		assert any("casa" in label and "nginx" in label for label in labels), labels
+		assert any("nas" in label and "nginx" in label for label in labels), labels
+
+		# And the repaint agrees: the toggle rebuilds from the same pairs.
+		pairs = [[c.split("|", 1)[1], "nginx"]
+					for c in harness.keyboard_callbacks(markup) if c.startswith("toggleUpdate|")]
+		repainted = harness.keyboard_labels(
+			dcb.build_generic_keyboard(pairs, set(), None, "Update", "update", "update all"))
+		assert any("casa" in label for label in repainted), repainted
+		assert any("nas" in label for label in repainted), repainted
+	finally:
+		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
+def test_a_single_host_updateall_names_no_host():
+	"""The golden rule: with one host the list reads as it always did."""
+	_with_hosts([HOST_FIXTURE[0]], unreachable=())
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": [_container("nginx", "running")]
+	try:
+		_text, markup = _capture_updateall()
+		labels = [label for label in harness.keyboard_labels(markup) if "nginx" in label]
+		assert labels, harness.keyboard_labels(markup)
+		for label in labels:
+			assert "casa" not in label and "\u00b7" not in label, label
+	finally:
+		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
 def test_container_buttons_carry_their_host():
 	"""
 	The whole point: a button has to say which machine it means, or five hex
