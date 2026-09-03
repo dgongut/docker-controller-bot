@@ -342,3 +342,96 @@ def test_the_local_host_cannot_be_removed():
 	assert [h["id"] for h in store_.get("hosts")] == ["h_local"]
 	assert host_registry.remove_host("h_nas") is False, "quitar dos veces no debe fallar"
 	shutil.rmtree(root, ignore_errors=True)
+
+
+def test_dropping_a_client_closes_it():
+	"""
+	Forgetting a client is not releasing it. Behind an `ssh://` client there is
+	an `ssh ... docker system dial-stdio` process, and drop() runs on every bad
+	connection — once per reconnection attempt for the event monitor. Leaving
+	them unclosed piled abandoned ssh processes up inside the container.
+	"""
+	import docker
+
+	installed = with_paramiko()
+
+	closed = []
+
+	def sdk(base_url=None, **kwargs):
+		fake = MagicMock()
+		fake.close.side_effect = lambda: closed.append(base_url)
+		return fake
+
+	store_, root = setup([
+		{"id": "h_local", "alias": "casa", "url": host_registry.LOCAL_SOCKET_URL, "local": True},
+		{"id": "h_nas", "alias": "nas", "url": "ssh://root@nas"},
+	])
+	docker.DockerClient = sdk
+
+	host_registry.client("h_nas")
+	assert host_registry.ping("h_nas") is True
+	assert closed == [], "nada se cierra mientras el host está en uso"
+
+	host_registry.drop("h_nas")
+	# Both of them: the probe client has its own ssh process behind it.
+	assert closed.count("ssh://root@nas") == 2, closed
+
+	# And the other host is untouched, which is the point of dropping one.
+	assert host_registry.client("h_local") is not None
+	without_paramiko(installed)
+	shutil.rmtree(root, ignore_errors=True)
+
+
+def test_resetting_closes_every_client():
+	"""Same reason as drop(): a settings reload discards the whole cache."""
+	import docker
+
+	installed = with_paramiko()
+
+	closed = []
+
+	def sdk(base_url=None, **kwargs):
+		fake = MagicMock()
+		fake.close.side_effect = lambda: closed.append(base_url)
+		return fake
+
+	store_, root = setup([
+		{"id": "h_local", "alias": "casa", "url": host_registry.LOCAL_SOCKET_URL, "local": True},
+		{"id": "h_nas", "alias": "nas", "url": "ssh://root@nas"},
+	])
+	docker.DockerClient = sdk
+
+	host_registry.client("h_local")
+	host_registry.client("h_nas")
+	host_registry.reset()
+	assert sorted(closed) == ["ssh://root@nas", host_registry.LOCAL_SOCKET_URL], closed
+	without_paramiko(installed)
+	shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_client_that_cannot_be_closed_does_not_stop_the_drop():
+	"""
+	Closing a client that is already dead can raise, and by then there is
+	nothing to salvage: it is out of the cache either way, and the caller
+	dropped it precisely because the connection had gone bad.
+	"""
+	import docker
+
+	installed = with_paramiko()
+
+	def sdk(base_url=None, **kwargs):
+		fake = MagicMock()
+		fake.close.side_effect = Exception("ya estaba muerto")
+		return fake
+
+	store_, root = setup([
+		{"id": "h_local", "alias": "casa", "url": host_registry.LOCAL_SOCKET_URL, "local": True},
+		{"id": "h_nas", "alias": "nas", "url": "ssh://root@nas"},
+	])
+	docker.DockerClient = sdk
+
+	host_registry.client("h_nas")
+	host_registry.drop("h_nas")   # no debe propagar
+	assert host_registry.client("h_nas") is not None, "y el siguiente uso reconecta"
+	without_paramiko(installed)
+	shutil.rmtree(root, ignore_errors=True)

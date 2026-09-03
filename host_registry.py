@@ -259,9 +259,14 @@ def client(host_id):
 			return cached[1]
 
 		built = _build_client(entry)
+		displaced = _clients.get(host_id)
 		_clients[host_id] = (url, built)
 		debug(f"Connected to host {entry.get('alias', host_id)} ({url})")
-		return built
+	# The URL changed under us, so what was cached is not this host any more.
+	# Same leak as drop(): nothing will ask for that client again, and its ssh
+	# process outlives it until somebody closes it.
+	_close((displaced,), host_id)
+	return built
 
 
 def try_client(host_id):
@@ -296,8 +301,12 @@ def probe_client(host_id):
 			return cached[1]
 
 		built = _build_client(entry, timeout=PROBE_TIMEOUT_SECONDS)
+		displaced = _probe_clients.get(host_id)
 		_probe_clients[host_id] = (url, built)
-		return built
+	# As in client(): the entry it replaces belongs to a URL nobody will ask
+	# for again, and its connection stays open until it is closed.
+	_close((displaced,), host_id)
+	return built
 
 
 def ping(host_id):
@@ -324,9 +333,34 @@ def ping(host_id):
 		return False
 
 
+def _close(entries, host_id):
+	"""
+	Hands discarded clients' resources back, given their cache entries.
+
+	Forgetting a client is not the same as releasing it. Behind an `ssh://` one
+	there is an `ssh ... docker system dial-stdio` process, and drop() runs
+	every time a connection goes bad — which for the event monitor is once per
+	reconnection attempt. A host with a flaky link would leave abandoned ssh
+	processes piling up inside the container for days.
+
+	Takes the `(url, client)` entries the caches hold rather than bare clients,
+	so no caller has to remember to unwrap them.
+
+	Closing one that is already dead can raise, and by then there is nothing
+	left to salvage: the client is gone from the cache either way.
+	"""
+	for entry in entries:
+		if not entry:
+			continue
+		try:
+			entry[1].close()
+		except Exception as e:
+			debug(f"Could not close the client for host {host_id}: {e}")
+
+
 def drop(host_id):
 	"""
-	Forgets the cached clients for a host.
+	Forgets the cached clients for a host, and closes them.
 
 	Called when a host's connection details change, and when a connection goes
 	bad so that the next use reconnects instead of reusing a dead socket. Both
@@ -336,7 +370,10 @@ def drop(host_id):
 	"""
 	with _lock:
 		removed = _clients.pop(host_id, None)
-		_probe_clients.pop(host_id, None)
+		probe = _probe_clients.pop(host_id, None)
+	# Outside the lock: an ssh teardown is not instant, and nothing else needs
+	# to wait on it to look up a different host.
+	_close((removed, probe), host_id)
 	if removed:
 		debug(f"Dropped the cached client for host {host_id}")
 
@@ -538,8 +575,11 @@ def rename_host(host_id, new_alias):
 def reset():
 	"""Drops every cached client. For tests, and after a settings reload."""
 	with _lock:
+		discarded = list(_clients.items()) + list(_probe_clients.items())
 		_clients.clear()
 		_probe_clients.clear()
+	for host_id, entry in discarded:
+		_close((entry,), host_id)
 	with _probe_lock:
 		# The threads themselves are daemons and cannot be stopped; forgetting
 		# them keeps a check against the old settings from being reused.
