@@ -1379,6 +1379,56 @@ def test_the_crown_marks_only_the_real_bot_container():
 		undo(); _restore_hosts()
 
 
+def test_a_daemon_that_answers_anything_is_not_believed():
+	"""
+	own_container() asks the daemon to confirm a candidate id, and used to
+	believe whatever came back. That is fine against a real daemon and wrong
+	against anything else: a stand-in that answers every lookup made the bot
+	think it was *every* container, so `exclude_own` emptied every menu and
+	nothing could be managed.
+
+	Which is exactly what happened, and only inside a container — on a Mac
+	there is no /proc/self/mountinfo, so there was no candidate to confirm and
+	the whole path was skipped. Four picker tests passed on the laptop and
+	failed in the image.
+	"""
+	from unittest.mock import MagicMock as Anything
+
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	dcb.forget_own_container()
+	original = dcb.own_container_ids
+	dcb.own_container_ids = lambda *a, **k: ["a" * 64]
+	try:
+		for owner in dcb.managers():
+			owner.client.containers.get = lambda _id: Anything()
+		assert dcb.own_container() is None, "se ha creído a un doble"
+		# Y por tanto nada es el bot, en vez de todo serlo.
+		nginx = _container("nginx", "running")
+		assert dcb.is_own_container("h_local", nginx.id, nginx.name) is False
+	finally:
+		dcb.own_container_ids = original
+		dcb.forget_own_container()
+		_restore_hosts()
+
+
+def test_a_daemon_that_answers_the_wrong_container_is_not_believed():
+	"""The id that comes back has to be the id that was asked about."""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	dcb.forget_own_container()
+	other = _container("otro", "running")
+	other.id = "f" * 64
+	original = dcb.own_container_ids
+	dcb.own_container_ids = lambda *a, **k: ["a" * 64]
+	try:
+		for owner in dcb.managers():
+			owner.client.containers.get = lambda _id, _o=other: _o
+		assert dcb.own_container() is None, "ha aceptado otro contenedor como propio"
+	finally:
+		dcb.own_container_ids = original
+		dcb.forget_own_container()
+		_restore_hosts()
+
+
 def _press_every_command(**arguments):
 	"""Runs every command with the given arguments; returns the ones that raised."""
 	broken = []

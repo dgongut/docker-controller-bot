@@ -920,8 +920,21 @@ def own_container():
 			except Exception:
 				debug(f"Candidate {candidate[:12]} is not a container on this daemon")
 				continue
-			_own_container = (local, me.id, me.name)
-			debug(f"Identified myself as {me.name} ({me.id[:12]}) on the local host")
+			identifier = getattr(me, "id", None)
+			name = getattr(me, "name", None)
+			# What came back has to be the container that was asked about, and
+			# has to look like one. Neither check is paranoia: a daemon that
+			# answers something else, or a stand-in that answers everything,
+			# would otherwise be believed — and being believed here means every
+			# container is treated as the bot and none of them can be managed.
+			if not isinstance(identifier, str) or not isinstance(name, str):
+				debug(f"Candidate {candidate[:12]} came back as something other than a container")
+				continue
+			if not identifier.startswith(candidate[:12]):
+				debug(f"Candidate {candidate[:12]} resolved to {identifier[:12]}, which is not it")
+				continue
+			_own_container = (local, identifier, name)
+			debug(f"Identified myself as {name} ({identifier[:12]}) on the local host")
 			return _own_container
 
 		# Nothing resolved. Remember the failure so the /proc read and the
@@ -962,7 +975,7 @@ def is_own_container(host_id=None, container_id=None, container_name=None):
 	own_host, own_id, own_name = own
 	if host_id is not None and host_id != own_host:
 		return False
-	if container_id:
+	if isinstance(container_id, str) and container_id:
 		return own_id.startswith(container_id) or container_id.startswith(own_id)
 	# No id to compare: the name, on our own host, is the best that is left.
 	return container_name == own_name

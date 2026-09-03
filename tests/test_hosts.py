@@ -33,23 +33,34 @@ def setup(hosts=None):
 
 def with_paramiko():
 	"""
-	Pretends paramiko is importable.
+	Pretends the two things the ssh path needs from the system are there:
+	paramiko, and the `ssh` binary.
 
-	It ships in the image as py3-paramiko but is not normally installed on a
-	development machine, so any test that reaches the ssh path has to stand in
-	for it or it would only ever exercise the "missing dependency" branch.
+	Both ship in the image —py3-paramiko and openssh-client, by apk— and
+	neither is guaranteed anywhere the tests happen to run. Without standing
+	in for them, every ssh test only ever exercises the "missing dependency"
+	branch, which is how the suite came to pass on a laptop and fail inside a
+	plain python image.
+
+	Returns what to hand back to without_paramiko().
 	"""
 	import types
 
 	installed = "paramiko" in sys.modules
 	if not installed:
 		sys.modules["paramiko"] = types.ModuleType("paramiko")
-	return installed
+	original_which = host_registry.shutil.which
+	if not original_which("ssh"):
+		host_registry.shutil.which = lambda name: "/usr/bin/ssh" if name == "ssh" else original_which(name)
+	return (installed, original_which)
 
 
-def without_paramiko(was_installed):
-	if not was_installed:
+def without_paramiko(state):
+	installed, original_which = state if isinstance(state, tuple) else (state, None)
+	if not installed:
 		sys.modules.pop("paramiko", None)
+	if original_which is not None:
+		host_registry.shutil.which = original_which
 
 
 def test_a_single_host_hides_the_host_level():
@@ -240,9 +251,12 @@ def test_ssh_hands_the_connection_to_the_system_client():
 def test_a_missing_ssh_binary_is_its_own_message():
 	"""Distinct from a missing paramiko, because the fix is a different one."""
 	_, root = setup([{"id": "h_ssh", "alias": "nas", "url": "ssh://user@nas"}])
+	# En este orden a propósito: with_paramiko() finge que el binario está, y
+	# lo que este test quiere es justo lo contrario. Así que primero se pone en
+	# pie el camino ssh y después se le quita el ssh.
+	had = with_paramiko()
 	original = host_registry.shutil.which
 	host_registry.shutil.which = lambda name: None
-	had = with_paramiko()
 	try:
 		host_registry.client("h_ssh")
 		raise AssertionError("debería lanzar")
