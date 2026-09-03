@@ -244,7 +244,6 @@
   "schedule_action_mute": "🔇 Stummschalten - Benachrichtigungen für eine bestimmte Zeit stummschalten",
   "schedule_action_prune": "🧹 Aufräumen - Nicht genutzte Docker-Objekte entfernen",
   "updating_stopping": "<i>Stoppe</i> <b>$1</b> zum Aktualisieren",
-  "error_bot_container_name": "Der Containername muss in der Variable CONTAINER_NAME gesetzt werden",
   "error_deleting_container_with_error": "Konnte Container $1 nicht löschen. Fehler: [$2]",
   "error_creating_container": "Konnte Container $1 nicht erstellen. Fehler: [$2]",
   "error_updating_container_with_error": "Konnte Container $1 nicht aktualisieren. Fehler: [$2]",

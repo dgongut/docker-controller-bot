@@ -244,7 +244,6 @@
   "schedule_action_mute": "🔇 Silenciar - Silenciar notificacions durant un temps especificat",
   "schedule_action_prune": "🧹 Netejar - Eliminar objectes de Docker que no es fan servir",
   "updating_stopping": "<i>Aturant</i> <b>$1</b> per actualitzar",
-  "error_bot_container_name": "Cal configurar el nom del contenidor a la variable CONTAINER_NAME",
   "debug_rollback_successful": "Rollback exitós per a $1. El contenidor antic ha estat restaurat.",
   "debug_rollback_update": "Realitzant rollback de l'actualització per a $1",
   "error_deleting_container_with_error": "No s'ha pogut eliminar el contenidor $1. Error: [$2]",

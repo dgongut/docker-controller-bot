@@ -244,7 +244,6 @@
   "schedule_action_mute": "🔇 Silenciar - Silenciar notificacións durante un tempo especificado",
   "schedule_action_prune": "🧹 Limpar - Eliminar obxectos de Docker que non se usan",
   "updating_stopping": "<i>Detendo</i> <b>$1</b> para actualizar",
-  "error_bot_container_name": "Hai que configurar o nome do contedor na variable CONTAINER_NAME",
   "error_deleting_container_with_error": "Non se puido eliminar o contedor $1. Erro: [$2]",
   "error_creating_container": "Non se puido crear o contedor $1. Erro: [$2]",
   "updating_creating": "<i>Actualizando</i> <b>$1</b>...\nCreando contedor...",

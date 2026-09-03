@@ -37,6 +37,7 @@ Have controll of your docker containers from one single place.
 - ✅ Show detailed information for a container or a whole Compose project
 - ✅ Schedule tasks with cron expressions: run, stop, restart, exec, prune and mute
 - ✅ Several Docker hosts from a single bot, over `ssh://`, `tcp://` or TLS: added from the chat itself, and with a single host everything looks exactly as it always did
+- ✅ Works out which container it is on its own: nothing to tell it, and it still knows not to stop or delete itself
 - ✅ Settings editable from the bot itself with `/settings`, without touching the docker-compose or restarting
 - ✅ Button-based main menu in `/start`, grouped into categories; typed commands keep working exactly as before
 - ✅ Mute notifications temporarily
@@ -106,10 +107,12 @@ From `/schedule` you can create tasks that run on a cron schedule.
 |TELEGRAM_ADMIN |✅| Admin ChatId (You can obtain it by talking to [Rose](https://t.me/MissRose_bot) bot with /id). You can have multiple admins by writting the id separated with commas. Example: 12345,54431,55944 |
 |TELEGRAM_GROUP |❌| Group ChatId. If this bot is going to be in a group, you need to specify the chatId of that group. The bot needs to be admin of that group |
 |TELEGRAM_THREAD |❌| Thread id inside of a supergroup; it's a numeric value (2,3,4..). Default is 1. To be used with TELEGRAM_GROUP |
-|CONTAINER_NAME |✅| The container's name, same as container_name on your docker-compose |
 |TZ |✅| Timezone (Example: Europe/Madrid) |
 
-Only what the bot needs **before** it can read its own settings is left here: how to reach Telegram, who is allowed to talk to it, and which container it is. The rule is simple: if getting it wrong can lock you out of the bot, it belongs in the docker-compose, because you cannot fix from the chat what stops the chat from working.
+Only what the bot needs **before** it can read its own settings is left here: how to reach Telegram and who is allowed to talk to it. The rule is simple: if getting it wrong can lock you out of the bot, it belongs in the docker-compose, because you cannot fix from the chat what stops the chat from working.
+
+> [!NOTE]
+> **`CONTAINER_NAME` is no longer needed.** Up to 4.x you had to tell the bot the name of its own container, so it would know not to stop or delete itself. It now works that out on its own: it reads its id from `/proc/self/mountinfo` and asks Docker which one it is. If you still have the variable set the bot starts fine and the log tells you that you can drop it.
 
 ### Settings (`/settings`)
 
@@ -366,7 +369,6 @@ services:
         environment:
             - TELEGRAM_TOKEN=
             - TELEGRAM_ADMIN=
-            - CONTAINER_NAME=docker-controller-bot
             - TZ=Europe/Madrid
             #- TELEGRAM_GROUP=
             #- TELEGRAM_THREAD=1
@@ -650,6 +652,7 @@ docker-controller-bot/
     ├── migration.py               # start-up migrations (4.x -> 5.0)
     ├── config.py                  # start-up variables and constants
     ├── i18n.py                    # locale loading and `get_text`
+    ├── own_container.py           # works out which container it is, unaided
     ├── docker_update.py
     ├── docker_compose_manager.py
     ├── compose_generator.py

@@ -37,6 +37,7 @@ Lleva el control de tus contenedores docker desde un único lugar.
 - ✅ Muestra información detallada de un contenedor o de un proyecto Compose completo
 - ✅ Programación de tareas con expresiones cron: run, stop, restart, exec, prune y mute
 - ✅ Varios hosts Docker desde un solo bot, por `ssh://`, `tcp://` o TLS: se añaden desde el propio chat, y con un único host todo se ve exactamente igual que siempre
+- ✅ Se identifica a sí mismo sin ayuda: no hay que decirle cómo se llama su contenedor para que sepa no pararse ni eliminarse
 - ✅ Ajustes editables desde el propio bot con `/settings`, sin tocar el docker-compose ni reiniciar
 - ✅ Menú principal por botones en `/start`, agrupado en categorías; los comandos escritos siguen funcionando igual
 - ✅ Silencia las notificaciones de forma temporal
@@ -106,10 +107,12 @@ Desde `/schedule` puedes crear tareas que se ejecuten en cron.
 |TELEGRAM_ADMIN |✅| ChatId del administrador (se puede obtener hablándole al bot [Rose](https://t.me/MissRose_bot) escribiendo /id). Admite múltiples administradores separados por comas. Por ejemplo 12345,54431,55944 |
 |TELEGRAM_GROUP |❌| ChatId del grupo. Si este bot va a formar parte de un grupo, es necesario especificar el chatId de dicho grupo. Es necesario que el bot sea administrador del grupo |
 |TELEGRAM_THREAD |❌| Thread del tema dentro de un supergrupo; valor numérico (2,3,4..). Por defecto 1. Se utiliza en conjunción con la variable TELEGRAM_GROUP |
-|CONTAINER_NAME |✅| Nombre del contenedor, lo que se le ponga en container_name en el docker-compose ha de ir aquí también |
 |TZ |✅| Timezone (Por ejemplo Europe/Madrid) |
 
-Aquí solo quedan las variables que el bot necesita **antes** de poder leer sus propios ajustes: cómo llegar a Telegram, quién puede hablarle y qué contenedor es. La regla es sencilla: si ponerla mal te puede dejar sin acceso al bot, va en el docker-compose, porque lo que impide que el chat funcione no se puede arreglar desde el chat.
+Aquí solo quedan las variables que el bot necesita **antes** de poder leer sus propios ajustes: cómo llegar a Telegram y quién puede hablarle. La regla es sencilla: si ponerla mal te puede dejar sin acceso al bot, va en el docker-compose, porque lo que impide que el chat funcione no se puede arreglar desde el chat.
+
+> [!NOTE]
+> **`CONTAINER_NAME` ya no hace falta.** Hasta la 4.x había que decirle al bot cómo se llamaba su propio contenedor, para que supiera no pararse ni eliminarse a sí mismo. Ahora lo averigua solo: lee su id en `/proc/self/mountinfo` y le pregunta a Docker cuál es. Si la tienes puesta el bot arranca igual y te avisa en el log de que puedes quitarla.
 
 ### Ajustes (`/settings`)
 
@@ -366,7 +369,6 @@ services:
         environment:
             - TELEGRAM_TOKEN=
             - TELEGRAM_ADMIN=
-            - CONTAINER_NAME=docker-controller-bot
             - TZ=Europe/Madrid
             #- TELEGRAM_GROUP=
             #- TELEGRAM_THREAD=1
@@ -650,6 +652,7 @@ docker-controller-bot/
     ├── migration.py               # migraciones de arranque (4.x → 5.0)
     ├── config.py                  # variables de arranque y constantes
     ├── i18n.py                    # carga de idiomas y `get_text`
+    ├── own_container.py           # se identifica a sí mismo sin que se lo digan
     ├── docker_update.py
     ├── docker_compose_manager.py
     ├── compose_generator.py

@@ -244,7 +244,6 @@
   "schedule_action_mute": "🔇 Mute - Silence notifications for a specified time",
   "schedule_action_prune": "🧹 Prune - Remove Docker objects that are not in use",
   "updating_stopping": "<i>Stopping</i> <b>$1</b> for update",
-  "error_bot_container_name": "Container name needs to be set in the CONTAINER_NAME variable",
   "debug_rollback_successful": "Rollback successful for $1. Old container has been restored.",
   "debug_rollback_update": "Performing rollback of update for $1",
   "error_deleting_container_with_error": "Could not delete container $1. Error: [$2]",

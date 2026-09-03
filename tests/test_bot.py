@@ -1248,6 +1248,112 @@ def test_a_dead_host_does_not_hold_the_starting_message():
 	assert "host_registry.hosts" in calls, calls
 
 
+def _pretend_to_be(container, host_id="h_local"):
+	"""Makes core believe it is running as `container`, and returns the undo."""
+	dcb.forget_own_container()
+	original = dcb.own_container_ids
+    # noqa
+	dcb.own_container_ids = lambda *a, **k: [container.id]
+
+	def undo():
+		dcb.own_container_ids = original
+		dcb.forget_own_container()
+	return undo
+
+
+def test_the_bot_recognises_itself_by_id_and_not_by_name():
+	"""
+	CONTAINER_NAME matched on the name, so a container called the same on
+	another machine was mistaken for the bot. On the update path that meant
+	pressing update on a remote namesake ran the *self*-updater against the
+	local container.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	me = _container("docker-controller-bot", "running")
+	me.id = "1" * 64
+	twin = _container("docker-controller-bot", "running")   # mismo nombre, otra máquina
+	twin.id = "2" * 64
+	undo = _pretend_to_be(me)
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": [me]
+	try:
+		for owner in dcb.managers():
+			owner.client.containers.get = lambda _id, _me=me: _me
+		assert dcb.is_own_container("h_local", me.id, me.name) is True
+		# El gemelo remoto no soy yo, ni por nombre ni por id.
+		assert dcb.is_own_container("h_nas", twin.id, twin.name) is False
+		assert dcb.is_own_container("h_nas", me.id, me.name) is False
+	finally:
+		dcb.DockerManager.list_containers = original
+		undo(); _restore_hosts()
+
+
+def test_the_safeguards_refuse_only_the_real_one():
+	"""
+	Stop, restart, start and delete all refuse to act on the bot. Refusing on
+	a namesake elsewhere was the other half of the same mistake: that machine's
+	container could not be managed at all.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	me = _container("docker-controller-bot", "running")
+	me.id = "1" * 64
+	undo = _pretend_to_be(me)
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": [me]
+	try:
+		for owner in dcb.managers():
+			owner.client.containers.get = lambda _id, _me=me: _me
+		local, remote = dcb.manager("h_local"), dcb.manager("h_nas")
+		refusal = i18n.get_text("error_can_not_do_that")
+		for method in ("stop_container", "restart_container", "start_container"):
+			assert getattr(local, method)(me.id, me.name) == refusal, method
+			assert getattr(remote, method)(me.id, me.name) != refusal, method
+		assert local.delete(me.id, me.name) == refusal
+	finally:
+		dcb.DockerManager.list_containers = original
+		undo(); _restore_hosts()
+
+
+def test_without_an_id_it_falls_back_to_the_name_on_the_local_host_only():
+	"""
+	Detection can fail on a runtime that lays /proc out differently. Then the
+	name is all there is — and it still must not match a namesake elsewhere.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	dcb.forget_own_container()
+	original = dcb.own_container_ids
+	dcb.own_container_ids = lambda *a, **k: []
+	try:
+		assert dcb.own_container() is None
+		name = dcb.CONTAINER_NAME
+		if name:
+			assert dcb.is_own_container("h_local", None, name) is True
+			assert dcb.is_own_container("h_nas", None, name) is False
+		assert dcb.is_own_container("h_local", None, "cualquier-otro") is False
+	finally:
+		dcb.own_container_ids = original
+		dcb.forget_own_container()
+		_restore_hosts()
+
+
+def test_the_identity_is_resolved_once():
+	"""
+	A process cannot move to another container halfway through its life, and
+	this is read on every button press: /proc and the daemon get asked once.
+	"""
+	dcb.forget_own_container()
+	reads = []
+	original = dcb.own_container_ids
+	dcb.own_container_ids = lambda *a, **k: reads.append(1) or []
+	try:
+		for _ in range(5):
+			dcb.own_container()
+		assert len(reads) == 1, f"ha leído /proc {len(reads)} veces"
+	finally:
+		dcb.own_container_ids = original
+		dcb.forget_own_container()
+
+
 def _press_every_command(**arguments):
 	"""Runs every command with the given arguments; returns the ones that raised."""
 	broken = []

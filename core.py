@@ -28,6 +28,7 @@ from docker_compose_manager import (
     ComposeProjectManager
 )
 from schedule_manager import ScheduleManager
+from own_container import candidates as own_container_ids
 from port_manager import PortManager
 import callback_registry
 import host_registry
@@ -65,9 +66,6 @@ if TELEGRAM_ADMIN is None or TELEGRAM_ADMIN == '':
 	sys.exit(1)
 if str(ANONYMOUS_USER_ID) in str(TELEGRAM_ADMIN).split(','):
 	error("You cannot be anonymous to control the bot. In the variable TELEGRAM_ADMIN you have to put your user id.")
-	sys.exit(1)
-if CONTAINER_NAME is None or CONTAINER_NAME == '':
-	error("Container name needs to be set in the CONTAINER_NAME variable")
 	sys.exit(1)
 if TELEGRAM_GROUP is None or TELEGRAM_GROUP == '':
 	if len(str(TELEGRAM_ADMIN).split(',')) > 1:
@@ -230,7 +228,9 @@ class DockerManager:
 		else:
 			containers = self.client.containers.list(all=True)
 		status_order = {'running': 0, 'restarting': 1, 'paused': 2, 'exited': 3, 'created': 4, 'dead': 5}
-		sorted_containers = sorted(containers, key=lambda x: (0 if x.name == CONTAINER_NAME else 1, status_order.get(x.status, 6), x.name.lower()))
+		sorted_containers = sorted(containers, key=lambda x: (
+			0 if is_own_container(self.host_id, x.id, x.name) else 1,
+			status_order.get(x.status, 6), x.name.lower()))
 		return sorted_containers
 
 	def container_named(self, name):
@@ -309,7 +309,7 @@ class DockerManager:
 
 	def stop_container(self, container_id, container_name, from_schedule=False):
 		try:
-			if CONTAINER_NAME == container_name:
+			if is_own_container(self.host_id, container_id, container_name):
 				return get_text("error_can_not_do_that")
 			container = self.client.containers.get(container_id)
 			container.stop()
@@ -324,7 +324,7 @@ class DockerManager:
 
 	def restart_container(self, container_id, container_name, from_schedule=False):
 		try:
-			if CONTAINER_NAME == container_name:
+			if is_own_container(self.host_id, container_id, container_name):
 				return get_text("error_can_not_do_that")
 			container = self.client.containers.get(container_id)
 			container.restart()
@@ -339,7 +339,7 @@ class DockerManager:
 
 	def start_container(self, container_id, container_name, from_schedule=False):
 		try:
-			if CONTAINER_NAME == container_name:
+			if is_own_container(self.host_id, container_id, container_name):
 				return get_text("error_can_not_do_that")
 			container = self.client.containers.get(container_id)
 			container.start()
@@ -571,7 +571,7 @@ class DockerManager:
 		Uses docker_update module for the actual update logic.
 		"""
 		try:
-			if CONTAINER_NAME == container_name:
+			if is_own_container(self.host_id, container_id, container_name):
 				# Self-update: hand the job to the updater container.
 				#
 				# Always on the local socket, never on self.client: the bot's
@@ -742,7 +742,7 @@ class DockerManager:
 
 	def delete(self, container_id, container_name):
 		try:
-			if CONTAINER_NAME == container_name:
+			if is_own_container(self.host_id, container_id, container_name):
 				return get_text("error_can_not_do_that")
 			container = self.client.containers.get(container_id)
 			container_is_running = container.status in ['running', 'restarting', 'paused', 'created']
@@ -882,6 +882,97 @@ docker_manager = DockerManager()
 
 # Instantiate the PortManager
 port_manager = PortManager(docker_manager)
+
+_own_container = None
+_own_container_lock = threading.Lock()
+
+
+def own_container():
+	"""
+	Which container the bot is, as (host_id, container_id, name), or None.
+
+	Resolved once and remembered: a process cannot move to another container
+	halfway through its life.
+
+	`own_container.candidates()` reads the ids out of /proc — see that module
+	for why mountinfo and not the hostname — and this is where they get
+	checked, because only here is there a daemon to ask. A candidate that does
+	not resolve is discarded, so a path that merely looked like a container id
+	cannot be mistaken for one.
+
+	Always against the **local** daemon: the bot's container exists on the
+	machine the bot runs on and nowhere else.
+
+	None means it could not tell. That happens outside a container, and could
+	happen on a runtime that lays out /proc differently. Callers fall back to
+	CONTAINER_NAME when there is one, and lose the safeguards when there is
+	not — which is what start-up warns about.
+	"""
+	global _own_container
+	with _own_container_lock:
+		if _own_container is not None:
+			return _own_container or None
+
+		local = host_registry.local_host_id()
+		for candidate in own_container_ids():
+			try:
+				me = manager(local).client.containers.get(candidate)
+			except Exception:
+				debug(f"Candidate {candidate[:12]} is not a container on this daemon")
+				continue
+			_own_container = (local, me.id, me.name)
+			debug(f"Identified myself as {me.name} ({me.id[:12]}) on the local host")
+			return _own_container
+
+		# Nothing resolved. Remember the failure so the /proc read and the
+		# daemon calls are not repeated on every button press.
+		_own_container = ()
+		return None
+
+
+def forget_own_container():
+	"""Drops the resolved identity. For tests."""
+	global _own_container
+	with _own_container_lock:
+		_own_container = None
+
+
+def is_own_container(host_id=None, container_id=None, container_name=None):
+	"""
+	Whether the container being acted on is the bot itself.
+
+	By id **and** host. Matching on the name alone is what let a container
+	called the same on another machine be mistaken for the bot: on the update
+	path that meant pressing update on a remote namesake ran the self-updater
+	against the local one.
+
+	`container_id` may be a short id — the references the buttons carry are
+	five characters — so it is compared as a prefix, which is what the Docker
+	API accepts too.
+	"""
+	own = own_container()
+	if own is None:
+		# Could not identify ourselves, so fall back to the name, and only on
+		# the local host: without an id, the name is all there is, and a
+		# namesake elsewhere must still not be taken for us.
+		if not CONTAINER_NAME or container_name != CONTAINER_NAME:
+			return False
+		return host_id is None or host_id == host_registry.local_host_id()
+
+	own_host, own_id, own_name = own
+	if host_id is not None and host_id != own_host:
+		return False
+	if container_id:
+		return own_id.startswith(container_id) or container_id.startswith(own_id)
+	# No id to compare: the name, on our own host, is the best that is left.
+	return container_name == own_name
+
+
+def own_container_name():
+	"""The bot's own container name, however it was found out."""
+	own = own_container()
+	return own[2] if own else CONTAINER_NAME
+
 
 def host_alias(host_id):
 	"""
@@ -1196,14 +1287,14 @@ class DockerUpdateMonitor:
 					# operation does not need to re-download it.
 					debug(f"{container.name} update detected! Keeping downloaded image [{remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}] for upcoming update")
 
-					if container.name != CONTAINER_NAME:
+					if not is_own_container(host_id, container.id, container.name):
 						grouped_updates_containers.append([container_ref(host_id, container), container.name])
 
 					if old_has_update is True:
 						debug("Update already notified")
 						continue
 
-					if container.name == CONTAINER_NAME:
+					if is_own_container(host_id, container.id, container.name):
 						markup = InlineKeyboardMarkup(row_width = 1)
 						markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{container_ref(host_id, container)}"))
 						if not is_muted() and not cold_cache:
@@ -1556,7 +1647,7 @@ def _get_available_containers() -> list:
 	available = []
 	for entry, _, containers in hosts_with_containers():
 		for container in containers:
-			if container.name != CONTAINER_NAME:
+			if not is_own_container(entry["id"], container.id, container.name):
 				available.append((entry, container))
 	return available
 
@@ -2754,7 +2845,8 @@ def build_starting_message():
 	listing each host in turn: a machine that is unplugged would otherwise hold
 	the message — and with it the start of polling — for its whole timeout.
 	"""
-	lines = [f"🫡 <b>{CONTAINER_NAME}</b>  ·  <i>v{VERSION}</i>", ""]
+	lines = [f"🫡 <b>{html.escape(own_container_name() or 'docker-controller-bot')}</b>"
+			f"  ·  <i>v{VERSION}</i>", ""]
 
 	configured = host_registry.hosts()
 	statuses = host_registry.status_snapshot()
@@ -4384,7 +4476,7 @@ def count_actionable_buttons(markup):
 	rows = markup.keyboard or []
 	return sum(len(row) for row in rows[:-1])
 
-def build_hierarchical_keyboard(containers, action_type, bot_container_name, filter_standalone_status=None, filter_projects_with_all_status=None, marked_names=None, host_id=None):
+def build_hierarchical_keyboard(containers, action_type, exclude_own=False, filter_standalone_status=None, filter_projects_with_all_status=None, marked_names=None, host_id=None):
 	"""
 	Build hierarchical keyboard with Compose projects and standalone containers.
 	Level 1: Shows projects (📦) and standalone containers (🐳)
@@ -4392,7 +4484,7 @@ def build_hierarchical_keyboard(containers, action_type, bot_container_name, fil
 	Args:
 		containers: List of container objects
 		action_type: Type of action (Restart, Stop, Run)
-		bot_container_name: Name of the bot container to exclude
+		exclude_own: Whether to leave the bot's own container out
 		filter_standalone_status: Optional list of statuses to filter standalone containers (e.g., ['running', 'restarting'])
 		filter_projects_with_all_status: Optional list of statuses - hide projects where ALL containers have these statuses
 		marked_names: Optional set of container names already acted upon in a
@@ -4410,7 +4502,7 @@ def build_hierarchical_keyboard(containers, action_type, bot_container_name, fil
 	standalone_containers = []
 
 	for container in containers:
-		if container.name == bot_container_name:
+		if exclude_own and is_own_container(host_id, container.id, container.name):
 			continue
 
 		labels = container.labels or {}
@@ -4527,7 +4619,7 @@ PICKER_ACTIONS = {
 		"prompt_key": "start_a_container",
 		"empty_key": "no_containers_to_start",
 		"comando": "",
-		"bot_container_name": CONTAINER_NAME,
+		"exclude_own": True,
 		"filter_standalone_status": ["exited", "stopped", "paused", "created"],
 		"filter_projects_with_all_status": ["running", "restarting"],
 		"multi_action": "Run",
@@ -4536,7 +4628,7 @@ PICKER_ACTIONS = {
 		"container_callback": "stop",
 		"prompt_key": "stop_a_container",
 		"empty_key": "no_containers_to_stop",
-		"bot_container_name": CONTAINER_NAME,
+		"exclude_own": True,
 		"filter_standalone_status": ["running", "restarting"],
 		"filter_projects_with_all_status": ["exited", "stopped", "paused", "created"],
 		"multi_action": "Stop",
@@ -4545,14 +4637,14 @@ PICKER_ACTIONS = {
 		"container_callback": "restart",
 		"prompt_key": "restart_a_container",
 		"empty_key": "no_containers_to_restart",
-		"bot_container_name": CONTAINER_NAME,
+		"exclude_own": True,
 		"multi_action": "Restart",
 	},
 	"Delete": {
 		"container_callback": "confirmDelete",
 		"prompt_key": "delete_container",
 		"empty_key": "no_containers_to_delete",
-		"bot_container_name": CONTAINER_NAME,
+		"exclude_own": True,
 	},
 	"Logs": {"container_callback": "logs", "prompt_key": "logs_command_container", "empty_key": "no_containers_for_logs"},
 	"Logfile": {"container_callback": "logfile", "prompt_key": "show_logsfile", "empty_key": "no_containers_for_logs"},
@@ -4586,7 +4678,7 @@ def send_picker(action_type):
 		spec["prompt_key"],
 		spec["empty_key"],
 		comando=spec.get("comando", ""),
-		bot_container_name=spec.get("bot_container_name"),
+		exclude_own=spec.get("exclude_own", False),
 		filter_standalone_status=spec.get("filter_standalone_status"),
 		filter_projects_with_all_status=spec.get("filter_projects_with_all_status"),
 		multi_action=spec.get("multi_action"))
@@ -4764,8 +4856,8 @@ def render_prune_types(chat_id, message_id, host_id):
 					reply_markup=prune_types_keyboard(host_id))
 
 
-def _picker_has_anything(containers, bot_container_name, filter_standalone_status,
-						filter_projects_with_all_status, owner):
+def _picker_has_anything(containers, exclude_own, filter_standalone_status,
+						filter_projects_with_all_status, owner, host_id=None):
 	"""
 	Whether an action has anything to offer on one host.
 
@@ -4773,7 +4865,7 @@ def _picker_has_anything(containers, bot_container_name, filter_standalone_statu
 	an empty list.
 	"""
 	for container in containers:
-		if bot_container_name and container.name == bot_container_name:
+		if exclude_own and is_own_container(host_id, container.id, container.name):
 			continue
 		project_name = (container.labels or {}).get("com.docker.compose.project")
 		if project_name:
@@ -4791,7 +4883,7 @@ def _picker_has_anything(containers, bot_container_name, filter_standalone_statu
 
 
 def send_container_picker(action_type, prompt_key, empty_key, comando="",
-						bot_container_name=None, filter_standalone_status=None,
+						exclude_own=False, filter_standalone_status=None,
 						filter_projects_with_all_status=None, multi_action=None):
 	"""
 	Sends the level-1 picker for an action and remembers what it offered.
@@ -4805,8 +4897,8 @@ def send_container_picker(action_type, prompt_key, empty_key, comando="",
 	"""
 	sections = []
 	for entry, owner, containers in hosts_with_containers(comando):
-		if _picker_has_anything(containers, bot_container_name, filter_standalone_status,
-								filter_projects_with_all_status, owner):
+		if _picker_has_anything(containers, exclude_own, filter_standalone_status,
+								filter_projects_with_all_status, owner, entry["id"]):
 			sections.append((entry, owner, containers))
 
 	if not sections:
@@ -4816,7 +4908,7 @@ def send_container_picker(action_type, prompt_key, empty_key, comando="",
 	if len(sections) == 1:
 		entry, _, containers = sections[0]
 		return _send_picker_for_host(
-			entry, containers, action_type, prompt_key, bot_container_name,
+			entry, containers, action_type, prompt_key, exclude_own,
 			filter_standalone_status, filter_projects_with_all_status, multi_action,
 			name_host=not host_registry.is_single_host())
 
@@ -4833,12 +4925,12 @@ def send_container_picker(action_type, prompt_key, empty_key, comando="",
 	return send_message(message=host_question(action_type), reply_markup=markup)
 
 
-def _send_picker_for_host(entry, containers, action_type, prompt_key, bot_container_name,
+def _send_picker_for_host(entry, containers, action_type, prompt_key, exclude_own,
 						filter_standalone_status, filter_projects_with_all_status,
 						multi_action, name_host=False):
 	"""Sends one host's level-1 keyboard, naming the host when it is not the only one."""
 	markup, standalone = build_hierarchical_keyboard(
-		containers, action_type, bot_container_name,
+		containers, action_type, exclude_own,
 		filter_standalone_status=filter_standalone_status,
 		filter_projects_with_all_status=filter_projects_with_all_status,
 		host_id=entry["id"])
@@ -4885,7 +4977,7 @@ def render_picker_for_host(chat_id, message_id, action_type, host_id):
 		return
 
 	markup, standalone = build_hierarchical_keyboard(
-		containers, action_type, spec.get("bot_container_name"),
+		containers, action_type, spec.get("exclude_own", False),
 		filter_standalone_status=spec.get("filter_standalone_status"),
 		filter_projects_with_all_status=spec.get("filter_projects_with_all_status"),
 		host_id=host_id)
@@ -5082,7 +5174,7 @@ def refresh_multi_action_menu(chatId, messageId, container_names=None, succeeded
 		markup, message_key = result
 		edit_message_text(get_text(message_key), chatId, messageId, reply_markup=markup)
 
-def build_back_to_level1_keyboard(action_type, chatId, messageId, bot_container_name=CONTAINER_NAME, marked_names=None, host_id=None):
+def build_back_to_level1_keyboard(action_type, chatId, messageId, exclude_own=True, marked_names=None, host_id=None):
 	"""
 	Generic function to build "backTo...Level1" keyboards.
 
@@ -5090,7 +5182,7 @@ def build_back_to_level1_keyboard(action_type, chatId, messageId, bot_container_
 		action_type: Type of action ('Restart', 'Run', 'Stop', 'Delete', 'Exec', 'Logs', 'Logfile', 'Compose', 'CheckUpdate', 'Info', 'ChangeTag')
 		chatId: Chat ID for saving cache
 		messageId: Message ID for saving cache
-		bot_container_name: Name of bot container to exclude (None to include all)
+		exclude_own: Whether to leave the bot's own container out
 		marked_names: Optional set of container names already acted upon
 
 	Returns:
@@ -5213,16 +5305,17 @@ def build_back_to_level1_keyboard(action_type, chatId, messageId, bot_container_
 		send_message(message=f'{label}{get_text(config["no_containers_key"])}')
 		return None
 
-	if config['check_only_bot'] and all(c.name == bot_container_name for c in containers):
+	if config['check_only_bot'] and all(
+			is_own_container(host_id, c.id, c.name) for c in containers):
 		send_message(message=f'{label}{get_text(config["no_containers_key"])}')
 		return None
 
 	# Build hierarchical keyboard
-	exclude_container = bot_container_name if config['exclude_bot'] else None
+	exclude_own_here = exclude_own and config['exclude_bot']
 	markup, standalone_containers = build_hierarchical_keyboard(
 		containers,
 		action_type,
-		exclude_container,
+		exclude_own_here,
 		filter_standalone_status=config['filter_standalone_status'],
 		filter_projects_with_all_status=config['filter_projects_with_all_status'],
 		marked_names=marked_names,
@@ -5438,7 +5531,7 @@ def display_containers(containers, host_id=None):
 	other_standalone = []
 	if standalone_containers:
 		for container in standalone_containers:
-			if container.name == CONTAINER_NAME:
+			if is_own_container(host_id, container.id, container.name):
 				bot_container = container
 			else:
 				other_standalone.append(container)
@@ -5485,10 +5578,10 @@ def display_containers(containers, host_id=None):
 	result += "</pre>"
 	return result
 
-def sort_containers_by_priority(containers):
+def sort_containers_by_priority(containers, host_id=None):
 	"""
 	Sort containers with consistent priority:
-	1. Bot container (CONTAINER_NAME) first
+	1. The bot's own container first
 	2. Running/restarting containers (alphabetically)
 	3. Stopped/paused/exited containers (alphabetically)
 
@@ -5500,7 +5593,7 @@ def sort_containers_by_priority(containers):
 	"""
 	def sort_key(container):
 		# Priority 1: Bot container first
-		is_bot = 0 if container.name == CONTAINER_NAME else 1
+		is_bot = 0 if is_own_container(host_id, container.id, container.name) else 1
 
 		# Priority 2: Running containers before stopped
 		is_running = 0 if container.status in ['running', 'restarting'] else 1
@@ -5556,7 +5649,7 @@ def get_health_status_text(container):
 		return f"🟡 {get_text('health_starting')}"
 	return None
 
-def get_status_emoji(statusStr, containerName, container=None):
+def get_status_emoji(statusStr, containerName, container=None, host_id=None):
 	status = "🟢"
 	if statusStr == "exited" or statusStr == "dead":
 		status = "🔴"
@@ -5576,7 +5669,7 @@ def get_status_emoji(statusStr, containerName, container=None):
 		elif health == "starting":
 			status = "🟡"  # Health check in progress
 
-	if CONTAINER_NAME == containerName:
+	if is_own_container(host_id, getattr(container, "id", None), containerName):
 		status = "👑"
 	return status
 
@@ -6726,16 +6819,46 @@ def delete_updater():
 			container.stop()
 			container.remove()
 			docker_manager.client.images.remove(updater_image)
-			send_message(message=f'{get_text("updated_container", CONTAINER_NAME)}'
+			send_message(message=f'{get_text("updated_container", own_container_name())}'
 								f'{host_suffix(host_registry.local_host_id())}')
 		except Exception as e:
 			error(f"Could not delete container {UPDATER_CONTAINER_NAME}. Error: [{e}]")
 
-def check_CONTAINER_NAME():
-	container_id = get_container_id_by_name(CONTAINER_NAME)
-	if not container_id:
-		error(get_text("error_bot_container_name"))
-		sys.exit(1)
+def check_own_container():
+	"""
+	Works out which container the bot is, and says so in the log.
+
+	It used to be told, in CONTAINER_NAME, and refused to start without it.
+	Now it finds out: own_container() reads the ids out of /proc and asks the
+	local daemon which one is real. See own_container.py for why that works
+	where the hostname does not.
+
+	Three outcomes, and none of them stops the bot:
+
+	- Found it. If CONTAINER_NAME is still in the docker-compose, the log says
+	  it can go.
+	- Could not, but CONTAINER_NAME is set. The safeguards fall back to
+	  matching that name on the local host, which is what 4.x did.
+	- Could not, and there is no name either. Everything works except knowing
+	  which container is the bot, so the bot can be stopped or deleted from
+	  its own menus. That is worth a warning, and not worth refusing to start
+	  over: outside a container there is nothing to protect, and inside one
+	  this has never been observed to fail.
+	"""
+	own = own_container()
+	if own:
+		_, container_id, name = own
+		debug(f"I am {name} ({container_id[:CONTAINER_ID_LENGTH]}), worked out on my own")
+		if CONTAINER_NAME:
+			warning("CONTAINER_NAME is no longer needed: the bot identifies its own "
+					"container. You can remove it from the docker-compose.")
+		return
+	if CONTAINER_NAME:
+		warning(f"Could not identify my own container, falling back to the name "
+				f"{CONTAINER_NAME} on the local host")
+		return
+	warning("Could not identify my own container, and CONTAINER_NAME is not set: "
+			"I will not stop myself from being stopped or deleted from my own menus")
 
 def parse_schedule_expression(line):
 	"""
@@ -7056,7 +7179,7 @@ def main():
 
 	register_bot_commands()
 	delete_updater()
-	check_CONTAINER_NAME()
+	check_own_container()
 	check_mute()
 	send_message(message=build_starting_message())
 	if _migration.ask_for_language:

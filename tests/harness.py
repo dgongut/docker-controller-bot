@@ -42,6 +42,12 @@ SETTINGS_ENV = (
 )
 
 
+def tempdir():
+	"""A throwaway directory, for the tests that need a file to read."""
+	import tempfile
+	return tempfile.mkdtemp()
+
+
 def temp_storage(env=None, legacy=False, seed_files=None):
 	"""
 	Points the store at a fresh temporary root and returns it.

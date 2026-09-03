@@ -244,7 +244,6 @@
   "schedule_action_mute": "🔇 Dempen - Meldingen voor een bepaalde tijd dempen",
   "schedule_action_prune": "🧹 Opruimen - Docker-objecten verwijderen die niet in gebruik zijn",
   "updating_stopping": "<i>Stop</i> <b>$1</b> voor update",
-  "error_bot_container_name": "De naam van de container moet worden ingesteld in de CONTAINER_NAME variabele",
   "error_deleting_container_with_error": "Kon container $1 niet verwijderen. Fout: [$2]",
   "error_creating_container": "Kon container $1 niet aanmaken. Fout: [$2]",
   "error_updating_container_with_error": "Kon container $1 niet bijwerken. Fout: [$2]",

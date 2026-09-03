@@ -11,6 +11,11 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_ADMIN = os.environ.get("TELEGRAM_ADMIN")
 TELEGRAM_GROUP = os.environ.get("TELEGRAM_GROUP")
 TELEGRAM_THREAD = os.environ.get("TELEGRAM_THREAD", "1")
+# Opcional desde la 5.0.0, y solo como red de seguridad. El bot averigua cuál
+# es su propio contenedor leyendo /proc y preguntándole al daemon local — ver
+# own_container.py—, así que ya no hace falta decírselo. Se sigue leyendo para
+# no romperle el arranque a nadie que la tenga puesta, y para tener algo a lo
+# que agarrarse si la detección fallara en un entorno raro.
 CONTAINER_NAME = os.environ.get("CONTAINER_NAME")
 
 def _as_bool(raw):
