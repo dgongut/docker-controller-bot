@@ -561,3 +561,36 @@ def test_a_shadowed_builtin_is_never_called_before_its_definition():
 
 	assert not problems, (
 		"incorporados tapados y llamados antes de su definición:\n" + "\n".join(problems))
+
+
+def test_the_crown_is_always_asked_about_a_host():
+	"""
+	`get_status_emoji` decides the 👑 that says "this container is me", and it
+	needs the host to do it: without one, a container called the same on
+	another machine wears the crown too.
+
+	The behaviour test covers the function. This covers the wiring, which is a
+	different thing — a `git checkout` once quietly reverted six of these call
+	sites and every behaviour test still passed, because they call the
+	function directly.
+	"""
+	import re
+
+	problems = []
+	for filename in ("core.py", "commands.py", "callbacks.py"):
+		path = os.path.join(harness.REPO, filename)
+		source = io.open(path, encoding="utf-8").read()
+		for node in ast.walk(ast.parse(source)):
+			if not isinstance(node, ast.Call):
+				continue
+			target = node.func
+			name = target.attr if isinstance(target, ast.Attribute) else getattr(target, "id", None)
+			if name != "get_status_emoji":
+				continue
+			# statusStr, containerName, container, host_id
+			if len(node.args) + len(node.keywords) < 4:
+				segment = (ast.get_source_segment(source, node) or "").splitlines()[0]
+				problems.append(f"  {filename}:{node.lineno}  sin host: {segment.strip()[:90]}")
+
+	assert not problems, (
+		"llamadas a get_status_emoji sin decir de qué host:\n" + "\n".join(problems))

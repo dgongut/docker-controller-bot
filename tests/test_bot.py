@@ -1354,6 +1354,31 @@ def test_the_identity_is_resolved_once():
 		dcb.forget_own_container()
 
 
+def test_the_crown_marks_only_the_real_bot_container():
+	"""
+	The 👑 in a listing says "this one is me". It was decided by name, so with
+	two machines a container called the same on the other one wore the crown
+	too — and the bot's own line and its impostor's were indistinguishable.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	me = _container("docker-controller-bot", "running")
+	me.id = "1" * 64
+	twin = _container("docker-controller-bot", "running")
+	twin.id = "2" * 64
+	undo = _pretend_to_be(me)
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": [me]
+	try:
+		for owner in dcb.managers():
+			owner.client.containers.get = lambda _id, _me=me: _me
+		assert dcb.get_status_emoji(me.status, me.name, me, "h_local") == "👑"
+		# El gemelo de la otra máquina lleva su estado, no la corona.
+		assert dcb.get_status_emoji(twin.status, twin.name, twin, "h_nas") == "🟢"
+	finally:
+		dcb.DockerManager.list_containers = original
+		undo(); _restore_hosts()
+
+
 def _press_every_command(**arguments):
 	"""Runs every command with the given arguments; returns the ones that raised."""
 	broken = []

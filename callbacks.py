@@ -374,7 +374,7 @@ def cb_enterComposeProject(ctx):
 	# Add individual container buttons (sorted by status and service name)
 	for service_name in core.sort_project_services(project_info):
 		container = project_info.services[service_name]
-		status_emoji = core.get_status_emoji(container.status, container.name, container)
+		status_emoji = core.get_status_emoji(container.status, container.name, container, ctx.hostId)
 		botones.append(
 			InlineKeyboardButton(
 				f"{status_emoji} {service_name}",

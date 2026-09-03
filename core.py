@@ -428,7 +428,7 @@ class DockerManager:
 			text += f'📋 {get_text("project_services_list")}:\n'
 			for service_name in sort_project_services(project_info):
 				container = project_info.services[service_name]
-				status_emoji = get_status_emoji(container.status, container.name, container)
+				status_emoji = get_status_emoji(container.status, container.name, container, self.host_id)
 
 				# Get image (short name)
 				image_with_tag = container.attrs.get('Config', {}).get('Image', 'N/A')
@@ -520,7 +520,7 @@ class DockerManager:
 			possible_update = has_update is True
 
 			text = '<pre><code>\n'
-			text += f'{get_text("status")}: {get_status_emoji(container.status, container_name, container)} ({container.status})\n\n'
+			text += f'{get_text("status")}: {get_status_emoji(container.status, container_name, container, self.host_id)} ({container.status})\n\n'
 			if container.status == "running":
 				health_text = get_health_status_text(container)
 				if health_text:
@@ -4581,7 +4581,7 @@ def build_hierarchical_keyboard(containers, action_type, exclude_own=False, filt
 		if marked_names and container.name in marked_names:
 			status_emoji = ICON_CONTAINER_ACTION_DONE
 		else:
-			status_emoji = get_status_emoji(container.status, container.name, container)
+			status_emoji = get_status_emoji(container.status, container.name, container, host_id)
 
 		# Determine callback action based on action_type
 		action_lower = action_type.lower()
@@ -4769,7 +4769,7 @@ def send_container_disambiguation(action_type, container_name, candidates):
 	markup = InlineKeyboardMarkup(row_width=1)
 	for entry, container in candidates:
 		markup.add(InlineKeyboardButton(
-			f'🖥️ {entry.get("alias", entry["id"])}  ·  {get_status_emoji(container.status, container.name, container)}',
+			f'🖥️ {entry.get("alias", entry["id"])}  ·  {get_status_emoji(container.status, container.name, container, entry["id"])}',
 			callback_data=f'{spec["container_callback"]}|{container_ref(entry["id"], container)}'))
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 
@@ -5381,7 +5381,7 @@ def build_compose_project_level2_keyboard(project_info, project_name, action_typ
 			# Special case: use update emoji for checkupdate
 			status_indicator = get_update_emoji(container.name, host_id)
 		elif config.get('use_emoji', False):
-			status_indicator = get_status_emoji(container.status, container.name, container)
+			status_indicator = get_status_emoji(container.status, container.name, container, host_id)
 		else:
 			status_indicator = "🟢" if container.status in ['running', 'restarting'] else "🔴"
 
@@ -5538,7 +5538,7 @@ def display_containers(containers, host_id=None):
 
 	# Show bot container first if present
 	if bot_container:
-		result += f"🐳 {get_status_emoji(bot_container.status, bot_container.name, bot_container)} {bot_container.name}"
+		result += f"🐳 {get_status_emoji(bot_container.status, bot_container.name, bot_container, host_id)} {bot_container.name}"
 		if update_cache[bot_container.id]:
 			result += " ⬆️"
 		result += "\n"
@@ -5560,7 +5560,7 @@ def display_containers(containers, host_id=None):
 			# tagged only with the project label, no service label).
 			_, service_name = container_info_cache[container.id]
 			display_name = service_name or container.name
-			result += f"  {get_status_emoji(container.status, container.name, container)} {display_name}"
+			result += f"  {get_status_emoji(container.status, container.name, container, host_id)} {display_name}"
 			if update_cache[container.id]:
 				result += " ⬆️"
 			result += "\n"
@@ -5570,7 +5570,7 @@ def display_containers(containers, host_id=None):
 	if other_standalone:
 		sorted_standalone = sort_containers_by_priority(other_standalone)
 		for container in sorted_standalone:
-			result += f"🐳 {get_status_emoji(container.status, container.name, container)} {container.name}"
+			result += f"🐳 {get_status_emoji(container.status, container.name, container, host_id)} {container.name}"
 			if update_cache[container.id]:
 				result += " ⬆️"
 			result += "\n"
