@@ -1,6 +1,6 @@
 services:
   dockercontrollerbot:
-    container_name: ${CONTAINER_NAME} # NO CAMBIAR  
+    container_name: dockercontrollerbot-debug
     image: dockercontrollerbot:dev
     build:
       context: .
