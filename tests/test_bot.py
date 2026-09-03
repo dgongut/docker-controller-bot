@@ -861,6 +861,102 @@ _ARG_FOR = {
 }
 
 
+def test_the_schedule_list_is_never_handed_out_live():
+	"""
+	get_all_schedules used to return the manager's own list. The executor
+	iterates it while a button press may be adding or deleting, and a caller
+	could change the manager's state just by appending to what it thought was
+	its own copy.
+	"""
+	manager = dcb.schedule_manager
+	for existing in list(manager.get_all_schedules()):
+		manager.delete_schedule(existing["name"])
+	manager.add_schedule(name="una", cron="@daily", action="restart", container="nginx")
+	try:
+		mine = manager.get_all_schedules()
+		assert mine is not manager.get_all_schedules(), "devuelve la lista interna"
+		mine.append({"name": "inyectada"})
+		assert [s["name"] for s in manager.get_all_schedules()] == ["una"], (
+			"un append del llamante ha cambiado el estado del manager")
+	finally:
+		manager.delete_schedule("una")
+
+
+def test_schedules_are_written_atomically():
+	"""
+	A json.dump straight onto the real path leaves a truncated file if the
+	power goes at the wrong moment, and what is lost is every task the user
+	set up. The rest of the project writes through store for this reason; this
+	file had been left behind.
+	"""
+	import ast
+
+	source = io.open(os.path.join(harness.REPO, "schedule_manager.py"),
+						encoding="utf-8").read()
+	tree = ast.parse(source)
+	writers = [n for n in ast.walk(tree)
+				if isinstance(n, ast.FunctionDef) and n.name.startswith(("_write", "_ensure"))]
+	assert writers, "no se encuentran los escritores"
+	for writer in writers:
+		# El docstring habla de open() a propósito; lo que importa es el código.
+		code = "\n".join(ast.unparse(statement) for statement in writer.body
+							if not (isinstance(statement, ast.Expr)
+									and isinstance(statement.value, ast.Constant)))
+		assert "store.write_document" in code, f"{writer.name} no escribe por store:\n{code}"
+		assert "open(" not in code, f"{writer.name} escribe sobre el fichero real:\n{code}"
+
+
+def test_concurrent_edits_to_the_schedules_do_not_lose_any():
+	"""
+	The executor thread and telebot's workers touch this at the same time, and
+	the lock only covered the file, not the cache or the id counter.
+	"""
+	import threading
+
+	manager = dcb.schedule_manager
+	for existing in list(manager.get_all_schedules()):
+		manager.delete_schedule(existing["name"])
+	start = threading.Barrier(8)
+
+	def add(index):
+		start.wait()
+		manager.add_schedule(name=f"t{index}", cron="@daily",
+							action="restart", container="nginx")
+
+	workers = [threading.Thread(target=add, args=(i,), daemon=True) for i in range(8)]
+	for worker in workers:
+		worker.start()
+	for worker in workers:
+		worker.join(10)
+	try:
+		stored = manager.get_all_schedules()
+		assert len(stored) == 8, [s["name"] for s in stored]
+		identifiers = [s["id"] for s in stored]
+		assert len(set(identifiers)) == 8, f"ids repetidos: {sorted(identifiers)}"
+	finally:
+		for existing in list(manager.get_all_schedules()):
+			manager.delete_schedule(existing["name"])
+
+
+def test_the_schedule_flow_state_lives_in_the_volume():
+	"""
+	It used to be written to a relative `./cache/`, which under the image's
+	WORKDIR meant inside the container instead of the mapped volume: nothing
+	swept it, and its errors went to stdout with print() rather than the log.
+	"""
+	import glob
+
+	dcb.save_schedule_state(4242, {"step": "ask_name", "name": None})
+	try:
+		assert dcb.load_schedule_state(4242) == {"step": "ask_name", "name": None}
+		found = glob.glob(os.path.join(store.root(), "**", "*schedule_state_4242*"),
+							recursive=True)
+		assert found, "el estado no está dentro del volumen de almacenamiento"
+	finally:
+		dcb.clear_schedule_state(4242)
+	assert dcb.load_schedule_state(4242) is None
+
+
 def _press_every_command(**arguments):
 	"""Runs every command with the given arguments; returns the ones that raised."""
 	broken = []

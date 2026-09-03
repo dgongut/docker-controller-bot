@@ -28,10 +28,6 @@ from docker_compose_manager import (
     ComposeProjectManager
 )
 from schedule_manager import ScheduleManager
-from schedule_flow import (
-    save_schedule_state, load_schedule_state, clear_schedule_state,
-    init_add_schedule_state
-)
 from port_manager import PortManager
 import callback_registry
 import host_registry
@@ -6130,6 +6126,46 @@ def clear_update_data(chat_id, message_id):
 	delete_cache_item(f"update_data_{chat_id}_{message_id}")
 
 # Generic cache helpers
+def save_schedule_state(user_id, state):
+	"""
+	Remembers where a user is in the /schedule flow.
+
+	On the session cache like every other half-finished interaction, rather
+	than the separate `./cache/` directory this used to use: that path was
+	relative to the working directory, so it landed inside the image instead
+	of the mapped volume, nothing ever swept it, and its errors went to stdout
+	with print() instead of the log.
+	"""
+	_save_cache("schedule_state", user_id, state)
+
+def load_schedule_state(user_id):
+	"""The user's in-progress schedule, or None once it has expired."""
+	return _load_cache("schedule_state", user_id)
+
+def clear_schedule_state(user_id):
+	"""Forgets an in-progress schedule, finished or abandoned."""
+	_clear_cache("schedule_state", user_id)
+
+def init_add_schedule_state():
+	"""
+	A blank schedule, at the first question.
+
+	Every field starts as None on purpose, so the flow can tell "not asked
+	yet" from "answered". Which is also why nothing may persist one of these
+	without checking it is finished: add_schedule refuses a task with no name,
+	cron or action for exactly that reason.
+	"""
+	return {
+		"step": "ask_name",
+		"name": None,
+		"cron": None,
+		"action": None,
+		"container": None,
+		"minutes": None,
+		"show_output": None,
+		"command": None,
+	}
+
 def _save_cache(prefix, identifier, value):
 	"""Generic save to cache with prefix and identifier"""
 	key = f"{prefix}_{identifier}"

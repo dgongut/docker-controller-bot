@@ -230,7 +230,7 @@ def _merge(base, stored):
 	return base
 
 
-def _write_document(path, document):
+def write_document(path, document):
 	"""
 	Writes `document` atomically, creating the parent directory if needed.
 
@@ -264,11 +264,11 @@ def _flush(name):
 		_batch_dirty.add(name)
 		return
 	if name == "settings":
-		_write_document(os.path.join(root(), SETTINGS_FILE), _settings)
+		write_document(os.path.join(root(), SETTINGS_FILE), _settings)
 	elif name == "state":
-		_write_document(os.path.join(state_dir(), STATE_FILE), _state)
+		write_document(os.path.join(state_dir(), STATE_FILE), _state)
 	elif name == "updates":
-		_write_document(os.path.join(state_dir(), UPDATES_FILE), _updates)
+		write_document(os.path.join(state_dir(), UPDATES_FILE), _updates)
 
 
 @contextmanager
