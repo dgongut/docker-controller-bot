@@ -2133,16 +2133,21 @@ def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: in
 		# Build message with summary
 		message_text = _build_schedule_summary(state)
 		message_text += f"\n\n{get_text('schedule_ask_action')}"
+		# What each action does, in the user's language. These strings were
+		# translated into all eight locales and rendered nowhere: the screen
+		# offered six buttons reading `run`, `stop`... in English and left the
+		# user to guess. The token stays on the button because it is the
+		# vocabulary of the feature — the summary, the listing and /schedule's
+		# own usage text all show it — and the line explains it.
+		message_text += "\n\n" + "\n".join(
+			f'<code>{action}</code> · {get_text(f"schedule_action_{action}")}'
+			for action in SCHEDULE_ACTIONS)
 
 		markup = InlineKeyboardMarkup(row_width=2)
-		markup.add(
-			InlineKeyboardButton("run", callback_data="scheduleSelectAction|run"),
-			InlineKeyboardButton("stop", callback_data="scheduleSelectAction|stop"),
-			InlineKeyboardButton("restart", callback_data="scheduleSelectAction|restart"),
-			InlineKeyboardButton("mute", callback_data="scheduleSelectAction|mute"),
-			InlineKeyboardButton("exec", callback_data="scheduleSelectAction|exec"),
-			InlineKeyboardButton("prune", callback_data="scheduleSelectAction|prune")
-		)
+		markup.add(*[
+			InlineKeyboardButton(action, callback_data=f"scheduleSelectAction|{action}")
+			for action in SCHEDULE_ACTIONS
+		])
 		markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 		msg = send_message(message=message_text, reply_markup=markup)
 		state["last_message_id"] = msg.message_id if msg else None

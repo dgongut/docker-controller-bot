@@ -408,6 +408,47 @@ def test_no_locale_carries_keys_nobody_reads():
 		assert not extra, f"{locale}: sobran {extra}"
 
 
+# Locale keys the code builds instead of naming: `get_text(f"start_cmd_{key}")`
+# and friends. A prefix here exempts every key under it, so the list stays as
+# short as the code allows.
+DYNAMIC_TEXT_PREFIXES = (
+	"start_cat_", "start_cmd_", "schedule_prune_", "schedule_action_",
+	"confirm_prune_",
+)
+
+
+def test_every_locale_key_is_read_by_something():
+	"""
+	Twenty-seven keys were being translated into eight languages and rendered
+	nowhere — 216 strings. Some were leftovers of features that got
+	restructured (the multi-select flow only ever existed for updates, so its
+	run/stop/restart texts had nothing to reach them); the cron shortcut help
+	was a duplicate of what `schedule_ask_cron` already says; and five whole
+	`schedule_action_*` descriptions were real text for a screen that showed
+	its buttons in English instead.
+
+	Nothing caught it: the locale checks compared the files against each other,
+	so a key present in all eight and read by none looked perfectly consistent.
+	"""
+	import glob
+
+	code = "".join(io.open(path, encoding="utf-8").read()
+					for path in glob.glob(os.path.join(os.path.dirname(dcb.__file__), "*.py")))
+	keys = set(i18n.load_locale("es"))
+
+	# Named outright, or handed over as a value — the menu tables keep their
+	# text in dicts (`'message_key': 'starting'`) and pass it on later.
+	used = set(re.findall(r"""get_text\(\s*['"]([A-Za-z_0-9]+)['"]""", code))
+	used |= set(re.findall(r"""['"]([A-Za-z_0-9]+)['"]""", code)) & keys
+
+	dead = sorted(k for k in keys - used
+					if not k.startswith(DYNAMIC_TEXT_PREFIXES))
+	assert not dead, (
+		f"{len(dead)} claves de idioma que nada renderiza "
+		f"({len(dead) * len(_locale_names())} cadenas traducidas):\n"
+		+ "\n".join(f"  {k}" for k in dead))
+
+
 def test_a_translation_keeps_the_placeholders_of_the_original():
 	"""
 	get_text substitutes $1, $2... positionally: a translation that drops one
@@ -1507,6 +1548,42 @@ def test_a_mute_task_belongs_to_no_host():
 		dcb.send_message = original
 		dcb.save_schedule_state = original_save
 		_restore_hosts()
+
+
+def test_every_schedule_action_explains_itself_in_the_users_language():
+	"""
+	The picker used to hardcode six buttons reading `run`, `stop`, `restart`...
+	in English, while five translated descriptions of exactly those actions sat
+	in all eight locales, rendered nowhere. And `prune` had a button with no
+	description at all, which is what happens when the row of buttons and the
+	list of actions are two different lists.
+	"""
+	for locale in _locale_names():
+		keys = i18n.load_locale(locale)
+		for action in dcb.SCHEDULE_ACTIONS:
+			assert f"schedule_action_{action}" in keys, (locale, action)
+
+
+def test_the_action_picker_offers_exactly_the_actions_it_explains():
+	"""One list, so the buttons and the legend cannot drift apart again."""
+	captured = {}
+	original = dcb.send_message
+	dcb.send_message = lambda message="", reply_markup=None, **kw: captured.update(
+		message=message, reply_markup=reply_markup) or None
+	original_state = dcb.save_schedule_state
+	dcb.save_schedule_state = lambda *a, **k: None
+	try:
+		dcb.handle_schedule_flow(1, "0 0 * * *", {"step": "ask_cron", "name": "prueba"})
+		text = captured.get("message", "")
+		markup = captured.get("reply_markup")
+		offered = [c.split("|", 1)[1] for c in harness.keyboard_callbacks(markup)
+					if c.startswith("scheduleSelectAction|")]
+		assert offered == list(dcb.SCHEDULE_ACTIONS), offered
+		for action in dcb.SCHEDULE_ACTIONS:
+			assert i18n.get_text(f"schedule_action_{action}") in text, action
+	finally:
+		dcb.send_message = original
+		dcb.save_schedule_state = original_state
 
 
 def test_every_schedule_action_is_classified():

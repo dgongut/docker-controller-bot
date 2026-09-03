@@ -89,6 +89,12 @@ docker_architectures = {
 # Scheduled actions that act on Docker, and so belong to one host. Muting is
 # the bot's own notifications: it belongs to no machine, and showing it a host
 # would be claiming something that means nothing.
+# Everything a schedule can do, in the order the picker offers it. One list
+# rather than a hardcoded row of buttons: the screen also prints what each one
+# does, and the two drifting apart is how `prune` ended up with a button and no
+# explanation.
+SCHEDULE_ACTIONS = ("run", "stop", "restart", "mute", "exec", "prune")
+
 HOST_SCOPED_SCHEDULE_ACTIONS = frozenset({"run", "stop", "restart", "exec", "prune"})
 
 # SCHEDULE COMMAND PATTERNS - Define required parameters for each schedule action
