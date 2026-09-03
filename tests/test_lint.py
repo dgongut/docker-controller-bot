@@ -392,9 +392,12 @@ HOST_SCOPED_TEXTS = (
 	"starting_service", "error_stopping_service", "error_starting_service",
 )
 
-# What counts as saying it. The label is often computed once at the top of a
-# function that sends several of these, so the variable holding it counts too.
-HOST_LABELLERS = ("host_label", "{label}", "host_alias")
+# What counts as saying it, in either shape: `host_label()` in front, or
+# `host_suffix()` at the end for the messages that read as one statement — see
+# host_suffix's own docstring for which is which. The label is often computed
+# once at the top of a function that sends several of these, so the variable
+# holding it counts too.
+HOST_LABELLERS = ("host_label", "host_suffix", "{label}", "host_alias")
 
 # Where a message reaches the user.
 DELIVERY = ("send_message", "send_message_to_notification_channel",

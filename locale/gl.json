@@ -376,6 +376,7 @@
   "list_host_empty": "<i>Ningún contedor</i>",
   "list_host_unreachable": "🔴 <b>$1</b> non responde\n<i>$2</i>",
   "host_unreachable": "🔴 <b>$1</b> non responde\n<i>$2</i>",
+  "on_host": " en <b>$1</b>",
   "pick_a_host": "En que host?",
   "container_on_several_hosts": "Hai un contedor chamado <b>$1</b> en máis dun host.\n\n<i>Cal?</i>",
   "schedule_label_host": "🖥️ Host"

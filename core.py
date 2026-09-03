@@ -316,7 +316,7 @@ class DockerManager:
 			# Send confirmation only for manual commands when muted: the event
 			# monitor is silent while muted, so the user gets no other feedback
 			if from_schedule is False and is_muted():
-				send_message(message=f'{host_label(self.host_id)}{get_text("stopped_container", container_name)}')
+				send_message(message=f'{get_text("stopped_container", container_name)}{host_suffix(self.host_id)}')
 			return None
 		except Exception as e:
 			error(f"Could not stop container {container_name}. Error: [{e}]")
@@ -331,7 +331,7 @@ class DockerManager:
 			# Send confirmation only for manual commands when muted: the event
 			# monitor is silent while muted, so the user gets no other feedback
 			if from_schedule is False and is_muted():
-				send_message(message=f'{host_label(self.host_id)}{get_text("restarted_container", container_name)}')
+				send_message(message=f'{get_text("restarted_container", container_name)}{host_suffix(self.host_id)}')
 			return None
 		except Exception as e:
 			error(f"Could not restart container {container_name}. Error: [{e}]")
@@ -346,7 +346,7 @@ class DockerManager:
 			# Send confirmation only for manual commands when muted: the event
 			# monitor is silent while muted, so the user gets no other feedback
 			if from_schedule is False and is_muted():
-				send_message(message=f'{host_label(self.host_id)}{get_text("started_container", container_name)}')
+				send_message(message=f'{get_text("started_container", container_name)}{host_suffix(self.host_id)}')
 			return None
 		except Exception as e:
 			error(f"Could not start container {container_name}. Error: [{e}]")
@@ -727,7 +727,7 @@ class DockerManager:
 					save_container_cache(sent_message.chat.id, sent_message.message_id, [container], self.host_id)
 			else:
 				has_update = False
-				send_message(message=f'{host_label(self.host_id)}{get_text("already_updated", container.name)}')
+				send_message(message=f'{get_text("already_updated", container.name)}{host_suffix(self.host_id)}')
 		except Exception as e:
 			error(f"Could not check update: [{e}]")
 			has_update = None
@@ -904,6 +904,31 @@ def host_label(host_id):
 	if host_registry.is_single_host():
 		return ""
 	return f"<b>{host_alias(host_id)}</b> · "
+
+
+def host_suffix(host_id):
+	"""
+	How a sentence says which machine it is about, or nothing with one host.
+
+	The tail form of host_label, and the one to reach for by default: "nginx
+	updated on casa" is how a person says it, while "casa · nginx updated"
+	is how a log line does.
+
+	It is not always the right shape, though, so the rule is:
+
+	- A result that reads as **one statement** takes the suffix. That is most
+	  of what the user keeps in the chat.
+	- A message that ends in a **second sentence** ("...check the bot's logs"),
+	  a **question**, or a **code block** keeps the prefix: a clause tacked
+	  after any of those reads wrong in every language.
+	- A **destructive confirmation** keeps the prefix on purpose, so the
+	  machine is the first thing read rather than the last.
+	- **Progress messages** keep the prefix too. They end in "..", so a suffix
+	  would land after the dots — and they are deleted seconds later anyway.
+	"""
+	if host_registry.is_single_host():
+		return ""
+	return get_text("on_host", host_alias(host_id))
 
 
 class DockerEventMonitor:
@@ -3176,7 +3201,7 @@ def _execute_compose_project_action(action, project_name, show_extended=True, ho
 			except Exception as e:
 				debug(f"Error stopping {service_name}: {e}")
 				if show_extended:
-					send_message(message=f'{label}{get_text("error_stopping_service", service_name)}')
+					send_message(message=f'{get_text("error_stopping_service", service_name)}{host_suffix(host_id)}')
 		# Start containers in the correct order
 		for container in sorted_containers:
 			service_name = container.labels.get('com.docker.compose.service', container.name)
@@ -3187,8 +3212,8 @@ def _execute_compose_project_action(action, project_name, show_extended=True, ho
 			except Exception as e:
 				debug(f"Error starting {service_name}: {e}")
 				if show_extended:
-					send_message(message=f'{label}{get_text("error_starting_service", service_name)}')
-		send_message(message=f'{label}{get_text("project_restarted_success", project_name)}')
+					send_message(message=f'{get_text("error_starting_service", service_name)}{host_suffix(host_id)}')
+		send_message(message=f'{get_text("project_restarted_success", project_name)}{host_suffix(host_id)}')
 
 	elif action == 'run':
 		send_message(message=f'{label}{get_text("starting_project", project_name)}')
@@ -3202,8 +3227,8 @@ def _execute_compose_project_action(action, project_name, show_extended=True, ho
 			except Exception as e:
 				debug(f"Error starting {service_name}: {e}")
 				if show_extended:
-					send_message(message=f'{label}{get_text("error_starting_service", service_name)}')
-		send_message(message=f'{label}{get_text("project_started_success", project_name)}')
+					send_message(message=f'{get_text("error_starting_service", service_name)}{host_suffix(host_id)}')
+		send_message(message=f'{get_text("project_started_success", project_name)}{host_suffix(host_id)}')
 
 	elif action == 'stop':
 		send_message(message=f'{label}{get_text("stopping_project", project_name)}')
@@ -3217,8 +3242,8 @@ def _execute_compose_project_action(action, project_name, show_extended=True, ho
 			except Exception as e:
 				debug(f"Error stopping {service_name}: {e}")
 				if show_extended:
-					send_message(message=f'{label}{get_text("error_stopping_service", service_name)}')
-		send_message(message=f'{label}{get_text("project_stopped_success", project_name)}')
+					send_message(message=f'{get_text("error_stopping_service", service_name)}{host_suffix(host_id)}')
+		send_message(message=f'{get_text("project_stopped_success", project_name)}{host_suffix(host_id)}')
 
 def restart_compose_project(project_name, host_id=None):
 	"""Restarts a complete Docker Compose project respecting dependency order."""
@@ -3521,7 +3546,14 @@ def perform_container_update(container_id, container_name, tag=None, send_fn=Non
 	# (auto-update) instead of the chat being used.
 	if x is not None:
 		delete_message(x.message_id, x.chat.id)
-	send_fn(f"{label}{result}")
+	# Un resultado que se lee como una frase lleva el host al final; uno que
+	# acaba en otra frase ("consulta los logs...") lo lleva delante, porque
+	# una cláusula pegada después de eso queda mal. La comparación es contra
+	# el mismo get_text que produce el éxito, así que no se desincroniza.
+	if result == get_text("updated_container", container_name):
+		send_fn(f"{result}{host_suffix(host_id)}")
+	else:
+		send_fn(f"{label}{result}")
 
 	# Restart dependents if applicable. Resolve the freshly recreated container
 	# by name (Docker enforces unique container names, and perform_update keeps
@@ -3593,7 +3625,7 @@ def delete_compose_project(project_name, host_id=None):
 			send_message(message=f'{label}{get_text("error_deleting_service", service_name)}')
 
 	# Final message
-	send_message(message=f'{label}{get_text("project_deleted_success", project_name, container_count)}')
+	send_message(message=f'{get_text("project_deleted_success", project_name, container_count)}{host_suffix(host_id)}')
 
 def logs(containerId, containerName):
 	debug(f"Running command: logs for container {containerName}")
@@ -3610,7 +3642,7 @@ def log_file(containerId, containerName):
 		# The file stays in the chat long after the menu that asked for it, so
 		# its caption is the only thing left saying which machine it came from.
 		send_document(document=fichero_temporal, reply_markup=markup,
-					caption=f'{host_label(ref_host(containerId))}{get_text("logs", containerName)}')
+					caption=f'{get_text("logs", containerName)}{host_suffix(ref_host(containerId))}')
 		if x:
 			delete_message(x.message_id)
 	else:
@@ -4178,7 +4210,7 @@ def confirm_update(containerId, containerName):
 		# Same image, no update needed - save to cache as updated
 		image_with_tag = comparison['current_tag']
 		save_container_update_status(image_with_tag, containerName, False, ref_host(containerId))
-		send_message(message=f'{host_label(ref_host(containerId))}{get_text("already_updated", containerName)}')
+		send_message(message=f'{get_text("already_updated", containerName)}{host_suffix(ref_host(containerId))}')
 		return
 
 	# Build changes list
@@ -6632,7 +6664,8 @@ def delete_updater():
 			container.stop()
 			container.remove()
 			docker_manager.client.images.remove(updater_image)
-			send_message(message=get_text("updated_container", CONTAINER_NAME))
+			send_message(message=f'{get_text("updated_container", CONTAINER_NAME)}'
+								f'{host_suffix(host_registry.local_host_id())}')
 		except Exception as e:
 			error(f"Could not delete container {UPDATER_CONTAINER_NAME}. Error: [{e}]")
 

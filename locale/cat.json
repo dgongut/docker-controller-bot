@@ -376,6 +376,7 @@
   "list_host_empty": "<i>Cap contenidor</i>",
   "list_host_unreachable": "🔴 <b>$1</b> no respon\n<i>$2</i>",
   "host_unreachable": "🔴 <b>$1</b> no respon\n<i>$2</i>",
+  "on_host": " a <b>$1</b>",
   "pick_a_host": "A quin host?",
   "container_on_several_hosts": "Hi ha un contenidor anomenat <b>$1</b> a més d'un host.\n\n<i>Quin?</i>",
   "schedule_label_host": "🖥️ Host"

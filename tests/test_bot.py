@@ -996,6 +996,52 @@ def test_an_absurd_mute_does_not_silence_the_bot_for_good():
 		dcb.unmute()
 
 
+def test_a_result_says_the_host_the_way_a_person_would():
+	"""
+	The host used to come out in front of everything: "casa · nginx updated",
+	which is how a log line reads, not how somebody talks. What stays in the
+	chat is the result, so that is where the natural shape matters.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	try:
+		suffix = dcb.host_suffix("h_nas")
+		assert "nas" in suffix, suffix
+		# Ends with the host, not starts with it.
+		full = i18n.get_text("updated_container", "nginx") + suffix
+		assert full.endswith(suffix), full
+		assert not full.startswith("<b>nas"), full
+	finally:
+		_restore_hosts()
+
+
+def test_the_host_disappears_from_both_shapes_with_one_host():
+	"""The golden rule holds for the suffix exactly as for the prefix."""
+	_with_hosts([HOST_FIXTURE[0]], unreachable=())
+	try:
+		assert dcb.host_suffix("h_local") == ""
+		assert dcb.host_label("h_local") == ""
+		assert (i18n.get_text("updated_container", "nginx") + dcb.host_suffix("h_local")
+				== i18n.get_text("updated_container", "nginx"))
+	finally:
+		_restore_hosts()
+
+
+def test_the_update_result_carries_its_host_and_the_failure_keeps_the_prefix():
+	"""
+	The update result is whatever string the updater returned, success or
+	failure. A success reads as one statement and takes the suffix; a failure
+	ends in "check the bot's logs", where a clause tacked on afterwards reads
+	wrong, so it keeps the prefix. The success is recognised by comparing
+	against the same get_text that produces it, so the two cannot drift — and
+	this test is what says so out loud.
+	"""
+	import inspect
+	source = inspect.getsource(dcb.perform_container_update)
+	assert 'result == get_text("updated_container", container_name)' in source, source
+	assert "host_suffix(host_id)" in source, source
+	assert 'f"{label}{result}"' in source, "el fallo ya no lleva el prefijo"
+
+
 def _press_every_command(**arguments):
 	"""Runs every command with the given arguments; returns the ones that raised."""
 	broken = []

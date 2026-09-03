@@ -16,7 +16,7 @@ o añádelo a `.gitignore` antes de publicar.
 | `main` | sigue en `02376e2` (v4.2.0), intacta |
 | `VERSION` en `core.py` | `5.0.0_fase2` |
 | `ARG VERSION` en `Dockerfile` | `4.2.0`, **a propósito** (selecciona el tag de GitHub que se descarga; se mueve solo al publicar) |
-| Tests | `python3 tests/run_all.py` → **178/178 OK** |
+| Tests | `python3 tests/run_all.py` → **199/199 OK** |
 | Nada pusheado | el trabajo vive en local |
 
 ### Fases
@@ -42,6 +42,16 @@ migrar el fichero. Ese esquema aguanta igual si algún día se retoman.
 ### Commits de la rama (nuevo → viejo)
 
 ```
+fec208c  Un /mute con un número absurdo dejaba al bot mudo para siempre
+03c8a4f  Pule la capa que guarda las programaciones
+e09cb48  Un /mute impedía al contenedor apagarse, y los 21 comandos sin tocar
+c9623d0  /ports y /info contestaban por la máquina equivocada
+88a3e19  Pulsa los 97 botones, y arregla los 25 que se rompían
+c0ab8b8  Enfoca los hosts remotos en ssh y tcp, y baja TLS a la FAQ
+260047d  El README acompaña al usuario hasta el final
+bc92130  La pantalla de crear una programación habla el idioma del usuario
+a366ade  Quita el andamio de /deploy y /backup
+661af35  Los ocho idiomas, en serio
 4b471a9  Quitar un host avisa de las programaciones que se lleva por delante
 99e5821  Un mensaje de una sola máquina dice cuál
 b43a2f5  Un mensaje que no llegó a enviarse ya no se usa como si existiera
@@ -59,6 +69,18 @@ f410b3c  Documenta cómo añadir el segundo y el tercer servidor por ssh
 f8775fd  Fase 2: cierra el multi-host en comandos, actualizaciones y programaciones
 67bd94d  Arregla que el menú de multi-selección se repintara con el host local
 5adb283  Fase 2: los selectores ofrecen contenedores de todos los hosts
+b94e73c  Fase 2: referencias de contenedor y /list por host
+2d5d3e1  Arregla el icono de hosts y los emoji sin selector de variación
+ccb820d  Fase 2: gestión de hosts desde /settings
+de8882f  Documenta paso a paso cómo conectar hosts remotos
+374a8ff  Fase 2: soporte de hosts ssh://
+9093922  Fase 2: un monitor de eventos por host, con supervisor
+41d08a9  Fase 2: registro de hosts y DockerManager por host
+f8c7346  Extrae los handlers de botones a callbacks.py
+7b07794  Extrae los comandos a commands.py
+e293add  Renombra el módulo principal a core.py y añade punto de entrada
+974b178  Extrae las traducciones a i18n.py
+c9e52f0  v5.0.0 fase 1: /settings, nuevo /start y registro de callbacks
 ```
 
 ---
@@ -71,9 +93,9 @@ renombró a `core.py` con `git mv` para conservar el historial.
 
 | Módulo | Líneas | Papel |
 |---|---|---|
-| `core.py` | 6834 | El núcleo compartido: `DockerManager`, monitores, teclados, cachés, UI de settings/start/hosts, dispatcher |
-| `callbacks.py` | 1278 | 66 handlers `cb_*` (prefijados `core.`) + la factoría `register_project_navigation` |
-| `commands.py` | 209 | Los 21 `cmd_*`, se registran vía `register_command` |
+| `core.py` | 6980 | El núcleo compartido: `DockerManager`, monitores, teclados, cachés, UI de settings/start/hosts, dispatcher |
+| `callbacks.py` | 1290 | 66 handlers `cb_*` (prefijados `core.`) + la factoría `register_project_navigation` |
+| `commands.py` | 215 | Los 21 `cmd_*`, se registran vía `register_command` |
 | `host_registry.py` | 587 | Los hosts: caché de clientes, `ping`, `drop`, `add_host`, `remove_host`, `rename_host`, `status_snapshot` |
 | `store.py` | 511 | Almacenamiento: `get`/`set` por ruta punteada, estado, caché de updates, `batch()` |
 | `migration.py` | 254 | Migraciones de arranque, 4.x → 5.0 |
@@ -197,6 +219,45 @@ Cosas que aprendí por el camino y conviene no volver a descubrir:
   toque.
 - Reescribir un `locale/*.json` con `json.dumps` reformatea el fichero entero.
   Insertar las claves como texto, respetando la indentación de dos espacios.
+
+### Segunda ronda: los botones y los comandos
+
+La primera auditoría fue estática. Esta encontró once fallos más, y el hueco
+que los escondía era grande: **ni uno de los 97 callbacks ni 18 de los 21
+comandos los tocaba ningún test.** La suite comprobaba teclados, idiomas, el
+almacén y el registro, y no pulsaba un botón en la vida.
+
+Lo que los saca ahora son cinco pasadas que recorren todo: los callbacks y los
+comandos, cada uno con todo bien, con Telegram rechazando los envíos, y con el
+daemon de Docker negándose a responder. **Esa tercera pasada es la que paga**:
+la primera y la segunda estaban limpias y la tercera reventaba en veinticinco.
+
+| | Era | Gravedad |
+|---|---|---|
+| Guardas | Capturaban `HostUnavailable`, que es lo que lanza *construir* el cliente; un host caído falla en la llamada siguiente. 25 callbacks, y `/list` con un solo host | alta |
+| `/ports` | Generar y comprobar puerto contestaban siempre por la máquina local | **respuestas incorrectas en silencio** |
+| `/info` | Leía la caché de updates sin host: informaba de la local en un contenedor remoto | media |
+| `/mute` enorme | El temporizador moría con `OverflowError` en su hilo y el bot quedaba mudo sin retorno | alta |
+| `/mute` normal | Sus dos temporizadores eran los únicos no-daemon: el contenedor no podía apagarse | media |
+| `schedules.json` | Escritura no atómica: un corte de luz se lleva todas las tareas | **pérdida de datos** |
+| `schedule_manager` | El lock solo cubría el fichero; `get_all_schedules` entregaba la lista viva | media |
+| `schedule_flow` | Escribía en un `./cache/` relativo, dentro de la imagen y sin barrer | baja |
+| `.get(k, "")` | No protege de un `None` guardado. Rompía la pantalla de quitar host | media |
+| Botón viejo | Uno de un host ya borrado lanzaba `HostUnavailable` en la cara | baja |
+| Orden de `except` | Un `except Exception` mío delante de uno específico: código muerto | mía |
+
+Cosas aprendidas en esta ronda:
+
+- **Un barrido de «esto no revienta» da falsos negativos.** El `/mute` absurdo
+  no lanzaba nada *en el comando*: la excepción era del hilo del temporizador.
+  Hay que mirar la salida de error, no solo el resultado.
+- **`dict.get(k, default)` devuelve el valor guardado cuando la clave existe,
+  aunque sea `None`.** El default no protege. Usar `(d.get(k) or "")`.
+- **Sustituir `core.send_message` no intercepta a `commands`**, que lo importó
+  a su espacio de nombres. Hay que parchear el módulo que lo llama.
+- El patrón correcto para un host que se cae ya estaba en el repo, en
+  `render_picker_for_host`, **con su comentario explicándolo**. Le faltaba a
+  cuatro sitios más. Cuando algo lleve un comentario así, buscar los hermanos.
 
 ### Los idiomas
 

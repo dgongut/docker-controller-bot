@@ -376,6 +376,7 @@
   "list_host_empty": "<i>Nessun container</i>",
   "list_host_unreachable": "🔴 <b>$1</b> non risponde\n<i>$2</i>",
   "host_unreachable": "🔴 <b>$1</b> non risponde\n<i>$2</i>",
+  "on_host": " su <b>$1</b>",
   "pick_a_host": "Su quale host?",
   "container_on_several_hosts": "C'è un container chiamato <b>$1</b> su più di un host.\n\n<i>Quale?</i>",
   "schedule_label_host": "🖥️ Host"

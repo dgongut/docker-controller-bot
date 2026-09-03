@@ -396,7 +396,8 @@ def cb_enterComposeProject(ctx):
 	core.save_container_cache(ctx.chatId, ctx.messageId, project_info.containers, ctx.hostId)
 
 	core.edit_message_text(
-		get_text("select_container_from_project", project_name),
+		f'{get_text("select_container_from_project", project_name)}'
+		f'{core.host_suffix(ctx.hostId)}',
 		ctx.chatId,
 		ctx.messageId,
 		reply_markup=markup
@@ -457,7 +458,8 @@ def cb_confirmDeleteWholeProject(ctx):
 		)
 	)
 	core.edit_message_text(
-		get_text("confirm_delete_project", project_name, container_count),
+		f'{core.host_label(ctx.hostId)}'
+		f'{get_text("confirm_delete_project", project_name, container_count)}',
 		ctx.chatId,
 		ctx.messageId,
 		reply_markup=markup
