@@ -380,6 +380,14 @@ def _locale_names():
 	)
 
 
+def _all_locale_strings():
+	"""Every (locale, key, text) triple, for the checks that sweep the lot."""
+	for locale in _locale_names():
+		for key, value in i18n.load_locale(locale).items():
+			if isinstance(value, str):
+				yield locale, key, value
+
+
 def test_every_locale_has_every_key():
 	"""
 	A key missing from a locale falls back to English mid-message, so half the
@@ -2291,3 +2299,118 @@ def test_parse_rejects_the_unknown_and_the_malformed():
 	spec, args = callback_registry.parse("settingsToggle|check_updates")
 	assert spec.name == "settingsToggle"
 	assert args == {"field": "check_updates"}
+
+
+def test_no_link_is_broken():
+	"""
+	Three locales shipped a dead DockerHub link and a dead GitHub one: the URLs
+	had a space inside them (`hub.docker.com /r/...`), which no reader would
+	ever report as a bug in a translation. And one of them wrote the link in
+	Markdown, which the bot sends as HTML: the user saw the brackets and the
+	raw URL.
+	"""
+	problems = []
+	for locale, key, text in _all_locale_strings():
+		for href in re.findall(r"""<a\s+href=["']([^"']*)["']""", text):
+			if re.search(r"\s", href):
+				problems.append(f"  {locale}: {key} tiene un espacio en {href!r}")
+			if not href.startswith(("http://", "https://", "tg://")):
+				problems.append(f"  {locale}: {key} tiene un href raro: {href!r}")
+		for markdown in re.findall(r"\[[^\]]+\]\s*\((https?://[^)]+)\)", text):
+			problems.append(f"  {locale}: {key} escribe el enlace en Markdown: {markdown!r}")
+
+	assert not problems, "enlaces roto:\n" + "\n".join(problems)
+
+
+def test_no_locale_invents_or_loses_a_link():
+	"""
+	Every locale points at the same places. A URL that only exists in one
+	language is either a typo or a link somebody forgot to update, and the only
+	way to find out is to tap it in that language.
+
+	The exception is `version`, where a translator adds a credit to their own
+	profile. Those are theirs, not the project's.
+	"""
+	reference = {}
+	for locale, key, text in _all_locale_strings():
+		if locale != "es":
+			continue
+		reference[key] = set(re.findall(r"""<a\s+href=["']([^"']*)["']""", text))
+
+	problems = []
+	for locale, key, text in _all_locale_strings():
+		if locale == "es" or key not in reference or key == "version":
+			continue
+		here = set(re.findall(r"""<a\s+href=["']([^"']*)["']""", text))
+		for url in here - reference[key]:
+			problems.append(f"  {locale}: {key} apunta a {url!r}, que no está en es")
+		for url in reference[key] - here:
+			problems.append(f"  {locale}: {key} ha perdido {url!r}")
+
+	assert not problems, "enlaces que no cuadran con el español:\n" + "\n".join(problems)
+
+
+# Where a locale legitimately carries different markup from the Spanish one.
+# Each of these is a real reason, not a shrug: everything else that differs is
+# markup that drifted.
+MARKUP_EXCEPTIONS = {
+	# Shown at first boot, before the bot knows which language to use, so the
+	# Spanish one asks in two languages at once. The rest, reached only once a
+	# language is set, ask in that language alone.
+	("settings_choose_language",): ("cat", "de", "en", "gl", "it", "nl", "ru"),
+	# German word order splits the verb around the container name, so the
+	# italics come in two pieces instead of one.
+	("obtaining_info", "restarting"): ("de",),
+	# The Dutch translator credits their own profile with an extra link.
+	("version",): ("nl",),
+}
+
+
+def _markup_is_excepted(key, locale):
+	return any(key in keys and locale in locales
+				for keys, locales in MARKUP_EXCEPTIONS.items())
+
+
+def test_a_translation_keeps_the_markup_of_the_original():
+	"""
+	Seven of the eight locales shipped the /schedule usage example with its cron
+	expressions eaten: `0 1 * * *` had become `0 1 <b> </b> <b>`, because at
+	some point the strings went through something that read `*` as emphasis.
+	The tags stayed balanced, so nothing complained, and every language except
+	Spanish showed a broken example of the very thing it was explaining.
+
+	Counting tags per key against the Spanish original catches that, and the
+	general case of markup drifting in one language only.
+	"""
+	base = i18n.load_locale("es")
+	tags = ("b", "i", "u", "code", "pre", "a")
+	problems = []
+	for locale, key, text in _all_locale_strings():
+		if locale == "es" or key not in base or _markup_is_excepted(key, locale):
+			continue
+		for tag in tags:
+			mine = len(re.findall(rf"<{tag}(?:\s[^>]*)?>", text))
+			theirs = len(re.findall(rf"<{tag}(?:\s[^>]*)?>", base[key]))
+			if mine != theirs:
+				problems.append(
+					f"  {locale}: {key} tiene {mine} <{tag}> y el español {theirs}")
+
+	assert not problems, "marcado que no cuadra con el español:\n" + "\n".join(problems)
+
+
+def test_the_cron_examples_survive_in_every_language():
+	"""
+	The specific thing the markup check found, pinned on its own: this string
+	is the only help the user gets on cron syntax, and an example without its
+	asterisks teaches the wrong format.
+	"""
+	base = i18n.load_locale("es")["error_adding_schedule"]
+	expected = base.count("*")
+	assert expected >= 9, "el original ya no lleva ejemplos de cron"
+	for locale in _locale_names():
+		text = i18n.load_locale(locale)["error_adding_schedule"]
+		assert text.count("*") == expected, (
+			f"{locale}: el ejemplo de cron lleva {text.count('*')} asteriscos "
+			f"en vez de {expected}")
+		assert "<b>" not in text, (
+			f"{locale}: los asteriscos del cron se han vuelto <b> otra vez")
