@@ -430,6 +430,8 @@ If that answers, your URL is `ssh://root@unraid`.
 
 The two usual stumbling blocks are that Container Manager's `docker` is not on the PATH of an ssh session, and that the socket belongs to `root` while your administrator user cannot reach it. Modern DSM disables direct root login, so if you hit that, the practical way out is a **socket proxy** container on the Synology itself, which also lets you limit what the bot can do.
 
+In my case I couldn't get SSH working reliably on Synology, so I went with the **docker-socket-proxy** on the Synology itself and connect to it with plain `tcp://...:2375` without TLS, inside the trusted local network (see the `tcp://` dropdown above). That's what works for me day to day.
+
 > 💡 **Tip:** if your machines are on a private network such as Tailscale or WireGuard, plain `tcp://` over it saves you both the certificates and the ssh setup, because the mesh provides the encryption and the authentication. It is the most comfortable option when you already have one.
 
 </details>
