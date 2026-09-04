@@ -36,7 +36,7 @@ from i18n import get_text, language
 from logger import debug, error, warning
 from message_queue import MessageQueue
 
-VERSION = "5.0.0_RC"
+VERSION = "5.0.0_RC2"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -612,9 +612,9 @@ class DockerManager:
 					edit_message_func=edit_message_text,
 					debug_func=debug,
 					error_func=error,
-					get_text_func=get_text,
-					save_status_func=save_container_update_status,
-					container_id_length=CONTAINER_ID_LENGTH,
+				get_text_func=get_text,
+				save_status_func=lambda image, name, has_update: save_container_update_status(image, name, has_update, self.host_id),
+				container_id_length=CONTAINER_ID_LENGTH,
 					telegram_group=message.chat.id if message else get_reply_chat_id()
 				)
 				return result
