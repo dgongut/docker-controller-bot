@@ -612,9 +612,9 @@ class DockerManager:
 					edit_message_func=edit_message_text,
 					debug_func=debug,
 					error_func=error,
-				get_text_func=get_text,
-				save_status_func=lambda image, name, has_update: save_container_update_status(image, name, has_update, self.host_id),
-				container_id_length=CONTAINER_ID_LENGTH,
+					get_text_func=get_text,
+					save_status_func=lambda image, name, has_update: save_container_update_status(image, name, has_update, self.host_id),
+					container_id_length=CONTAINER_ID_LENGTH,
 					telegram_group=message.chat.id if message else get_reply_chat_id()
 				)
 				return result

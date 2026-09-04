@@ -1733,6 +1733,41 @@ def test_info_reads_the_update_cache_of_its_own_host():
 		_restore_hosts()
 
 
+def test_update_clears_the_update_cache_of_its_own_host():
+	"""
+	Updating a remote container cleared the local machine's cache entry instead
+	of the remote one, so after the update the remote kept reporting an update
+	available. The success write went through save_container_update_status
+	without a host, which defaults to the local machine.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	try:
+		dcb.save_container_update_status("nginx:1.27", "nginx", True, "h_nas")
+		dcb.save_container_update_status("nginx:1.27", "nginx", True, "h_local")
+
+		captured = {}
+		original_perform = dcb.perform_update
+		original_extract = dcb.extract_container_config
+		dcb.perform_update = lambda **kwargs: captured.update(save=kwargs["save_status_func"]) or "ok"
+		dcb.extract_container_config = lambda container, tag=None: {"image": "nginx:1.27"}
+		try:
+			owner = dcb.manager("h_nas")
+			owner.client.containers.get = lambda _id: _container("nginx", "running", image="nginx:1.27")
+			owner.update(container_id="abc12", container_name="nginx", message=None, bot=None)
+		finally:
+			dcb.perform_update = original_perform
+			dcb.extract_container_config = original_extract
+		assert "save" in captured, "update did not reach perform_update"
+		# perform_update reports success with (image, name, False).
+		captured["save"]("nginx:1.27", "nginx", False)
+		assert dcb.read_container_update_status("nginx:1.27", "nginx", "h_nas") is False
+		assert dcb.read_container_update_status("nginx:1.27", "nginx", "h_local") is True
+	finally:
+		store.forget_update_status("h_nas", "nginx")
+		store.forget_update_status("h_local", "nginx")
+		_restore_hosts()
+
+
 def test_the_ports_screen_asks_about_the_host_you_are_looking_at():
 	"""
 	/ports lets you pick a host and lists that host's ports correctly. Its two
