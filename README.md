@@ -395,8 +395,12 @@ services:
             - /var/run/docker.sock:/var/run/docker.sock:ro
         ports:
             - 2375:2375
+        labels:
+            - "DCB-Ignore-Check-Updates" # El bot llega a esta máquina A TRAVÉS del proxy: no debe actualizarlo
         restart: unless-stopped
 ```
+
+> ⚠️ **Aviso:** no actualices nunca este proxy desde el bot. El update pararía el proxy a mitad de la operación y se quedaría sin conexión para terminarla ni para deshacerla: el host quedaría en 🔴 y habría que rearrancarlo a mano por SSH (`docker start docker-socket-proxy`). Actualízalo siempre desde la propia máquina remota.
 
 La URL para el bot es entonces `tcp://maquina:2375`. Compruébalo antes desde la máquina del bot:
 
