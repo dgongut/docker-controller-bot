@@ -396,7 +396,7 @@ services:
         ports:
             - 2375:2375
         labels:
-            - "DCB-Ignore-Check-Updates" # The bot reaches this machine THROUGH the proxy: it must not update it
+            - "DCB-Ignore-Check-Updates" # The bot reaches this machine THROUGH the proxy it must not update it
         restart: unless-stopped
 ```
 
