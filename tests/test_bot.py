@@ -2674,6 +2674,30 @@ def test_a_paused_host_is_still_configured_and_can_be_resumed():
 		_restore_hosts()
 
 
+def test_resuming_a_host_repaints_the_text_as_well_as_the_buttons():
+	"""
+	The screen is one message: leaving the buttons saying "pause" over a body
+	still saying "paused" would be the bot contradicting itself. Both come out
+	of the same render on purpose, and resuming re-runs the check there and
+	then rather than waiting for the next time the screen is opened.
+	"""
+	host_registry = _paused_fixture()
+	try:
+		text, markup = dcb.build_settings_host("h_nas")
+		assert i18n.get_text("settings_host_paused") in text, text
+		assert i18n.get_text("button_host_resume") in harness.keyboard_labels(markup)
+
+		assert host_registry.set_paused("h_nas", False) is True
+		text, markup = dcb.build_settings_host("h_nas")
+		assert i18n.get_text("settings_host_paused") not in text, text
+		assert i18n.get_text("settings_host_ok") in text, text
+		labels = harness.keyboard_labels(markup)
+		assert i18n.get_text("button_host_pause") in labels, labels
+		assert i18n.get_text("button_host_test") in labels, labels
+	finally:
+		_restore_hosts()
+
+
 def test_the_local_host_cannot_be_paused():
 	"""The same rule as removing it: the bot runs there."""
 	_with_hosts(HOST_FIXTURE, unreachable=())
