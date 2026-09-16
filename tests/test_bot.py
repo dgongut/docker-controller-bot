@@ -2596,6 +2596,124 @@ def test_the_three_renderers_put_the_host_in_the_same_place():
 		_restore_hosts()
 
 
+# ---------------------------------------------------------------------------
+# Pausar un host
+
+def _paused_fixture():
+	"""The two-host fixture with `nas` already paused, and the undo."""
+	import host_registry
+
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	assert host_registry.set_paused("h_nas", True) is True
+	return host_registry
+
+
+def test_a_paused_host_is_left_out_of_every_sweep():
+	"""
+	The point of a pause: the machine stops being asked anything. Not listed,
+	not probed, not swept for updates — and not reported as unreachable either,
+	because it is not a failure, it is a decision.
+	"""
+	host_registry = _paused_fixture()
+	asked = []
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": (
+		asked.append(self.host_id) or [_container("nginx", "running")])
+	try:
+		sections = dcb.hosts_with_containers()
+		assert [entry["id"] for entry, _, _ in sections] == ["h_local"], sections
+		assert asked == ["h_local"], f"se preguntó a un host en pausa: {asked}"
+		assert dcb.unreachable_hosts(sections) == [], "un host en pausa no es un host caído"
+
+		out = dcb.display_all_hosts(comando="/list")
+		assert "nas" not in out, out
+		assert host_registry.status_snapshot().get("h_nas") is None, "se sondeó un host en pausa"
+	finally:
+		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
+def test_a_paused_host_makes_the_bot_single_host_again():
+	"""
+	The golden rule follows what is in use, not what is configured: while the
+	second machine is paused there really is only one answering, so the bot
+	stops naming hosts — and starts again the moment it is resumed.
+	"""
+	host_registry = _paused_fixture()
+	try:
+		assert host_registry.is_single_host() is True
+		assert [entry["id"] for entry in host_registry.hosts()] == ["h_local"]
+		assert host_registry.set_paused("h_nas", False) is True
+		assert host_registry.is_single_host() is False
+	finally:
+		_restore_hosts()
+
+
+def test_a_paused_host_is_still_configured_and_can_be_resumed():
+	"""
+	Pausing is not removing: the entry keeps its URL and its name, it is still
+	on the settings screen — which is where it is resumed from — and its id
+	stays taken.
+	"""
+	host_registry = _paused_fixture()
+	try:
+		assert host_registry.is_paused("h_nas") is True
+		entry = host_registry.host("h_nas")
+		assert entry is not None and entry["url"] == "tcp://nas:2375", entry
+		assert [h["id"] for h in host_registry.hosts(include_paused=True)] == ["h_local", "h_nas"]
+
+		_text, markup = dcb.build_settings_hosts()
+		labels = harness.keyboard_labels(markup)
+		assert any("nas" in label and "⏸️" in label for label in labels), labels
+
+		_text, markup = dcb.build_settings_host("h_nas")
+		callbacks_shown = harness.keyboard_callbacks(markup)
+		assert "settingsHostPause|h_nas" in callbacks_shown, callbacks_shown
+		assert i18n.get_text("button_host_resume") in harness.keyboard_labels(markup)
+	finally:
+		_restore_hosts()
+
+
+def test_the_local_host_cannot_be_paused():
+	"""The same rule as removing it: the bot runs there."""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	import host_registry
+	try:
+		assert host_registry.set_paused("h_local", True) is False
+		assert host_registry.is_paused("h_local") is False
+		# And the button is not even offered.
+		_text, markup = dcb.build_settings_host("h_local")
+		assert "settingsHostPause|h_local" not in harness.keyboard_callbacks(markup)
+	finally:
+		_restore_hosts()
+
+
+def test_a_schedule_on_a_paused_host_is_skipped_not_disabled():
+	"""
+	The executor disables a task whose action fails, and an unreachable host
+	fails every one of them: a machine down for a week used to come back with
+	its schedules switched off one by one.
+
+	A paused host is the case where that is plainly wrong — it is coming back
+	on purpose — so its tasks are skipped and left enabled.
+	"""
+	host_registry = _paused_fixture()
+	task = {"id": 1, "name": "Reinicio nocturno", "cron": "@daily", "action": "restart",
+			"container": "plex", "host": "h_nas", "enabled": True}
+	disabled = []
+	messages = []
+	original = (dcb.schedule_manager.update_schedule, dcb.send_message)
+	dcb.schedule_manager.update_schedule = lambda name, **kwargs: disabled.append((name, kwargs))
+	dcb.send_message = lambda **kwargs: messages.append(kwargs) or None
+	try:
+		monitor = dcb.DockerScheduleMonitor()
+		assert monitor._execute_schedule_action(task) is True
+		assert disabled == [], f"la tarea se desactivó: {disabled}"
+		assert messages == [], f"la pausa no es algo que anunciar en cada vuelta: {messages}"
+	finally:
+		(dcb.schedule_manager.update_schedule, dcb.send_message) = original
+		_restore_hosts()
+
 def test_removing_a_host_warns_about_the_schedules_it_would_orphan():
 	"""
 	A task naming a host that no longer exists raises HostUnavailable on every

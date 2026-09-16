@@ -323,7 +323,9 @@ El nombre es opcional; si no lo pones, el bot lo saca de la URL. Antes de guarda
 | `❌ No sé conectarme a...` | La URL no empieza por `ssh://`, `tcp://` o `unix://` |
 | `❌ ya está registrado` | Esa máquina ya está añadida; añadirla dos veces duplicaría sus contenedores |
 
-Después, pulsando el host en esa misma pantalla puedes **🔄 Probar de nuevo**, **✏️ Renombrar** o **🗑️ Quitar host**. El 🟢 y el 🔴 de la lista te dicen de un vistazo cuál responde.
+Después, pulsando el host en esa misma pantalla puedes **🔄 Probar de nuevo**, **✏️ Renombrar**, **⏸️ Pausar host** o **🗑️ Quitar host**. El 🟢, el 🔴 y el ⏸️ de la lista te dicen de un vistazo cuál responde y cuál está en pausa.
+
+**⏸️ Pausar** es para la máquina que no está disponible ahora mismo pero que vas a recuperar: deja de listarse, de comprobarse y de aparecer en los menús, y sus programaciones se saltan en vez de deshabilitarse. No se pierde nada —ni la URL, ni el nombre, ni las tareas— y el mismo botón la reanuda. El host local no se puede pausar, porque el bot corre en él.
 
 </details>
 

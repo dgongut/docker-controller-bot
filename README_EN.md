@@ -323,7 +323,9 @@ The name is optional; leave it out and the bot takes it from the URL. It tests t
 | `❌ I don't know how to connect to...` | The URL does not start with `ssh://`, `tcp://` or `unix://` |
 | `❌ is already registered` | That machine is already added; adding it twice would show its containers duplicated |
 
-After that, pressing the host on that same screen lets you **🔄 Test again**, **✏️ Rename** or **🗑️ Remove host**. The 🟢 and 🔴 in the list tell you at a glance which one answers.
+After that, pressing the host on that same screen lets you **🔄 Test again**, **✏️ Rename**, **⏸️ Pause host** or **🗑️ Remove host**. The 🟢, 🔴 and ⏸️ in the list tell you at a glance which one answers and which one is paused.
+
+**⏸️ Pause** is for the machine that is not available right now but that you intend to bring back: it stops being listed, checked and offered in the menus, and its schedules are skipped rather than disabled. Nothing is lost — not the URL, not the name, not the tasks — and the same button resumes it. The local host cannot be paused, because the bot runs on it.
 
 </details>
 

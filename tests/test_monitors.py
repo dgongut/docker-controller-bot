@@ -128,6 +128,43 @@ def test_adding_and_removing_a_host_starts_and_stops_its_monitor():
 		store.set("hosts", ONE_HOST)
 
 
+def test_pausing_a_host_stops_its_event_monitor():
+	"""
+	A paused host that kept its event stream open would still be reconnecting
+	to a machine nobody is asking about, and would still be announcing its
+	containers starting and stopping. The supervisor reads the hosts in use, so
+	the pause reaches it without it knowing what a pause is.
+	"""
+	import copy
+
+	# Deep-copied: store.set keeps the object it is given, and pausing writes
+	# into it — the shared fixture would come out of here with a paused host.
+	store.set("hosts", copy.deepcopy(TWO_HOSTS))
+	stopped = []
+	original_start = dcb.DockerEventMonitor.demonio_event
+	original_stop = dcb.DockerEventMonitor.stop
+	dcb.DockerEventMonitor.demonio_event = lambda self: None
+	dcb.DockerEventMonitor.stop = lambda self: stopped.append(self.host_id)
+	try:
+		supervisor = dcb.EventMonitorSupervisor()
+		supervisor.reconcile()
+		assert sorted(supervisor._monitors) == ["h_local", "h_nas"]
+
+		assert host_registry.set_paused("h_nas", True) is True
+		supervisor.reconcile()
+		assert list(supervisor._monitors) == ["h_local"]
+		assert stopped == ["h_nas"]
+
+		# And it comes back on its own when the host is resumed.
+		assert host_registry.set_paused("h_nas", False) is True
+		supervisor.reconcile()
+		assert sorted(supervisor._monitors) == ["h_local", "h_nas"]
+	finally:
+		dcb.DockerEventMonitor.demonio_event = original_start
+		dcb.DockerEventMonitor.stop = original_stop
+		store.set("hosts", ONE_HOST)
+
+
 def test_the_stream_keeps_being_retried():
 	"""
 	4.x gave up after five failures. On a remote host that is briefly

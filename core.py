@@ -1481,6 +1481,16 @@ class DockerScheduleMonitor:
 			prune_type = schedule.get("prune_type", "")
 			schedule_name = schedule.get("name", "")
 
+			if action in HOST_SCOPED_SCHEDULE_ACTIONS and host_registry.is_paused(schedule_host):
+				# Skipped, and deliberately not through handle_error: that
+				# disables the task for good. A paused machine cannot resolve
+				# the container, so every run against it used to burn one more
+				# schedule — which is the opposite of what pausing a host you
+				# intend to bring back is for.
+				debug(f"Schedule {schedule_name or action} skipped: host "
+					f"{host_registry.alias(schedule_host)} is paused")
+				return True
+
 			# Helper function to handle errors consistently
 			def handle_error(error_msg):
 				error(error_msg)
@@ -2498,7 +2508,9 @@ def build_settings():
 		get_text("settings_row_channel", channel or get_text("settings_not_set")),
 		callback_data="settingsAskChannel"))
 	markup.add(InlineKeyboardButton(
-		get_text("settings_row_hosts", len(host_registry.hosts())),
+		# Todos, pausados incluidos: la fila dice cuántas máquinas tienes
+		# configuradas, no cuántas están respondiendo ahora mismo.
+		get_text("settings_row_hosts", len(host_registry.hosts(include_paused=True))),
 		callback_data="settingsHosts"))
 	if channel:
 		markup.add(InlineKeyboardButton(get_text("button_settings_clear_channel"), callback_data="settingsClearChannel"))
@@ -2542,13 +2554,23 @@ def build_settings_hosts():
 	Every host is checked in parallel with a deadline, so opening this with a
 	machine unplugged costs a few seconds once instead of hanging for the sum
 	of every timeout.
+
+	Paused ones are listed too — this is the screen they are resumed from —
+	but nobody asks them anything: a pause is precisely the answer to a machine
+	that does not answer, so probing it here would bring back the wait it was
+	meant to end.
 	"""
-	statuses = host_registry.status_snapshot()
+	configured = host_registry.hosts(include_paused=True)
+	statuses = host_registry.status_snapshot(
+		entries=[entry for entry in configured if not entry.get("paused")])
 	markup = InlineKeyboardMarkup(row_width=1)
-	for entry in host_registry.hosts():
-		ok, _ = statuses.get(entry["id"], (False, ""))
+	for entry in configured:
+		if entry.get("paused"):
+			icon = "⏸️"
+		else:
+			icon = "🟢" if statuses.get(entry["id"], (False, ""))[0] else "🔴"
 		markup.add(InlineKeyboardButton(
-			f'{"🟢" if ok else "🔴"} - {entry.get("alias", entry["id"])}',
+			f'{icon} - {entry.get("alias", entry["id"])}',
 			callback_data=f'settingsHost|{entry["id"]}'))
 	markup.add(InlineKeyboardButton(get_text("button_host_add"), callback_data="settingsHostAdd"))
 	_add_navigation(markup, "settings")
@@ -2568,24 +2590,34 @@ def build_settings_host(host_id):
 	if entry is None:
 		return None
 
-	# Only this host: sweeping the fleet to draw one screen means waiting on
-	# every other machine as well.
-	ok, reason = host_registry.host_status(host_id)
+	paused = bool(entry.get("paused"))
 	lines = [get_text("settings_host_title", host_alias(host_id))]
 	lines.append(f'<code>{html.escape(entry.get("url", ""))}</code>')
 	lines.append("")
-	lines.append(get_text("settings_host_ok") if ok else get_text("settings_host_failed"))
-	if not ok and reason:
-		lines.append(f'<i>{html.escape(str(reason))}</i>')
+	if paused:
+		# Not asked whether it answers: that is the point of having paused it.
+		lines.append(get_text("settings_host_paused"))
+	else:
+		# Only this host: sweeping the fleet to draw one screen means waiting
+		# on every other machine as well.
+		ok, reason = host_registry.host_status(host_id)
+		lines.append(get_text("settings_host_ok") if ok else get_text("settings_host_failed"))
+		if not ok and reason:
+			lines.append(f'<i>{html.escape(str(reason))}</i>')
 	if entry.get("local"):
 		lines.append("")
 		lines.append(get_text("settings_host_is_local"))
 
 	markup = InlineKeyboardMarkup(row_width=1)
-	markup.add(InlineKeyboardButton(get_text("button_host_test"), callback_data=f"settingsHost|{host_id}"))
+	if not paused:
+		markup.add(InlineKeyboardButton(get_text("button_host_test"), callback_data=f"settingsHost|{host_id}"))
 	markup.add(InlineKeyboardButton(get_text("button_host_rename"), callback_data=f"settingsHostRename|{host_id}"))
-	# The local host has no remove button: the bot itself runs on it.
+	# The local host has neither: the bot itself runs on it, so it can be
+	# neither removed nor left out of the sweeps.
 	if not entry.get("local"):
+		markup.add(InlineKeyboardButton(
+			get_text("button_host_resume") if paused else get_text("button_host_pause"),
+			callback_data=f"settingsHostPause|{host_id}"))
 		markup.add(InlineKeyboardButton(get_text("button_host_remove"), callback_data=f"settingsHostRemove|{host_id}"))
 	_add_navigation(markup, "settingsHosts")
 	return "\n".join(lines), markup

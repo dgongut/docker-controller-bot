@@ -89,23 +89,71 @@ _probe_results = {}
 _probe_clients = {}
 
 
-def hosts():
+def hosts(include_paused=False):
 	"""
-	Every configured host, in the order they were added.
+	Every configured host that is in use, in the order they were added.
 
 	Read from the settings on each call: a host added from Telegram has to show
 	up without restarting.
+
+	A paused host is left out by default, which is what makes a pause mean
+	something: everything that sweeps the fleet goes through here, so one flag
+	takes the machine out of the listings, the update checks, the pickers and
+	its own event monitor without any of them knowing about pausing at all.
+	The default is the quiet one on purpose — a sweep nobody remembered to
+	adapt leaves a paused host alone rather than going on knocking at it.
+
+	`include_paused` is for the few that have to see the whole configuration:
+	the settings screens, which are where it gets unpaused, and the bookkeeping
+	that must not reuse a paused host's id or its URL.
 	"""
 	configured = store.get("hosts") or []
-	return [host for host in configured if isinstance(host, dict) and host.get("id")]
+	return [host for host in configured
+			if isinstance(host, dict) and host.get("id")
+			and (include_paused or not host.get("paused"))]
 
 
 def host(host_id):
-	"""One host by id, or None."""
-	for candidate in hosts():
+	"""One host by id, or None. Paused ones included: this is how they are read back."""
+	for candidate in hosts(include_paused=True):
 		if candidate["id"] == host_id:
 			return candidate
 	return None
+
+
+def is_paused(host_id):
+	"""Whether `host_id` is paused, and so left out of every sweep."""
+	entry = host(host_id)
+	return bool(entry and entry.get("paused"))
+
+
+def set_paused(host_id, paused):
+	"""
+	Pauses or resumes a host, and says whether it did.
+
+	The local host cannot be paused, for the same reason it cannot be removed:
+	the bot runs on it. Nothing else is touched — the entry keeps its URL, its
+	certificates and its name, and the schedules pointing at it keep pointing
+	at it. That is the whole difference from removing it.
+	"""
+	with _lock:
+		configured = hosts(include_paused=True)
+		for entry in configured:
+			if entry["id"] != host_id:
+				continue
+			if paused and entry.get("local"):
+				warning("Refusing to pause the local host: the bot itself runs on it")
+				return False
+			if bool(entry.get("paused")) == bool(paused):
+				return False
+			if paused:
+				entry["paused"] = True
+			else:
+				entry.pop("paused", None)
+			store.set("hosts", configured)
+			debug(f"Host {entry.get('alias', host_id)} {'paused' if paused else 'resumed'}")
+			return True
+	return False
 
 
 def local_host_id():
@@ -116,21 +164,29 @@ def local_host_id():
 	exists on one host, and updating it anywhere else would look for a
 	container that is not there.
 	"""
-	for candidate in hosts():
+	# The whole configuration, paused hosts included: the local one can never be
+	# paused, but the fallback below must not start answering with a different
+	# machine just because the first host was.
+	configured = hosts(include_paused=True)
+	for candidate in configured:
 		if candidate.get("local"):
 			return candidate["id"]
 	# No local host registered yet (migration has not run, or someone edited it
 	# out); the first host is a better guess than nothing.
-	return hosts()[0]["id"] if hosts() else None
+	return configured[0]["id"] if configured else None
 
 
 def is_single_host():
 	"""
-	True while only one host is configured.
+	True while only one host is in use.
 
 	The whole interface hangs off this: with a single host the host level is
 	never shown anywhere, so the bot looks exactly as it did before hosts
 	existed.
+
+	A paused host does not count. While it is paused there really is only one
+	machine answering, and the bot talks like it — which also means the host
+	names come back the moment it is resumed.
 	"""
 	return len(hosts()) <= 1
 
@@ -160,7 +216,9 @@ def generate_host_id():
 	"""A short id no configured host is using."""
 	import uuid
 
-	taken = {candidate["id"] for candidate in hosts()}
+	# Paused hosts included: theirs is taken too, and handing it out again
+	# would make two entries the same machine on the day one is resumed.
+	taken = {candidate["id"] for candidate in hosts(include_paused=True)}
 	while True:
 		candidate = f"h_{uuid.uuid4().hex[:4]}"
 		if candidate not in taken:
@@ -545,7 +603,9 @@ def add_host(alias_name, url, tls=None, timeout=None):
 	url = (url or "").strip()
 	if not url.startswith(SUPPORTED_SCHEMES):
 		raise HostRejected("scheme")
-	if any(same_url(existing.get("url"), url) for existing in hosts()):
+	# Against the whole configuration: a paused host is still configured, and
+	# adding its URL again would leave two entries for one machine.
+	if any(same_url(existing.get("url"), url) for existing in hosts(include_paused=True)):
 		raise HostRejected("duplicate")
 
 	entry = {"id": generate_host_id(), "alias": alias_name, "url": url, "local": False}
@@ -557,7 +617,7 @@ def add_host(alias_name, url, tls=None, timeout=None):
 	_build_client(entry, verify=True)  # raises HostUnavailable
 
 	with _lock:
-		configured = hosts()
+		configured = hosts(include_paused=True)
 		# Checked again under the lock: verifying the connection takes long
 		# enough for the same host to have been added meanwhile.
 		if any(same_url(existing.get("url"), url) for existing in configured):
@@ -582,7 +642,7 @@ def remove_host(host_id):
 		return False
 
 	with _lock:
-		store.set("hosts", [h for h in hosts() if h["id"] != host_id])
+		store.set("hosts", [h for h in hosts(include_paused=True) if h["id"] != host_id])
 	drop(host_id)
 	debug(f"Removed host {host_id}")
 	return True
@@ -600,7 +660,7 @@ def rename_host(host_id, new_alias):
 	just added.
 	"""
 	with _lock:
-		configured = hosts()
+		configured = hosts(include_paused=True)
 		for entry in configured:
 			if entry["id"] == host_id:
 				entry["alias"] = new_alias

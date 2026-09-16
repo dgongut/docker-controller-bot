@@ -1254,6 +1254,34 @@ def cb_settingsHostRename(ctx):
 	core.ask_text_input(ctx.userId, f"host_rename:{ctx.value}", "settings_host_ask_name", back_to="hosts")
 
 
+@callback(name="settingsHostPause", params=("value",), keeps_message=True)
+def cb_settingsHostPause(ctx):
+	"""
+	Pauses a host, or resumes it. One button: the screen it repaints says which
+	of the two it now offers, so there is no state to get out of step.
+
+	No confirmation, unlike removing: pausing loses nothing and the same button
+	undoes it.
+	"""
+	paused = not host_registry.is_paused(ctx.value)
+	if host_registry.set_paused(ctx.value, paused):
+		if paused:
+			# Nothing will ask this host anything until it is resumed, so its
+			# connection is closed rather than left open — behind an ssh one
+			# there is a process, and a host paused for a week would hold it
+			# for a week.
+			core.disconnect_host(ctx.value)
+		core.send_message(message=get_text(
+			"settings_host_paused_done" if paused else "settings_host_resumed_done",
+			core.host_alias(ctx.value)))
+	built = core.build_settings_host(ctx.value)
+	if not built:
+		core.render_settings(ctx.chatId, ctx.messageId, "hosts")
+		return
+	text, markup = built
+	core.edit_message_text(text, ctx.chatId, ctx.messageId, reply_markup=markup)
+
+
 @callback(name="settingsHostRemove", params=("value",), keeps_message=True)
 def cb_settingsHostRemove(ctx):
 	built = core.build_settings_host_remove(ctx.value)
