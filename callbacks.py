@@ -25,7 +25,7 @@ import host_registry
 import store
 from callback_registry import callback
 from callback_registry import register as register_callback
-from config import CONTAINER_ID_LENGTH, SUPPORTED_LANGUAGES
+from config import SUPPORTED_LANGUAGES
 from i18n import get_text
 
 
@@ -1273,8 +1273,9 @@ def cb_settingsHostRemoveConfirm(ctx):
 	if host_registry.remove_host(ctx.value):
 		# The supervisor notices on its next pass and stops that host's event
 		# stream; dropping the manager keeps a stale client from being reused
-		# if the same id ever comes back.
-		core.forget_managers()
+		# if the same id ever comes back. Only this host's: the rest of the
+		# fleet has no reason to reconnect because one of them was removed.
+		core.forget_manager(ctx.value)
 		core.send_message(message=get_text("settings_host_removed", alias))
 		names = core.disable_schedules(orphaned)
 		if names:

@@ -635,6 +635,180 @@ def test_a_host_that_fails_mid_listing_does_not_break_the_rest():
 		_restore_hosts()
 
 
+
+def test_a_hung_host_does_not_hold_the_listing():
+	"""
+	A machine that answers a ping and then never answers the listing used to
+	hold every menu for its whole timeout, and only then was the next host
+	tried. With one host unplugged the bot looked frozen.
+
+	The listings run at once now, under one deadline: what answers in time is
+	shown, and what does not counts as down for that sweep.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	gate = threading.Event()
+	original = dcb.DockerManager.list_containers
+
+	def hangs(self, comando=""):
+		if self.host_id == "h_nas":
+			gate.wait(30)
+			raise Exception("connection reset by peer")
+		return [_container("nginx", "running")]
+
+	dcb.DockerManager.list_containers = hangs
+	try:
+		started = time.monotonic()
+		sections = dcb.hosts_with_containers(list_deadline_seconds=0.3)
+		elapsed = time.monotonic() - started
+		assert [entry["id"] for entry, _, _ in sections] == ["h_local"], sections
+		assert elapsed < 5, f"la máquina colgada retuvo el listado {elapsed:.1f}s"
+	finally:
+		gate.set()
+		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
+def test_a_host_still_listing_is_not_asked_again():
+	"""
+	A blocking socket read cannot be cancelled, so the thread of a host that
+	hangs is left behind. Asking it again on the next menu would leave another
+	one behind on every refresh, for a machine that is not answering anyway.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	gate = threading.Event()
+	entered = []
+	original = dcb.DockerManager.list_containers
+
+	def hangs(self, comando=""):
+		if self.host_id == "h_nas":
+			entered.append(self.host_id)
+			gate.wait(30)
+			raise Exception("connection reset by peer")
+		return [_container("nginx", "running")]
+
+	dcb.DockerManager.list_containers = hangs
+	try:
+		first = dcb.hosts_with_containers(list_deadline_seconds=0.3)
+		second = dcb.hosts_with_containers(list_deadline_seconds=0.3)
+		assert [entry["id"] for entry, _, _ in first] == ["h_local"], first
+		assert [entry["id"] for entry, _, _ in second] == ["h_local"], second
+		assert entered == ["h_nas"], f"se lanzó un segundo listado sobre un host colgado: {entered}"
+	finally:
+		gate.set()
+		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
+def test_a_host_that_fails_does_not_make_the_others_reconnect():
+	"""
+	Giving up on a host used to clear the cached manager of every machine, so
+	one of them failing made all the rest reconnect. With an ssh host in the
+	fleet that is neither instant nor free, and none of them had done anything
+	wrong.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	original = dcb.DockerManager.list_containers
+
+	def flaky(self, comando=""):
+		if self.host_id == "h_nas":
+			raise Exception("connection reset by peer")
+		return [_container("nginx", "running")]
+
+	dcb.DockerManager.list_containers = flaky
+	try:
+		healthy = dcb.manager("h_local")
+		dcb.hosts_with_containers()
+		assert dcb.manager("h_local") is healthy, "el host sano tuvo que reconectar"
+		assert "h_nas" not in dcb._managers, "el host que falló siguió cacheado"
+	finally:
+		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
+def test_the_update_daemon_checks_the_fleet_and_then_waits():
+	"""
+	Regression: the pass once sat outside the daemon's `while True`, one indent
+	short. What was left inside was the "checks are off" branch and two cheap
+	assignments, so with checks on the loop spun at full speed, no host was
+	ever checked and no update was ever reported.
+
+	Run in a thread on purpose: with the bug there is nothing to assert on,
+	only a loop that never comes back.
+	"""
+
+	class Waited(Exception):
+		"""Stands in for the wait, so the loop ends after one pass."""
+
+	passes = []
+	original = (dcb.DockerUpdateMonitor._check_fleet, dcb.wait_for_next_update_check)
+	was_checking = store.get("bot.check_updates")
+
+	def wait():
+		raise Waited()
+
+	def run():
+		try:
+			dcb.DockerUpdateMonitor().detectar_actualizaciones()
+		except Waited:
+			pass
+
+	dcb.DockerUpdateMonitor._check_fleet = lambda self, cold_cache: passes.append(cold_cache)
+	dcb.wait_for_next_update_check = wait
+	store.set("bot.check_updates", True)
+	thread = threading.Thread(target=run, daemon=True)
+	try:
+		thread.start()
+		thread.join(10)
+		# Left as it is, a loop with the bug would spin hot for the rest of the
+		# run; switching checks off is what puts it to sleep instead.
+		store.set("bot.check_updates", False)
+		assert not thread.is_alive(), "el bucle nunca llegó a esperar: gira sin comprobar nada"
+		assert len(passes) == 1, passes
+	finally:
+		dcb.DockerUpdateMonitor._check_fleet, dcb.wait_for_next_update_check = original
+		store.set("bot.check_updates", was_checking)
+
+
+def test_one_pass_reports_the_whole_fleet_in_one_message():
+	"""
+	One message for the fleet rather than one per host: with four machines
+	that was four taps to update everything, and the buttons already say which
+	host each container is on.
+
+	The names behind those buttons are written from the references themselves,
+	which already carry host and name, so nothing is asked of each daemon a
+	second time just to fill a cache.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	sent = []
+	listed = {
+		"h_local": [_container("nginx", "running")],
+		"h_nas": [_container("plex", "running")],
+	}
+
+	class _Sent:
+		"""The little of a Telegram message that the caller reads back."""
+		chat = type("Chat", (), {"id": 4405089})()
+		message_id = 77
+
+	original = (dcb.DockerManager.list_containers, dcb.send_message, dcb.save_update_data)
+	dcb.DockerManager.list_containers = lambda self, comando="": listed[self.host_id]
+	dcb.send_message = lambda message="", reply_markup=None, **kwargs: (
+		sent.append((message, reply_markup)) or _Sent())
+	dcb.save_update_data = lambda *a, **k: None
+	try:
+		dcb.DockerUpdateMonitor()._check_fleet(cold_cache=False)
+		assert len(sent) == 1, sent
+		_message, markup = sent[0]
+		toggles = [c for c in harness.keyboard_callbacks(markup) if c.startswith("toggleUpdate|")]
+		assert {dcb.ref_host(c.split("|", 1)[1]) for c in toggles} == {"h_local", "h_nas"}, toggles
+		names = {dcb.load_container_name(_Sent.chat.id, _Sent.message_id, c.split("|", 1)[1])
+				for c in toggles}
+		assert names == {"nginx", "plex"}, names
+	finally:
+		(dcb.DockerManager.list_containers, dcb.send_message, dcb.save_update_data) = original
+		_restore_hosts()
+
 def test_update_state_is_read_from_the_right_host():
 	"""
 	Two hosts can run a container of the same name. Reading the cache without

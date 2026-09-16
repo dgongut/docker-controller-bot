@@ -241,6 +241,61 @@ def _build_client(entry, verify=False, timeout=None):
 	return built
 
 
+def _cached_client(cache, entry, timeout=None, announce=False):
+	"""
+	The cached client for a host, building one when the cache has none.
+
+	The build happens outside the lock on purpose. The SDK asks the daemon for
+	its API version while the client is being constructed, so building one for
+	a machine that is not answering takes as long as its timeout — and holding
+	the registry lock for that puts every other host behind the one that is
+	down, which is the very thing the parallel sweeps exist to avoid.
+
+	The price is that two threads can build a client for the same host at the
+	same time. The first to publish wins and the other's is closed straight
+	away: one connection too many in a race, never one left open.
+
+	`announce` logs the connection. Only the working client does: the probe
+	opens one to the same daemon, and logging both would double every line.
+	"""
+	host_id = entry["id"]
+	url = entry.get("url") or LOCAL_SOCKET_URL
+	with _lock:
+		cached = cache.get(host_id)
+		if cached and cached[0] == url:
+			return cached[1]
+
+	built = _build_client(entry, timeout=timeout)
+
+	with _lock:
+		current = host(host_id)
+		if current is None or (current.get("url") or LOCAL_SOCKET_URL) != url:
+			# The host was reconfigured while this was connecting, so what came
+			# back answers for a machine nobody is asking about any more.
+			# Caching it would serve the old daemon from then on.
+			winner, discarded = None, (url, built)
+		else:
+			cached = cache.get(host_id)
+			if cached and cached[0] == url:
+				# Another thread got there first while this one was connecting.
+				winner, discarded = cached[1], (url, built)
+			else:
+				# What it displaces belongs to a URL nobody will ask for again.
+				# Same leak as drop(): its ssh process outlives it until
+				# somebody closes it.
+				winner, discarded = built, cache.get(host_id)
+				cache[host_id] = (url, built)
+
+	# Outside the lock: an ssh teardown is not instant, and nothing else needs
+	# to wait on it to look up a different host.
+	_close((discarded,), host_id)
+	if winner is None:
+		raise HostUnavailable(host_id, "its connection details changed while it was being reached")
+	if announce and winner is built:
+		debug(f"Connected to host {entry.get('alias', host_id)} ({url})")
+	return winner
+
+
 def client(host_id):
 	"""
 	A live client for `host_id`, building and caching it on first use.
@@ -251,22 +306,7 @@ def client(host_id):
 	entry = host(host_id)
 	if entry is None:
 		raise HostUnavailable(host_id, "not configured")
-
-	url = entry.get("url") or LOCAL_SOCKET_URL
-	with _lock:
-		cached = _clients.get(host_id)
-		if cached and cached[0] == url:
-			return cached[1]
-
-		built = _build_client(entry)
-		displaced = _clients.get(host_id)
-		_clients[host_id] = (url, built)
-		debug(f"Connected to host {entry.get('alias', host_id)} ({url})")
-	# The URL changed under us, so what was cached is not this host any more.
-	# Same leak as drop(): nothing will ask for that client again, and its ssh
-	# process outlives it until somebody closes it.
-	_close((displaced,), host_id)
-	return built
+	return _cached_client(_clients, entry, announce=True)
 
 
 def try_client(host_id):
@@ -293,20 +333,7 @@ def probe_client(host_id):
 	entry = host(host_id)
 	if entry is None:
 		raise HostUnavailable(host_id, "not configured")
-
-	url = entry.get("url") or LOCAL_SOCKET_URL
-	with _lock:
-		cached = _probe_clients.get(host_id)
-		if cached and cached[0] == url:
-			return cached[1]
-
-		built = _build_client(entry, timeout=PROBE_TIMEOUT_SECONDS)
-		displaced = _probe_clients.get(host_id)
-		_probe_clients[host_id] = (url, built)
-	# As in client(): the entry it replaces belongs to a URL nobody will ask
-	# for again, and its connection stays open until it is closed.
-	_close((displaced,), host_id)
-	return built
+	return _cached_client(_probe_clients, entry, timeout=PROBE_TIMEOUT_SECONDS)
 
 
 def ping(host_id):
@@ -378,20 +405,30 @@ def drop(host_id):
 		debug(f"Dropped the cached client for host {host_id}")
 
 
-def reachable_hosts():
+def reachable_hosts(deadline_seconds=PROBE_TIMEOUT_SECONDS):
 	"""
 	Every host that answers right now, as (host, client) pairs.
 
 	Anything that has to sweep every host goes through here, so one machine
 	being down degrades that sweep instead of breaking it.
 
+	Reachability comes from the parallel snapshot with a deadline, not from
+	pinging one host after another: a machine that hangs would otherwise hold
+	the whole sweep for its probe timeout, and then again for every host
+	behind it.
+
 	The client handed back is the working one, not the probe that answered the
 	ping: callers operate through it, and they must not inherit the short
 	timeout that only makes sense for asking whether a host is there.
 	"""
+	configured = hosts()
+	if not configured:
+		return []
+	statuses = status_snapshot(deadline_seconds=deadline_seconds, entries=configured)
 	pairs = []
-	for entry in hosts():
-		if not ping(entry["id"]):
+	for entry in configured:
+		ok, _ = statuses.get(entry["id"], (False, ""))
+		if not ok:
 			continue
 		try:
 			pairs.append((entry, client(entry["id"])))
@@ -413,7 +450,7 @@ def host_status(host_id, deadline_seconds=5):
 	return status_snapshot(deadline_seconds, entries=[entry]).get(host_id, (False, ""))
 
 
-def status_snapshot(deadline_seconds=5, entries=None):
+def status_snapshot(deadline_seconds=PROBE_TIMEOUT_SECONDS, entries=None):
 	"""
 	Whether each host answers, as {host_id: (ok, reason)}.
 

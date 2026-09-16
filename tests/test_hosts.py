@@ -449,3 +449,40 @@ def test_a_client_that_cannot_be_closed_does_not_stop_the_drop():
 	assert host_registry.client("h_nas") is not None, "y el siguiente uso reconecta"
 	without_paramiko(installed)
 	shutil.rmtree(root, ignore_errors=True)
+
+
+def test_connecting_to_one_host_does_not_hold_up_another():
+	"""
+	The SDK asks the daemon for its API version while the client is being
+	built, so building one for a machine that is not answering takes as long as
+	its timeout. Built under the registry lock, that put every other host
+	behind the one that was down — and the parallel snapshot, whose whole point
+	is that it does not, would have queued up all the same.
+
+	A barrier is what checks it: two builds that overlap both pass through it,
+	and two that are serialised cannot. Wall-clock timings would say the same
+	thing, only flakily.
+	"""
+	import threading
+
+	_, root = setup([
+		{"id": "h_local", "alias": "casa", "url": host_registry.LOCAL_SOCKET_URL, "local": True},
+		{"id": "h_nas", "alias": "nas", "url": "tcp://nas:2375"},
+	])
+	barrier = threading.Barrier(2, timeout=10)
+	original = host_registry._build_client
+
+	def building_takes_a_while(entry, verify=False, timeout=None):
+		barrier.wait()
+		return MagicMock()
+
+	host_registry._build_client = building_takes_a_while
+	try:
+		statuses = host_registry.status_snapshot(deadline_seconds=20)
+		assert statuses["h_local"][0], statuses["h_local"]
+		assert statuses["h_nas"][0], statuses["h_nas"]
+	finally:
+		host_registry._build_client = original
+		barrier.abort()
+		host_registry.reset()
+		shutil.rmtree(root, ignore_errors=True)

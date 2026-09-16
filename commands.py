@@ -12,22 +12,20 @@ Importing this module is what registers the commands, so the entry point has
 to import it before polling starts.
 """
 
-import store
-
 from config import MUTE_MAX_MINUTES
 from i18n import get_text
 from core import (
 	send_prune_menu,
-	send_picker, manager_for, managers, ref_id,
+	send_picker, manager_for, ref_id,
 	register_command,
 	VERSION, ask_command, ask_text_input,
-	build_generic_keyboard, build_hierarchical_keyboard, change_tag_container,
+	build_generic_keyboard, change_tag_container,
 	compose, confirm_delete, container_ref, create_simple_keyboard,
 	delete_message_later, display_all_hosts,
-	info, log_file, logs,
+	hosts_with_containers, info, log_file, logs,
 	mute, print_donors, restart,
-	run, save_container_refs, save_multi_action,
-	save_update_data, send_message, send_settings_menu,
+	run, save_container_refs, save_update_data,
+	send_message, send_settings_menu,
 	send_ports_menu, show_schedule_menu, sort_containers_by_priority,
 	stop, update_available,
 )
@@ -118,11 +116,12 @@ def cmd_updateall(user_id=None, chat_id=None, container_id=None, container_name=
 	# buttons carried bare ids, which resolve against the local host wherever
 	# the container actually lives.
 	containersToUpdate = []  # list of [reference, name] pairs
-	for owner in managers():
+	for _, owner, containers in hosts_with_containers():
 		# Sorted within each host: bot first, then running, then stopped (all
 		# alphabetically). Sorting the fleet as one list would interleave
-		# machines, and the host is the coarser grouping.
-		for container in sort_containers_by_priority(owner.list_containers()):
+		# machines, and the host is the coarser grouping. Parallel listing,
+		# so a hung host degrades this instead of holding it for its timeout.
+		for container in sort_containers_by_priority(containers):
 			if update_available(container, owner.host_id):
 				containersToUpdate.append([container_ref(owner.host_id, container), container.name])
 	if not containersToUpdate:

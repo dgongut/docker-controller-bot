@@ -13,7 +13,6 @@ import telebot
 import threading
 import time
 import uuid
-import yaml
 import migration
 import store
 from config import *
@@ -870,10 +869,31 @@ def managers():
 	return built
 
 
+def forget_manager(host_id):
+	"""Drops the cached manager for one host, so its next use reconnects."""
+	with _managers_lock:
+		_managers.pop(host_id, None)
+
+
 def forget_managers():
-	"""Drops the cached managers, so the next use reconnects."""
+	"""Drops every cached manager, so the next use reconnects."""
 	with _managers_lock:
 		_managers.clear()
+
+
+def disconnect_host(host_id):
+	"""
+	Gives up on one host's connection: its clients are closed and its manager
+	forgotten, so the next use of it reconnects.
+
+	Always both, and always only this host. The pair used to be written out at
+	every call site with the manager half clearing the whole fleet, so one
+	machine failing made every other one reconnect — and reconnecting to an ssh
+	host is neither instant nor free. Closing the client also unblocks anything
+	still waiting on its socket, which is what brings a hung listing back.
+	"""
+	host_registry.drop(host_id)
+	forget_manager(host_id)
 
 
 # The local host's manager. Most of the bot still goes through this one, and
@@ -1239,30 +1259,78 @@ class DockerUpdateMonitor:
 			if cold_cache:
 				debug("Update cache is empty: this pass will fill it without notifying")
 
-			# Every reachable host, in the order they are configured. One being
-			# down degrades its own check and nothing else.
-			for entry, owner, _ in hosts_with_containers():
-				try:
-					self._check_host(entry, owner, cold_cache)
-				except Exception as e:
-					error(f"Update check failed on {entry.get('alias', entry['id'])}: [{e}]")
+			self._check_fleet(cold_cache)
 			wait_for_next_update_check()
 
-	def _check_host(self, entry, owner, cold_cache):
+	def _check_fleet(self, cold_cache):
 		"""
-		Checks one host for image updates and reports what it finds.
+		One pass over every host, ending in a single message for what it found.
 
-		One host at a time, in sequence, rather than a thread each: the interval
-		is hours long so there is nothing to gain in parallel, and every host
-		pulling images at once would saturate the same network and disk.
+		Kept out of the loop so a pass can be run on its own in a test: all the
+		loop adds is the waiting, and the waiting is measured in hours.
+		"""
+		# Every reachable host, in the order they are configured. One being
+		# down degrades its own check and nothing else.
+		all_updates = []  # list of [reference, name] pairs, across every host
+		anything_new = False
+		for entry, owner, containers in hosts_with_containers():
+			try:
+				found, has_new = self._check_host(entry, owner, cold_cache, containers)
+				all_updates.extend(found)
+				anything_new = anything_new or has_new
+			except Exception as e:
+				error(f"Update check failed on {entry.get('alias', entry['id'])}: [{e}]")
+
+		# One message for the whole fleet rather than one per host: with four
+		# hosts that was four taps to update everything, and the keyboard
+		# already names the host on each button when the list spans machines.
+		# The bot's own update keeps its dedicated message — updating it
+		# recreates the bot mid-batch, which would leave the rest undone.
+		#
+		# A host only reports something new on a warm cache, so anything_new
+		# carries the "the first pass announces nothing" rule with it.
+		if not (all_updates and anything_new):
+			return
+		if is_muted():
+			debug(f"Message [{get_text('available_updates', len(all_updates))}] omitted because muted")
+			return
+		# The same builder the toggles repaint with: a keyboard assembled by
+		# hand here drifts from the one that replaces it on the first tap, and
+		# both have to agree on what a button says.
+		markup = build_generic_keyboard(all_updates, set(), None, "Update",
+										get_text("button_update"), get_text("button_update_all"))
+		message = send_message(message=get_text("available_updates", len(all_updates)), reply_markup=markup)
+		if message:
+			save_update_data(message.chat.id, message.message_id, all_updates)
+			# The name cache the callback parser reads, written from the
+			# references themselves: they already carry host and name, so
+			# nothing has to be asked of each daemon a second time.
+			save_container_refs(message.chat.id, message.message_id, all_updates)
+
+	def _check_host(self, entry, owner, cold_cache, containers):
+		"""
+		Checks one host for updates, returning ([reference, name], has_new).
+
+		What it finds feeds the single fleet-wide message _check_fleet sends;
+		this sends nothing itself except the bot's own update — kept apart on
+		purpose, since updating it recreates the bot mid-batch — and the
+		progress of anything labelled for auto-update.
+
+		`containers` is what the sweep already listed for this host. Asking the
+		daemon again here would be a second round trip for one answer, and
+		sorting it again without naming the host would put another machine's
+		container ahead of the bot's own whenever the two share a name.
+
+		Hosts are checked one at a time, in sequence, rather than a thread each
+		— unlike the listing that feeds this, which is parallel because nothing
+		is downloaded to list. Here every host would be pulling images, and
+		doing that at once saturates the same network and disk; with an
+		interval measured in hours there is nothing to gain by it either.
 		"""
 		host_id = entry["id"]
-		containers = owner.client.containers.list(all=True)
-		# Sort containers: bot first, then running, then stopped (all alphabetically)
-		sorted_containers = sort_containers_by_priority(containers)
-		grouped_updates_containers = []  # list of [id, name] pairs
+		grouped_updates_containers = []  # list of [reference, name] pairs
 		should_notify = False
-		for container in sorted_containers:
+		for container in containers:
 			if (container.status == "exited" or container.status == "dead") and not store.get("bot.check_update_stopped_containers"):
 				debug(f"Ignoring update check for container {container.name} (stopped)")
 				continue
@@ -1332,31 +1400,7 @@ class DockerUpdateMonitor:
 				has_update = None
 			save_container_update_status(image_with_tag, container.name, has_update, host_id)
 
-		if grouped_updates_containers and should_notify:
-			# The same builder the toggles repaint with: a keyboard assembled
-			# by hand here drifts from the one that replaces it on the first
-			# tap, and both have to agree on what a button says.
-			markup = build_generic_keyboard(grouped_updates_containers, set(), None, "Update",
-											get_text("button_update"), get_text("button_update_all"))
-			if not is_muted():
-				message = send_message(message=f'{get_text("available_updates", len(grouped_updates_containers))}{host_suffix(host_id)}', reply_markup=markup)
-				if message:
-					save_update_data(message.chat.id, message.message_id, grouped_updates_containers)
-					# Also populate the container name cache so the callback parser
-					# can resolve names from IDs without an extra Docker lookup.
-					_objs = []
-					for cid, _ in grouped_updates_containers:
-						try:
-							_objs.append(owner.client.containers.get(ref_id(cid)))
-						except Exception as e:
-							debug(f"Could not fetch container {cid} for cache: {e}")
-					if _objs:
-						try:
-							save_container_cache(message.chat.id, message.message_id, _objs, host_id)
-						except Exception as e:
-							debug(f"Could not pre-populate container name cache: {e}")
-			else:
-				debug(f"Message [{get_text('available_updates', len(grouped_updates_containers))}] omitted because muted")
+		return grouped_updates_containers, should_notify
 
 
 	def demonio_update(self):
@@ -4992,8 +5036,7 @@ def render_picker_for_host(chat_id, message_id, action_type, host_id):
 		# A daemon can build a client and then fail the very next call. Left
 		# uncaught this surfaced as a generic "error processing request",
 		# which says nothing about the machine being unreachable.
-		host_registry.drop(host_id)
-		forget_managers()
+		disconnect_host(host_id)
 		edit_message_text(get_text("host_unreachable", host_alias(host_id), html.escape(str(e))),
 						chat_id, message_id)
 		return
@@ -5317,8 +5360,7 @@ def build_back_to_level1_keyboard(action_type, chatId, messageId, exclude_own=Tr
 		# the list" button in the project menus comes through here, so leaving
 		# this uncaught broke twenty-five of them at once.
 		warning(f"Could not rebuild the menu for {host_alias(host_id)}: {e}")
-		host_registry.drop(host_id)
-		forget_managers()
+		disconnect_host(host_id)
 		return None
 
 	# Check if no containers or only bot container
@@ -5757,8 +5799,7 @@ def show_container_ports(host_id=None):
 		return
 	except Exception as e:
 		warning(f"Could not list ports on {host_alias(host_id)}: {e}")
-		host_registry.drop(host_id)
-		forget_managers()
+		disconnect_host(host_id)
 		send_message(message=get_text("host_unreachable", host_alias(host_id), html.escape(str(e))))
 		return
 
@@ -6046,8 +6087,7 @@ def project_info_or_none(host_id, project_name):
 		return None
 	except Exception as e:
 		warning(f"Could not read project {project_name} on {host_alias(host_id)}: {e}")
-		host_registry.drop(host_id)
-		forget_managers()
+		disconnect_host(host_id)
 		return None
 
 
@@ -6071,8 +6111,7 @@ def display_all_hosts(comando=""):
 			# HostUnavailable left /list raising on the commonest setup there
 			# is: a single host, mid-restart.
 			warning(f"Could not list containers on {host_alias(host_id)}: {e}")
-			host_registry.drop(host_id)
-			forget_managers()
+			disconnect_host(host_id)
 			return get_text("list_host_unreachable", host_alias(host_id), html.escape(str(e)))
 		return display_containers(containers, host_id)
 
@@ -6088,7 +6127,15 @@ def display_all_hosts(comando=""):
 	return "\n\n".join(rendered) if rendered else get_text("error_no_containers_available")
 
 
-def hosts_with_containers(comando=""):
+# The listing threads in flight, one per host at most. Module-level because the
+# point of them is what a *previous* call left behind: see hosts_with_containers.
+_listings = {}
+_listings_lock = threading.Lock()
+
+
+def hosts_with_containers(comando="",
+						snapshot_deadline_seconds=host_registry.PROBE_TIMEOUT_SECONDS,
+						list_deadline_seconds=20):
 	"""
 	Every reachable host and its containers, in the order the hosts are
 	configured.
@@ -6096,20 +6143,83 @@ def hosts_with_containers(comando=""):
 	Returns [(host_entry, manager, containers)]. Hosts that do not answer are
 	left out: one machine being down has to degrade what it can and nothing
 	else.
+
+	Reachability is pre-filtered with the parallel snapshot, and the listings
+	then run one thread per host under a single deadline. Listing one host
+	after another meant a hung machine held every menu for its own timeout
+	before the next host was even tried, so with one machine unplugged the
+	whole bot looked frozen.
+
+	The deadline for the listings is shorter than the working client's own
+	timeout on purpose: a menu that waits the full 30s has already failed the
+	person looking at it. Waiting for the probe is bounded by the probe's
+	timeout, which is what its deadline is taken from.
+
+	A host whose listing is still running from an earlier sweep is not asked
+	again: it is not answering anyway, and starting a second one would leave a
+	thread behind on every refresh of a menu. It counts as down for this sweep,
+	and giving up on it closes its client, which is what lets the thread that
+	was left behind come back.
 	"""
-	sections = []
-	for entry in host_registry.hosts():
+	configured = host_registry.hosts()
+	if not configured:
+		return []
+	statuses = host_registry.status_snapshot(
+		deadline_seconds=snapshot_deadline_seconds, entries=configured)
+
+	# Written by the threads, read once they are done or the deadline has
+	# passed: either (entry, manager, containers) or the exception that ended
+	# the attempt. Local to this call, so a thread that comes back late writes
+	# somewhere nobody is looking any more.
+	results = {}
+
+	def list_one(entry):
+		host_id = entry["id"]
 		try:
-			owner = manager(entry["id"])
+			owner = manager(host_id)
+			results[host_id] = (entry, owner, owner.list_containers(comando=comando))
 		except host_registry.HostUnavailable as e:
-			debug(f"Skipping host {entry.get('alias', entry['id'])}: {e.reason}")
-			continue
-		try:
-			sections.append((entry, owner, owner.list_containers(comando=comando)))
+			debug(f"Skipping host {entry.get('alias', host_id)}: {e.reason}")
+			results[host_id] = e
 		except Exception as e:
-			warning(f"Could not list containers on {entry.get('alias', entry['id'])}: {e}")
-			host_registry.drop(entry["id"])
-			forget_managers()
+			warning(f"Could not list containers on {entry.get('alias', host_id)}: {e}")
+			results[host_id] = e
+		finally:
+			with _listings_lock:
+				# Only if it is still this thread: a later sweep may have given
+				# up on this one and started its own.
+				if _listings.get(host_id) is threading.current_thread():
+					_listings.pop(host_id, None)
+
+	asked = []
+	for entry in configured:
+		host_id = entry["id"]
+		if not statuses.get(host_id, (False, ""))[0]:
+			continue
+		with _listings_lock:
+			previous = _listings.get(host_id)
+			if previous is not None and previous.is_alive():
+				debug(f"Host {entry.get('alias', host_id)} is still listing from an earlier sweep: leaving it out")
+				continue
+			thread = threading.Thread(target=list_one, args=(entry,), daemon=True)
+			_listings[host_id] = thread
+		thread.start()
+		asked.append((entry, thread))
+
+	deadline = time.monotonic() + list_deadline_seconds
+	for _, thread in asked:
+		thread.join(max(0, deadline - time.monotonic()))
+
+	sections = []
+	for entry, _ in asked:
+		outcome = results.get(entry["id"])
+		if isinstance(outcome, tuple):
+			sections.append(outcome)
+		else:
+			# It raised, or it is still going past the deadline: a blocking
+			# socket read cannot be cancelled, so it is left behind and the
+			# host counts as down for this sweep rather than holding the menu.
+			disconnect_host(entry["id"])
 	return sections
 
 

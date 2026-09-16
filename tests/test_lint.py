@@ -594,3 +594,95 @@ def test_the_crown_is_always_asked_about_a_host():
 
 	assert not problems, (
 		"llamadas a get_status_emoji sin decir de qué host:\n" + "\n".join(problems))
+
+
+# Calls that make a loop pause. A `while True` containing one of these is a
+# daemon loop rather than a search that returns as soon as it finds something.
+WAITS = ("time.sleep", "sleep", "wait_for_next_update_check")
+
+
+def _call_name(node):
+	"""The dotted name a call invokes, or "" for anything that is not a call."""
+	return ast.unparse(node.func) if isinstance(node, ast.Call) else ""
+
+
+def test_a_loop_that_waits_waits_on_every_lap():
+	"""
+	The update daemon's pass once sat one indent short, outside its own
+	`while True`. What was left inside was the "checks are switched off" branch
+	and two cheap assignments, so with checks on the loop spun at full speed:
+	no host was ever checked, no update was ever reported, and the only symptom
+	was a core pinned at 100%.
+
+	A loop that never waits at all is not what this is about — the two id
+	generators loop until they find a free name and return. The check is on the
+	loop that does wait somewhere: the wait has to be on the way through, not
+	only down one branch.
+	"""
+	problems = []
+	for filename in SOURCES:
+		path = os.path.join(harness.REPO, filename)
+		source = io.open(path, encoding="utf-8").read()
+		for node in ast.walk(ast.parse(source)):
+			if not isinstance(node, ast.While):
+				continue
+			if not (isinstance(node.test, ast.Constant) and node.test.value is True):
+				continue
+			if not any(_call_name(inner) in WAITS for inner in ast.walk(node)):
+				continue
+			if any(_call_name(statement.value) in WAITS
+					for statement in node.body if isinstance(statement, ast.Expr)):
+				continue
+			problems.append(f"  {filename}:{node.lineno}  while True que puede dar una vuelta entera sin esperar")
+
+	assert not problems, (
+		"bucles que girarían sin pausa:\n" + "\n".join(problems))
+
+
+def test_no_module_imports_a_name_it_never_uses():
+	"""
+	Five of them had piled up: `yaml` in the core, `store` and two helpers in
+	the commands, a constant in the callbacks. Each was read by something that
+	later moved or stopped existing, and an import that is never read is a lie
+	about what a module depends on — the kind that sends the next reader
+	looking for a relationship that is not there.
+
+	A name imported only to be re-exported, or to prove a package is installed,
+	says so with a `# noqa` on its own line, the way host_registry does with
+	paramiko.
+	"""
+	problems = []
+	for filename in SOURCES:
+		path = os.path.join(harness.REPO, filename)
+		source = io.open(path, encoding="utf-8").read()
+		tree = ast.parse(source)
+		lines = source.splitlines()
+
+		imported = {}
+		for node in ast.walk(tree):
+			if isinstance(node, (ast.Import, ast.ImportFrom)):
+				for alias in node.names:
+					if alias.name == "*":
+						# `from config import *`: nothing to name, nothing to check.
+						continue
+					imported[alias.asname or alias.name.split(".")[0]] = node.lineno
+
+		# Every name the module reads, `a` in `a.b.c` included.
+		used = set()
+		for node in ast.walk(tree):
+			if isinstance(node, ast.Name):
+				used.add(node.id)
+			elif isinstance(node, ast.Attribute):
+				root = node
+				while isinstance(root, ast.Attribute):
+					root = root.value
+				if isinstance(root, ast.Name):
+					used.add(root.id)
+
+		for name, line in sorted(imported.items(), key=lambda item: item[1]):
+			if name in used or "noqa" in lines[line - 1]:
+				continue
+			problems.append(f"  {filename}:{line}  importa {name} y no lo usa")
+
+	assert not problems, (
+		"imports que nadie lee:\n" + "\n".join(problems))
