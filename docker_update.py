@@ -473,6 +473,26 @@ def _perform_update_locked(client, container, config, container_name, message, e
 	debug_func(f"[UPDATE_START] Container: {container_name} (ID: {old_container_id})")
 	debug_func(f"[UPDATE_START] Old container will be named: {old_container_name}")
 
+	# A container already called <name>_old is almost always what an update cut
+	# short left behind. The rename below would fail on it, so nothing is
+	# touched: that leftover may be the copy the user needs to recover, which
+	# is theirs to look at and not ours to delete.
+	try:
+		leftover = client.containers.get(old_container_name)
+	except docker.errors.NotFound:
+		leftover = None
+	except Exception as e:
+		debug_func(f"[UPDATE_START] Could not check for {old_container_name}: {e}")
+		leftover = None
+	if leftover is not None and leftover.id != container.id:
+		error_func(f"[UPDATE_START] ❌ {old_container_name} already exists (ID: {leftover.id[:container_id_length]}); not touching {container_name}")
+		return get_text_func("error_update_leftover_old", container_name, old_container_name)
+
+	# Whether the original was renamed to _old, so the rollback knows if there
+	# is a name to give back.
+	renamed = False
+	new_container_id = None
+
 	try:
 		# Pull new image with timeout validation
 		if skip_pull:
@@ -503,6 +523,7 @@ def _perform_update_locked(client, container, config, container_name, message, e
 			edit_message_func(get_text_func("updating_renaming", container_name), telegram_group, message.message_id)
 		debug_func(f"[RENAME_OLD] Renaming {container_name} (ID: {old_container_id}) to {old_container_name}")
 		container.rename(old_container_name)
+		renamed = True
 		debug_func(f"[RENAME_OLD] Successfully renamed to {old_container_name}")
 
 		# Create new container
@@ -635,6 +656,7 @@ def _perform_update_locked(client, container, config, container_name, message, e
 				tmpfs=config['tmpfs_mounts'] if config['tmpfs_mounts'] else None,
 				ports=config['ports'] if config['ports'] else None,
 			)
+			new_container_id = new_container.id
 			debug_func(f"[CREATE_CONTAINER] New container created successfully (ID: {new_container.id[:container_id_length]})")
 		except Exception as create_error:
 			error_func(get_text_func("error_creating_container", container_name, str(create_error)))
@@ -782,88 +804,59 @@ def _perform_update_locked(client, container, config, container_name, message, e
 			else:
 				debug_func(f"[ROLLBACK_STEP1] New container was never created, skipping cleanup")
 
-			# STEP 2: Restore old container
-			debug_func(f"[ROLLBACK_STEP2] Attempting to restore old container {old_container_name}")
+			# STEP 2: Restore the original, found by its id. By name it would be
+			# whatever is called <name>_old right now, which is not necessarily
+			# the container this update renamed — and restoring a stranger over
+			# the original is how the original used to get deleted.
+			debug_func(f"[ROLLBACK_STEP2] Attempting to restore original container (ID: {old_container_id})")
 			try:
-				debug_func(f"[ROLLBACK_STEP2] Getting old container by name: {old_container_name}")
 				try:
-					old_container = client.containers.get(old_container_name)
+					original = client.containers.get(container.id)
 				except docker.errors.NotFound:
-					error_func(f"[ROLLBACK_STEP2] ❌ CRITICAL: Old container {old_container_name} not found - CONTAINER LOST!")
-					raise Exception(f"Old container {old_container_name} not found - cannot rollback. Container may be permanently lost!")
+					error_func(f"[ROLLBACK_STEP2] ❌ CRITICAL: Original container {container_name} (ID: {old_container_id}) not found - CONTAINER LOST!")
+					raise Exception(f"Original container {container_name} not found - cannot rollback. Container may be permanently lost!")
 
-				debug_func(f"[ROLLBACK_STEP2] ✅ Found old container {old_container_name} (ID: {old_container.id[:container_id_length]})")
-
-				# Rename back to original name
-				try:
-					debug_func(f"[ROLLBACK_STEP2] Renaming {old_container_name} back to {container_name}")
-					old_container.rename(container_name)
-					debug_func(f"[ROLLBACK_STEP2] ✅ Old container renamed back to {container_name}")
-				except docker.errors.APIError as rename_error:
-					# If rename fails due to conflict, try to remove the conflicting container first
-					if "already in use" in str(rename_error):
-						debug_func(f"[ROLLBACK_STEP2] ⚠️ Name conflict detected: {rename_error}")
-						debug_func(f"[ROLLBACK_STEP2] Attempting to resolve conflict...")
-						try:
-							debug_func(f"[ROLLBACK_STEP2] Getting conflicting container with name {container_name}")
-							conflicting = client.containers.get(container_name)
-							debug_func(f"[ROLLBACK_STEP2] Found conflicting container (ID: {conflicting.id[:container_id_length]})")
-							debug_func(f"[ROLLBACK_STEP2] Removing conflicting container with force=True...")
-							conflicting.remove(force=True)
-							debug_func(f"[ROLLBACK_STEP2] ✅ Removed conflicting container")
-							debug_func(f"[ROLLBACK_STEP2] Retrying rename of {old_container_name} to {container_name}")
-							old_container.rename(container_name)
-							debug_func(f"[ROLLBACK_STEP2] ✅ Old container renamed back to {container_name} after conflict resolution")
-						except Exception as conflict_error:
-							error_func(f"[ROLLBACK_STEP2] ❌ Failed to resolve name conflict: {conflict_error}")
+				if renamed or original.name != container_name:
+					debug_func(f"[ROLLBACK_STEP2] Renaming {original.name} back to {container_name}")
+					try:
+						original.rename(container_name)
+					except docker.errors.APIError as rename_error:
+						# Only the container this update created may be moved out
+						# of the way. Anything else holding the name is not ours.
+						if "already in use" not in str(rename_error) or new_container_id is None:
 							raise rename_error
-					else:
-						raise rename_error
+						try:
+							conflicting = client.containers.get(container_name)
+						except docker.errors.NotFound:
+							conflicting = None
+						if conflicting is None or conflicting.id != new_container_id:
+							error_func(f"[ROLLBACK_STEP2] ❌ {container_name} is taken by a container this update did not create; leaving it alone")
+							raise rename_error
+						debug_func(f"[ROLLBACK_STEP2] The name is held by the new container, removing it")
+						conflicting.remove(force=True)
+						original.rename(container_name)
+					debug_func(f"[ROLLBACK_STEP2] ✅ Original renamed back to {container_name}")
+				else:
+					debug_func(f"[ROLLBACK_STEP2] Original was never renamed, it keeps its name")
 
-				# Start old container if it was running before
+				# Start it again if it was running before
 				if config['is_running']:
 					debug_func(f"[ROLLBACK_STEP2] Container was running before, starting it...")
-					old_container.start()
-					debug_func(f"[ROLLBACK_STEP2] Old container start command sent, waiting 1 second...")
-					# Verify old container started
+					original.start()
 					time.sleep(1)
-					debug_func(f"[ROLLBACK_STEP2] Reloading old container state...")
-					old_container.reload()
-					debug_func(f"[ROLLBACK_STEP2] Old container status: {old_container.status}")
-					if old_container.status == 'running':
+					original.reload()
+					debug_func(f"[ROLLBACK_STEP2] Original container status: {original.status}")
+					if original.status == 'running':
 						debug_func(get_text_func("debug_rollback_successful", container_name))
-						debug_func(f"[ROLLBACK_STEP2] ✅ Rollback successful - old container is running")
+						debug_func(f"[ROLLBACK_STEP2] ✅ Rollback successful - original container is running")
 						rollback_successful = True
 					else:
-						error_func(f"[ROLLBACK_STEP2] ❌ Old container failed to start after rollback. Status: {old_container.status}")
+						error_func(f"[ROLLBACK_STEP2] ❌ Original container failed to start after rollback. Status: {original.status}")
 				else:
 					rollback_successful = True
-					debug_func(f"[ROLLBACK_STEP2] ✅ Old container restored (was not running before)")
+					debug_func(f"[ROLLBACK_STEP2] ✅ Original container restored (was not running before)")
 			except Exception as rollback_error:
-				error_func(f"[ROLLBACK_STEP2] ❌ CRITICAL: Failed to restore old container: {rollback_error}")
-				# Try one more time with force
-				try:
-					debug_func(f"[ROLLBACK_STEP2_FORCE] Attempting force restore of {old_container_name}")
-					old_container = client.containers.get(old_container_name)
-					debug_func(f"[ROLLBACK_STEP2_FORCE] Found old container, attempting force cleanup...")
-					# Try to remove any conflicting container
-					try:
-						debug_func(f"[ROLLBACK_STEP2_FORCE] Checking for conflicting container {container_name}")
-						conflicting = client.containers.get(container_name)
-						debug_func(f"[ROLLBACK_STEP2_FORCE] Found conflicting container, removing...")
-						conflicting.remove(force=True)
-						debug_func(f"[ROLLBACK_STEP2_FORCE] Conflicting container removed")
-					except Exception:
-						debug_func(f"[ROLLBACK_STEP2_FORCE] No conflicting container found or already removed")
-					debug_func(f"[ROLLBACK_STEP2_FORCE] Renaming old container...")
-					old_container.rename(container_name)
-					if config['is_running']:
-						debug_func(f"[ROLLBACK_STEP2_FORCE] Starting old container...")
-						old_container.start()
-					rollback_successful = True
-					debug_func(f"[ROLLBACK_STEP2_FORCE] ✅ Force restore successful")
-				except Exception as force_error:
-					error_func(f"[ROLLBACK_STEP2_FORCE] ❌ CRITICAL: Force restore also failed: {force_error}")
+				error_func(f"[ROLLBACK_STEP2] ❌ CRITICAL: Failed to restore original container: {rollback_error}")
 
 		except Exception as rollback_exception:
 			error_func(f"[ROLLBACK_EXCEPTION] ❌ Critical error during rollback: {rollback_exception}")

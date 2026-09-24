@@ -390,6 +390,7 @@ HOST_SCOPED_TEXTS = (
 	"project_stopped_success", "deleting_project", "project_deleted_success",
 	"deleting_service", "error_deleting_service", "stopping_service",
 	"starting_service", "error_stopping_service", "error_starting_service",
+	"restart_loop", "restart_loop_stable",
 )
 
 # What counts as saying it, in either shape: `host_label()` in front, or

@@ -78,6 +78,43 @@ def test_an_event_notification_names_its_host_at_the_end():
 		dcb.host_registry.reset()
 
 
+def test_a_container_in_an_update_batch_is_not_announced():
+	"""
+	An update batch reports its outcome in one summary, so the stop and start
+	of what it is recreating are held back. Only those: another container
+	going down meanwhile, or the same name on another host, still is.
+	"""
+	store.set("hosts", TWO_HOSTS)
+	dcb.host_registry.reset()
+	sent = []
+	original = dcb.send_message_to_notification_channel
+	dcb.send_message_to_notification_channel = lambda message="", **kw: sent.append(message)
+	events = [{"Type": "container", "Action": action, "Actor": {"Attributes": {"name": name}}}
+				for action, name in (("die", "plex"), ("start", "plex"), ("die", "sonarr"))]
+
+	class Stream:
+		def events(self, decode=True):
+			return iter(events)
+
+	original_client = dcb.host_registry.client
+	dcb.host_registry.client = lambda host_id: Stream()
+	dcb.hold_container_events("h_nas", ["plex"])
+	try:
+		dcb.DockerEventMonitor("h_nas").detectar_eventos_contenedores()
+		assert len(sent) == 1 and "sonarr" in sent[0], sent
+
+		sent.clear()
+		dcb.DockerEventMonitor("h_local").detectar_eventos_contenedores()
+		assert len(sent) == 3, "el mismo nombre en otro host se ha callado"
+	finally:
+		dcb.release_container_events("h_nas", ["plex"])
+		dcb._held_events.clear()
+		dcb.send_message_to_notification_channel = original
+		dcb.host_registry.client = original_client
+		store.set("hosts", ONE_HOST)
+		dcb.host_registry.reset()
+
+
 def test_the_supervisor_runs_one_monitor_per_host():
 	store.set("hosts", TWO_HOSTS)
 	started = []
@@ -232,3 +269,126 @@ def test_a_broken_host_does_not_stop_the_supervisor():
 	finally:
 		dcb.DockerEventMonitor.demonio_event = original
 		store.set("hosts", ONE_HOST)
+
+
+class _Clock:
+	"""A clock the test moves by hand, and timers that only fire when told."""
+
+	def __init__(self):
+		self.now = 1000.0
+		self.timers = []
+
+	def __call__(self):
+		return self.now
+
+	def schedule(self, delay, fn):
+		clock = self
+
+		class Timer:
+			cancelled = False
+
+			def cancel(self):
+				self.cancelled = True
+
+		timer = Timer()
+		timer.due, timer.fn = self.now + delay, fn
+		clock.timers.append(timer)
+		return timer
+
+	def advance(self, seconds):
+		self.now += seconds
+		for timer in [t for t in self.timers if not t.cancelled and t.due <= self.now]:
+			self.timers.remove(timer)
+			timer.fn()
+
+
+def _tracker():
+	clock = _Clock()
+	said = []
+	tracker = dcb.RestartLoopTracker(lambda key, name: said.append((key, name)),
+									clock=clock, schedule=clock.schedule)
+	return tracker, clock, said
+
+
+def _crash(tracker, clock, name="app", times=1, every=10):
+	"""A container going down and straight back up, `times` times."""
+	shown = []
+	for _ in range(times):
+		shown.append(tracker.should_announce("die", name))
+		clock.advance(1)
+		shown.append(tracker.should_announce("start", name))
+		clock.advance(every)
+	return shown
+
+
+def test_a_restart_loop_is_announced_once_instead_of_every_restart():
+	tracker, clock, said = _tracker()
+	shown = _crash(tracker, clock, times=10)
+	# The first two stops and starts are announced as usual; the third stop
+	# reveals the loop, and from there on nothing.
+	assert shown[:4] == [True, True, True, True], shown
+	assert not any(shown[4:]), shown
+	assert said == [("restart_loop", "app")], said
+
+
+def test_a_loop_that_stays_up_is_announced_as_stable():
+	tracker, clock, said = _tracker()
+	_crash(tracker, clock, times=4)
+	clock.advance(dcb.RestartLoopTracker.STABLE_SECONDS)
+	assert said == [("restart_loop", "app"), ("restart_loop_stable", "app")], said
+
+	# And it starts from scratch: a single stop afterwards is just a stop.
+	assert tracker.should_announce("die", "app") is True
+
+
+def test_a_loop_that_ends_stopped_says_it_stopped():
+	"""Stopped by hand or given up on by on-failure: no start follows, and the user must still hear it."""
+	tracker, clock, said = _tracker()
+	_crash(tracker, clock, times=4)
+	tracker.should_announce("die", "app")
+	clock.advance(dcb.RestartLoopTracker.GONE_SECONDS)
+	assert said == [("restart_loop", "app"), ("stopped_container", "app")], said
+
+
+def test_stops_spread_out_are_not_a_loop():
+	tracker, clock, said = _tracker()
+	shown = _crash(tracker, clock, times=5, every=dcb.RestartLoopTracker.WINDOW_SECONDS)
+	assert all(shown), shown
+	assert said == []
+
+
+def test_a_loop_is_about_one_container():
+	tracker, clock, said = _tracker()
+	_crash(tracker, clock, times=4)
+	assert tracker.should_announce("die", "other") is True
+	assert tracker.should_announce("start", "other") is True
+
+
+def test_the_monitor_sends_the_loop_messages_with_its_host():
+	store.set("hosts", TWO_HOSTS)
+	dcb.host_registry.reset()
+	sent = []
+	original = dcb.send_message_to_notification_channel
+	dcb.send_message_to_notification_channel = lambda message="", **kw: sent.append(message)
+	events = [{"Type": "container", "Action": action, "Actor": {"Attributes": {"name": "app"}}}
+				for _ in range(6) for action in ("die", "start")]
+
+	class Stream:
+		def events(self, decode=True):
+			return iter(events)
+
+	original_client = dcb.host_registry.client
+	dcb.host_registry.client = lambda host_id: Stream()
+	try:
+		monitor = dcb.DockerEventMonitor("h_nas")
+		monitor.detectar_eventos_contenedores()
+		loop = dcb.get_text("restart_loop", "app") + dcb.host_suffix("h_nas")
+		assert sent.count(loop) == 1, sent
+		assert len(sent) == 5, sent  # two stops, two starts, the loop
+	finally:
+		for timer in list(monitor.restart_loops._looping.values()):
+			timer.cancel()
+		dcb.send_message_to_notification_channel = original
+		dcb.host_registry.client = original_client
+		store.set("hosts", ONE_HOST)
+		dcb.host_registry.reset()

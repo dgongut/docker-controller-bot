@@ -1210,7 +1210,7 @@ def test_the_update_result_carries_its_host_and_the_failure_keeps_the_prefix():
 	this test is what says so out loud.
 	"""
 	import inspect
-	source = inspect.getsource(dcb.perform_container_update)
+	source = inspect.getsource(dcb._perform_container_update)
 	assert 'result == get_text("updated_container", container_name)' in source, source
 	assert "host_suffix(host_id)" in source, source
 	assert 'f"{label}{result}"' in source, "el fallo ya no lleva el prefijo"
@@ -2068,6 +2068,46 @@ def test_updateall_names_the_host_on_a_button_only_when_the_list_spans_hosts():
 		assert any("nas" in label for label in repainted), repainted
 	finally:
 		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
+def test_a_list_across_hosts_gets_one_column_and_one_host_keeps_the_setting():
+	"""
+	With the host on the button two to a row cuts the names off on a phone,
+	and a cut-off button does not say what it updates. One host has short
+	labels again, so the user's setting is respected there.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	previous = store.get("bot.button_columns")
+	store.set("bot.button_columns", 2)
+	try:
+		pairs = [[dcb.make_ref("h_local", "aaaaa"), "nginx"], [dcb.make_ref("h_nas", "bbbbb"), "plex"],
+					[dcb.make_ref("h_nas", "ccccc"), "sonarr"]]
+		rows = dcb.build_generic_keyboard(pairs, set(), None, "Update", "u", "ua").keyboard
+		assert [len(row) for row in rows[:-1]] == [1, 1, 1], rows
+
+		one_host = [[dcb.make_ref("h_local", c), n] for c, n in (("aaaaa", "nginx"), ("bbbbb", "plex"))]
+		rows = dcb.build_generic_keyboard(one_host, set(), None, "Update", "u", "ua").keyboard
+		assert [len(row) for row in rows[:-1]] == [2], rows
+	finally:
+		store.set("bot.button_columns", previous)
+		_restore_hosts()
+
+
+def test_confirming_a_selection_across_hosts_names_each_host():
+	"""The same name on two hosts is two different updates, and the confirmation has to show it."""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	sent = []
+	originals = (dcb.load_update_data, dcb.send_message)
+	local, nas = dcb.make_ref("h_local", "aaaaa"), dcb.make_ref("h_nas", "bbbbb")
+	dcb.load_update_data = lambda chat_id, message_id: ([[local, "nginx"], [nas, "nginx"]], [local, nas])
+	dcb.send_message = lambda message="", **kw: sent.append(message)
+	try:
+		dcb.confirm_update_selected(1, 2)
+		assert dcb.host_suffix("h_local") in sent[0], sent
+		assert dcb.host_suffix("h_nas") in sent[0], sent
+	finally:
+		dcb.load_update_data, dcb.send_message = originals
 		_restore_hosts()
 
 
@@ -3784,3 +3824,177 @@ def test_the_cron_examples_survive_in_every_language():
 			f"en vez de {expected}")
 		assert "<b>" not in text, (
 			f"{locale}: los asteriscos del cron se han vuelto <b> otra vez")
+
+
+def _batch_stubs(results, extended=False, own=()):
+	"""
+	Stands in for everything an update batch touches, and records it.
+
+	`results` maps a container name to whether its update succeeds; `own`
+	names the ones that count as the bot itself.
+	"""
+	calls, sent, edited, deleted = [], [], [], []
+
+	class Sent:
+		def __init__(self, n):
+			self.message_id = n
+			self.chat = type("Chat", (), {"id": 1})()
+
+	def perform(ref, name, tag=None, send_fn=None, hold_events=False):
+		calls.append((name, hold_events, send_fn is None))
+		return results.get(name, True), ""
+
+	def send(message=None, **kw):
+		sent.append(message)
+		return Sent(len(sent))
+
+	originals = {name: getattr(dcb, name) for name in (
+		"perform_container_update", "send_message", "edit_message_text",
+		"delete_message", "is_own_container")}
+	dcb.perform_container_update = perform
+	dcb.send_message = send
+	dcb.edit_message_text = lambda text, chat_id, message_id, **kw: edited.append(text)
+	dcb.delete_message = lambda message_id, chat_id=None: deleted.append(message_id)
+	dcb.is_own_container = lambda host_id=None, container_id=None, container_name=None: container_name in own
+	previous = store.get("bot.extended_messages")
+	store.set("bot.extended_messages", extended)
+
+	def restore():
+		for name, value in originals.items():
+			setattr(dcb, name, value)
+		store.set("bot.extended_messages", previous)
+
+	return calls, sent, edited, deleted, restore
+
+
+def _targets(*names):
+	return [(dcb.make_ref("h_local", f"id{n}"), n) for n in names]
+
+
+def test_an_update_batch_ends_in_one_summary_naming_what_failed():
+	"""
+	The complaint behind it: forty updates across ten hosts, each announcing
+	its progress, its result and three events. Without extended messages that
+	is now one progress message, edited as it goes, and one summary.
+	"""
+	calls, sent, edited, deleted, restore = _batch_stubs({"plex": False})
+	try:
+		dcb.update_containers(_targets("nginx", "plex", "sonarr"))
+		assert [c[0] for c in calls] == ["nginx", "plex", "sonarr"]
+		assert all(hold for _, hold, _ in calls), "los eventos no se retuvieron"
+		assert not any(default for _, _, default in calls), "se usó el send_fn de siempre"
+
+		# One progress message plus the summary, and the progress one is gone.
+		assert len(sent) == 2, sent
+		assert len(edited) == 2, edited
+		assert deleted == [1]
+		summary = sent[-1]
+		assert summary.startswith(i18n.get_text("updated_batch", 2, 3)), summary
+		assert i18n.get_text("updated_batch_failed") in summary, summary
+		assert "plex" in summary and "nginx" not in summary, summary
+	finally:
+		restore()
+
+
+def test_a_batch_where_everything_worked_says_nothing_failed():
+	calls, sent, edited, deleted, restore = _batch_stubs({})
+	try:
+		dcb.update_containers(_targets("nginx", "plex"))
+		assert sent[-1] == i18n.get_text("updated_batch", 2, 2), sent[-1]
+	finally:
+		restore()
+
+
+def test_extended_messages_keep_the_step_by_step_updates():
+	"""Whoever turned them on asked for every step, so the batch stays out of it."""
+	calls, sent, edited, deleted, restore = _batch_stubs({}, extended=True)
+	try:
+		dcb.update_containers(_targets("nginx", "plex"))
+		assert calls == [("nginx", False, True), ("plex", False, True)], calls
+		assert sent == [], "se mandó un resumen con los mensajes extendidos"
+	finally:
+		restore()
+
+
+def test_the_bot_updates_itself_last_and_outside_the_summary():
+	"""
+	Updating the bot recreates it. First in the batch, as the sort used to put
+	it, the rest would never run; inside the summary, the summary would never
+	arrive.
+	"""
+	calls, sent, edited, deleted, restore = _batch_stubs({}, own=("docker-controller-bot",))
+	try:
+		dcb.update_containers(_targets("docker-controller-bot", "nginx"))
+		assert calls == [("nginx", True, False), ("docker-controller-bot", False, True)], calls
+		assert sent[-1] == i18n.get_text("updated_batch", 1, 1), sent
+	finally:
+		restore()
+
+
+def test_an_update_holds_its_events_only_while_it_runs():
+	"""
+	The event monitor reads the hold on another thread, so what matters is
+	that it is in place during the update and released afterwards — with the
+	grace that lets a late "started" still be swallowed.
+	"""
+	seen = []
+
+	class Owner:
+		host_id = "h_local"
+		# Not found, so there is no Compose project to restart dependents of.
+		client = MagicMock()
+		client.containers.get.side_effect = Exception("gone")
+
+		def update(self, **kw):
+			seen.append((dcb.container_events_held("h_local", "nginx"),
+						dcb.container_events_held("h_local", "nginx_old")))
+			return i18n.get_text("updated_container", "nginx")
+
+	original_manager = dcb.manager
+	dcb.manager = lambda host_id=None: Owner()
+	grace = dcb.HELD_EVENTS_GRACE_SECONDS
+	try:
+		ref = dcb.make_ref("h_local", "abcde")
+		ok, _ = dcb.perform_container_update(ref, "nginx", send_fn=lambda msg: None, hold_events=True)
+		assert ok
+		assert seen == [(True, True)], seen
+		assert dcb.container_events_held("h_local", "nginx"), "la gracia no se aplicó"
+
+		dcb.HELD_EVENTS_GRACE_SECONDS = 0
+		dcb.release_container_events("h_local", ["nginx", "nginx_old"])
+		assert not dcb.container_events_held("h_local", "nginx")
+		assert not dcb.container_events_held("h_local", "nginx_old")
+
+		# Without the flag nothing is held at all.
+		seen.clear()
+		dcb.perform_container_update(ref, "nginx", send_fn=lambda msg: None)
+		assert seen == [(False, False)], seen
+	finally:
+		dcb.manager = original_manager
+		dcb.HELD_EVENTS_GRACE_SECONDS = grace
+
+
+def test_the_batch_progress_puts_host_and_container_on_their_own_lines():
+	"""With one host the machine line is left out, as everywhere else."""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	try:
+		lines = dcb._batch_progress_text(1, 13, "h_nas", "plex").split("\n")
+		assert lines == [i18n.get_text("updating_batch", 1, 13), "🖥️ <b>nas</b>", "🔄 <b>plex</b>"], lines
+	finally:
+		_restore_hosts()
+	lines = dcb._batch_progress_text(1, 13, "h_local", "plex").split("\n")
+	assert lines == [i18n.get_text("updating_batch", 1, 13), "🔄 <b>plex</b>"], lines
+
+
+def test_a_selection_is_confirmed_and_updated_in_the_order_of_the_list():
+	"""
+	The selection is a set and has no order, the list is grouped by host. Going
+	by the set sent the confirmation — and the updates — back and forth
+	between machines.
+	"""
+	pairs = [[dcb.make_ref("h_local", c), n] for c, n in
+				(("aaaaa", "jellyfin"), ("bbbbb", "plex"), ("ccccc", "sonarr"))]
+	pairs += [[dcb.make_ref("h_nas", c), n] for c, n in (("ddddd", "nextcloud"), ("eeeee", "plex"))]
+	selected = {ref for ref, _ in pairs}
+	assert dcb.selected_in_order(pairs, selected) == [ref for ref, _ in pairs]
+	assert dcb.selected_in_order(pairs, {pairs[3][0], pairs[0][0]}) == [pairs[0][0], pairs[3][0]]

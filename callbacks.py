@@ -125,11 +125,12 @@ def cb_updateAll(ctx):
 	Host by host in sequence, because updating pulls images and doing several
 	machines at once would fight over the same network.
 	"""
+	targets = []
 	for entry, owner, containers in core.hosts_with_containers():
-		for container in core.sort_containers_by_priority(containers):
+		for container in core.sort_containers_by_priority(containers, entry["id"]):
 			if core.update_available(container, entry["id"]):
-				core.perform_container_update(
-					core.container_ref(entry["id"], container), container.name)
+				targets.append((core.container_ref(entry["id"], container), container.name))
+	core.update_containers(targets)
 
 @callback(
 	name='confirmDelete',
@@ -298,7 +299,8 @@ def cb_confirmUpdateSelected(ctx):
 )
 def cb_updateSelected(ctx):
 	containers, selected = core.load_update_data(ctx.chatId, ctx.originalMessageId)
-	for ref in selected:
+	targets = []
+	for ref in core.selected_in_order(containers, selected):
 		# Each selection carries its own host: an /updateall list can span
 		# machines, so they cannot all be looked up on the local one.
 		owner, container = core.find_container(ref)
@@ -308,7 +310,8 @@ def cb_updateSelected(ctx):
 			core.debug(f"Container {ref} not found")
 			continue
 		if core.update_available(container, owner.host_id):
-			core.perform_container_update(core.container_ref(owner.host_id, container), container.name)
+			targets.append((core.container_ref(owner.host_id, container), container.name))
+	core.update_containers(targets)
 	core.clear_update_data(ctx.chatId, ctx.originalMessageId)
 
 @callback(

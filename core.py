@@ -35,7 +35,7 @@ from i18n import get_text, language
 from logger import debug, error, warning
 from message_queue import MessageQueue
 
-VERSION = "5.0.0_RC3a"
+VERSION = "5.0.0_RC4"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -1055,6 +1055,142 @@ def host_suffix(host_id):
 	return get_text("on_host", host_alias(host_id))
 
 
+# Containers whose start/stop events are not announced, because an update
+# batch is recreating them and will report the outcome in one summary. Keyed by
+# (host_id, name); the value is when the hold expires, or None while the update
+# is still running.
+#
+# The expiry exists because the event stream lags behind the API calls: the
+# last "started" of a container can arrive a moment after its update returned,
+# and releasing the name right then would let exactly that one through.
+_held_events = {}
+_held_events_lock = threading.Lock()
+HELD_EVENTS_GRACE_SECONDS = 30
+
+
+def hold_container_events(host_id, names):
+	"""Stops announcing these containers' events until they are released."""
+	with _held_events_lock:
+		for name in names:
+			_held_events[(host_id, name)] = None
+
+
+def release_container_events(host_id, names):
+	"""Lets these containers' events through again, after a grace period."""
+	expiry = time.time() + HELD_EVENTS_GRACE_SECONDS
+	with _held_events_lock:
+		for name in names:
+			if (host_id, name) in _held_events:
+				_held_events[(host_id, name)] = expiry
+
+
+def container_events_held(host_id, name):
+	"""Whether an event for this container is part of an update batch."""
+	with _held_events_lock:
+		key = (host_id, name)
+		if key not in _held_events:
+			return False
+		expiry = _held_events[key]
+		if expiry is not None and expiry <= time.time():
+			del _held_events[key]
+			return False
+		return True
+
+
+class RestartLoopTracker:
+	"""
+	Turns a container stuck restarting into two messages instead of endless.
+
+	A container with `restart: always` and an image that dies on start goes
+	down and up again forever, and each of those is an event the monitor would
+	announce. So after THRESHOLD stops within WINDOW_SECONDS it says once that
+	the container is in a restart loop, and keeps quiet about it from then on.
+
+	The loop ends one of two ways. The container stays up for STABLE_SECONDS,
+	and that is announced as it stabilising. Or it stops and does not come
+	back: Docker never waits more than a minute between restarts, so no start
+	within GONE_SECONDS of a stop means the loop is over with it down — the
+	user stopped it, or an `on-failure:N` gave up — and that is announced as
+	the plain stop it is.
+
+	One per host, like the monitor that owns it: names are only unique within
+	a daemon.
+	"""
+
+	THRESHOLD = 3
+	WINDOW_SECONDS = 300
+	STABLE_SECONDS = 300
+	GONE_SECONDS = 120
+
+	def __init__(self, notify, clock=time.time, schedule=None):
+		# notify(key, name) announces one of the tracker's own messages.
+		self._notify = notify
+		self._clock = clock
+		self._schedule = schedule or self._start_timer
+		self._lock = threading.Lock()
+		self._stops = {}    # name -> recent stop times, oldest first
+		self._looping = {}  # name -> the timer waiting on it
+
+	@staticmethod
+	def _start_timer(delay, fn):
+		timer = threading.Timer(delay, fn)
+		timer.daemon = True
+		timer.start()
+		return timer
+
+	def should_announce(self, action, name):
+		"""
+		Whether a start or stop event is announced as usual.
+
+		False for the ones a restart loop is standing in for, including the
+		stop that reveals the loop: that one is announced as the loop itself.
+		"""
+		with self._lock:
+			now = self._clock()
+			if action == "die":
+				stops = [t for t in self._stops.get(name, []) if t > now - self.WINDOW_SECONDS]
+				stops.append(now)
+				self._stops[name] = stops
+				if name in self._looping:
+					self._wait(name, self.GONE_SECONDS, self._gone)
+					return False
+				if len(stops) < self.THRESHOLD:
+					return True
+				self._wait(name, self.GONE_SECONDS, self._gone)
+			elif action == "start" and name in self._looping:
+				self._wait(name, self.STABLE_SECONDS, self._stable)
+				return False
+			else:
+				return True
+		self._notify("restart_loop", name)
+		return False
+
+	def _wait(self, name, delay, then):
+		"""Replaces whatever the loop was waiting on. Called with the lock held."""
+		previous = self._looping.get(name)
+		if previous is not None:
+			previous.cancel()
+		timer = None
+
+		def fire():
+			with self._lock:
+				# A later event may have replaced this wait after it fired.
+				if self._looping.get(name) is not timer:
+					return
+				del self._looping[name]
+				self._stops.pop(name, None)
+			then(name)
+
+		timer = self._schedule(delay, fire)
+		self._looping[name] = timer
+
+	def _stable(self, name):
+		self._notify("restart_loop_stable", name)
+
+	def _gone(self, name):
+		self._notify("stopped_container", name)
+
+
 class DockerEventMonitor:
 	"""
 	Watches one host's event stream and reports containers starting and
@@ -1072,6 +1208,8 @@ class DockerEventMonitor:
 	def __init__(self, host_id):
 		self.host_id = host_id
 		self._stop = threading.Event()
+		self.restart_loops = RestartLoopTracker(
+			lambda key, name: self._announce(get_text(key, name)))
 
 	@property
 	def alias(self):
@@ -1112,20 +1250,37 @@ class DockerEventMonitor:
 			elif action == "create" and store.get("bot.extended_messages"):
 				message = get_text("created_container", container_name)
 
-			if message:
-				# Las tres claves de arriba son una frase sola, así que el host
-				# va al final. Y este es el sitio por donde llega la mayoría de
-				# estos avisos, que es lo que se queda en el chat.
-				message = f"{message}{host_suffix(self.host_id)}"
-				try:
-					if is_muted():
-						debug(f"Message [{message}] omitted because muted")
-						continue
+			if message and container_events_held(self.host_id, container_name):
+				debug(f"Message [{message}] omitted because an update batch will summarise it")
+				continue
 
-					send_message_to_notification_channel(message=message)
-				except Exception as e:
-					error(f"Could not send notification [{message}]. Error: [{e}]")
-					time.sleep(20) # Possible Telegram saturation causing send_message to raise an exception
+			if message and action in ("start", "die") and not self.restart_loops.should_announce(action, container_name):
+				debug(f"Message [{message}] omitted because {container_name} is in a restart loop")
+				continue
+
+			if message and not self._announce(message):
+				time.sleep(20) # Possible Telegram saturation causing send_message to raise an exception
+
+	def _announce(self, message):
+		"""
+		Sends one of this host's container notifications. False when it failed.
+
+		Every key that reaches here is a single statement, so the host goes at
+		the end. And this is where most of these arrive from, which is what
+		stays in the chat.
+		"""
+		if self._stop.is_set():
+			return True
+		message = f"{message}{host_suffix(self.host_id)}"
+		try:
+			if is_muted():
+				debug(f"Message [{message}] omitted because muted")
+				return True
+			send_message_to_notification_channel(message=message)
+			return True
+		except Exception as e:
+			error(f"Could not send notification [{message}]. Error: [{e}]")
+			return False
 
 	def _event_loop_with_retry(self):
 		"""
@@ -3591,7 +3746,7 @@ def _compute_namespace_overrides(dep_container, old_parent_id, new_parent_id):
 	return overrides
 
 
-def restart_dependents_after_update(project_name, updated_service_name, new_parent_container=None, old_parent_id=None, send_fn=None, host_id=None):
+def restart_dependents_after_update(project_name, updated_service_name, new_parent_container=None, old_parent_id=None, send_fn=None, host_id=None, hold_events=False):
 	"""
 	Restarts only the services that depend (directly or transitively) on the
 	updated service. Services unrelated to the updated one are left untouched.
@@ -3621,6 +3776,9 @@ def restart_dependents_after_update(project_name, updated_service_name, new_pare
 			Optional; when None, namespace recreation is skipped.
 		send_fn: Function used to send user-facing messages. Receives the message
 			text as its only argument. If None, defaults to send_message (admin chat).
+		hold_events: When True, the dependents' start/stop events are not
+			announced either — an update batch reports everything in one
+			summary, and they would be most of the noise it is avoiding.
 	"""
 	if send_fn is None:
 		send_fn = lambda msg: send_message(message=msg)
@@ -3643,6 +3801,21 @@ def restart_dependents_after_update(project_name, updated_service_name, new_pare
 		debug(f"No dependents found for service {updated_service_name}, nothing to restart")
 		return
 
+	if not hold_events:
+		_restart_dependents(owner, dependents, updated_service_name, new_parent_container, old_parent_id, send_fn)
+		return
+	# The ones recreated for sharing the parent's namespace go through the
+	# same rename to _old as an update does.
+	names = [c.name for c in dependents] + [f"{c.name}_old" for c in dependents]
+	hold_container_events(owner.host_id, names)
+	try:
+		_restart_dependents(owner, dependents, updated_service_name, new_parent_container, old_parent_id, send_fn)
+	finally:
+		release_container_events(owner.host_id, names)
+
+
+def _restart_dependents(owner, dependents, updated_service_name, new_parent_container, old_parent_id, send_fn):
+	"""The body of restart_dependents_after_update, once the dependents are known."""
 	dependent_count = len(dependents)
 
 	# Prefer the parent's container name (what shows up in `docker ps`) over
@@ -3742,7 +3915,7 @@ def restart_dependents_after_update(project_name, updated_service_name, new_pare
 	send_fn(get_text("dependent_services_restarted_success", parent_display_name, dependent_count))
 
 
-def perform_container_update(container_id, container_name, tag=None, send_fn=None):
+def perform_container_update(container_id, container_name, tag=None, send_fn=None, hold_events=False):
 	"""
 	Single entry point for container updates. Wraps the full flow:
 	  1. Capture Compose project/service info BEFORE the update (container is recreated).
@@ -3762,6 +3935,12 @@ def perform_container_update(container_id, container_name, tag=None, send_fn=Non
 		send_fn: Function used to send user-facing messages. Receives the message
 			text and returns the sent telegram Message (or None to suppress).
 			If None, defaults to send_message (admin chat).
+		hold_events: When True, the start/stop events of this container and
+			its dependents are not announced: an update batch reports the
+			outcome in one summary instead.
+
+	Returns:
+		(ok, result): whether the update succeeded, and the message saying so.
 	"""
 	if send_fn is None:
 		send_fn = lambda msg: send_message(message=msg)
@@ -3783,6 +3962,23 @@ def perform_container_update(container_id, container_name, tag=None, send_fn=Non
 	except Exception as e:
 		debug(f"Could not pre-fetch Compose info for {container_name}: {e}")
 
+	if not hold_events:
+		return _perform_container_update(owner, host_id, container_id, container_name, tag, send_fn,
+										project_name, updated_service_name, old_parent_id, False)
+	# The old container is renamed before the new one exists, and a rollback
+	# can start it again under that name, so both are held.
+	names = [container_name, f"{container_name}_old"]
+	hold_container_events(host_id, names)
+	try:
+		return _perform_container_update(owner, host_id, container_id, container_name, tag, send_fn,
+										project_name, updated_service_name, old_parent_id, True)
+	finally:
+		release_container_events(host_id, names)
+
+
+def _perform_container_update(owner, host_id, container_id, container_name, tag, send_fn,
+							project_name, updated_service_name, old_parent_id, hold_events):
+	"""The body of perform_container_update, once the Compose info is captured."""
 	# Send the initial "updating" progress message
 	# Both the progress line and the result say which machine, the same as the
 	# start/stop notifications do. Without it an update report on a multi-host
@@ -3802,7 +3998,8 @@ def perform_container_update(container_id, container_name, tag=None, send_fn=Non
 	# acaba en otra frase ("consulta los logs...") lo lleva delante, porque
 	# una cláusula pegada después de eso queda mal. La comparación es contra
 	# el mismo get_text que produce el éxito, así que no se desincroniza.
-	if result == get_text("updated_container", container_name):
+	ok = result == get_text("updated_container", container_name)
+	if ok:
 		send_fn(f"{result}{host_suffix(host_id)}")
 	else:
 		send_fn(f"{label}{result}")
@@ -3824,7 +4021,80 @@ def perform_container_update(container_id, container_name, tag=None, send_fn=Non
 			old_parent_id=old_parent_id,
 			send_fn=send_fn,
 			host_id=host_id,
+			hold_events=hold_events,
 		)
+	return ok, result
+
+
+def update_containers(targets):
+	"""
+	Updates several containers, as (reference, name) pairs, in the order given.
+
+	With extended messages every step is reported as it happens, the same as
+	updating one by one. Without them — the default — a batch across several
+	hosts used to bury the chat: each update announces its progress and result,
+	and the event monitor adds a "stopped", "created" and "started" of its own.
+	So the batch keeps one progress message, holds those events back, and ends
+	in a single summary naming what failed.
+
+	The bot's own container always goes last, and on its own with its usual
+	messages: updating it recreates the bot, which would cut the batch short
+	and leave the summary unsent.
+	"""
+	own = [t for t in targets if is_own_container(ref_host(t[0]), ref_id(t[0]), t[1])]
+	others = [t for t in targets if t not in own]
+
+	if store.get("bot.extended_messages"):
+		for ref, name in others:
+			perform_container_update(ref, name)
+	elif others:
+		_update_containers_quietly(others)
+
+	for ref, name in own:
+		perform_container_update(ref, name)
+
+
+def _batch_progress_text(index, total, host_id, name):
+	"""
+	The progress message of an update batch: where it is, on which machine,
+	and what. One line each, so the machine does not have to be read off the
+	front of the name — and with a single host that line is simply not there.
+	"""
+	lines = [get_text("updating_batch", index, total)]
+	if not host_registry.is_single_host():
+		lines.append(f"🖥️ <b>{host_alias(host_id)}</b>")
+	lines.append(f"🔄 <b>{html.escape(name)}</b>")
+	return "\n".join(lines)
+
+
+def _update_containers_quietly(targets):
+	"""The summarised form of update_containers."""
+	total = len(targets)
+	failed = []
+	progress = None
+	for index, (ref, name) in enumerate(targets, start=1):
+		host_id = ref_host(ref)
+		text = _batch_progress_text(index, total, host_id, name)
+		if progress:
+			edit_message_text(text, progress.chat.id, progress.message_id)
+		else:
+			progress = send_message(message=text)
+		try:
+			ok, _ = perform_container_update(ref, name, send_fn=lambda msg: None, hold_events=True)
+		except Exception as e:
+			error(f"Could not update container {name}. Error: [{e}]")
+			ok = False
+		if not ok:
+			failed.append(f"<b>{name}</b>{host_suffix(host_id)}")
+
+	# Deleted and sent anew rather than edited into the summary: an edit makes
+	# no sound, and the summary is the one message of the batch worth hearing.
+	if progress:
+		delete_message(progress.message_id, progress.chat.id)
+	summary = get_text("updated_batch", total - len(failed), total)
+	if failed:
+		summary += get_text("updated_batch_failed") + "".join(f"\n· {line}" for line in failed)
+	send_message(message=summary)
 
 def run_compose_project(project_name, host_id=None):
 	"""Starts a complete Docker Compose project respecting dependency order."""
@@ -4523,8 +4793,10 @@ def confirm_update_selected(chatId, messageId):
 			confirm_update(container_id, container_name)
 			return
 	containersToUpdate = ""
-	for cid in selected:
-		containersToUpdate += f"· <b>{id_to_name.get(cid, cid)}</b>\n"
+	for cid in selected_in_order(containers, selected):
+		# The list can span hosts, and the same name on two of them is two
+		# different updates: the confirmation has to say which is which.
+		containersToUpdate += f"· <b>{id_to_name.get(cid, cid)}</b>{host_suffix(ref_host(cid))}\n"
 	markup = create_confirm_cancel_keyboard(f"updateSelected|{messageId}", "button_confirm_update")
 	send_message(message=get_text("confirm_update_all", containersToUpdate), reply_markup=markup)
 
@@ -4540,13 +4812,17 @@ def build_generic_keyboard(container_available, selected_containers, originalMes
 	# about in its own text. With a single host the level does not exist.
 	spans_hosts = len({ref_host(cid) for cid, _cname in container_available}) > 1
 
-	markup = InlineKeyboardMarkup(row_width=button_columns())
+	# With the host on it a button no longer fits two to a row on a phone, and
+	# a cut-off "nas · homea…" does not say what it would update. So a list
+	# across hosts gets one column, whatever the setting says; with one host
+	# the names are short again and the setting applies.
+	markup = InlineKeyboardMarkup(row_width=1 if spans_hosts else button_columns())
 	botones = []
 	for cid, cname in container_available:
 		icono = ICON_CONTAINER_MARKED_FOR_UPDATE if cid in selected_containers else ICON_CONTAINER_MARK_FOR_UPDATE
 		# A button caption is plain text, so the alias goes in unescaped: the
 		# bold markup host_label() uses would show as literal tags here.
-		etiqueta = f"{host_registry.alias(ref_host(cid))}  ·  {cname}" if spans_hosts else cname
+		etiqueta = f"{host_registry.alias(ref_host(cid))} · {cname}" if spans_hosts else cname
 		botones.append(
 			InlineKeyboardButton(f"{icono} {etiqueta}", callback_data=f"toggle{action_type}|{cid}")
 		)
@@ -4562,7 +4838,9 @@ def build_generic_keyboard(container_available, selected_containers, originalMes
 
 	fixed_buttons.append(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 
-	markup.add(*fixed_buttons)
+	# Always side by side, one row: with a single column add() would stack
+	# them, and the last row is where the fixed buttons are expected to be.
+	markup.row(*fixed_buttons)
 	return markup
 
 def count_actionable_buttons(markup):
@@ -6481,6 +6759,16 @@ def load_update_data(chat_id, message_id):
 	if containers and not all(isinstance(e, (list, tuple)) and len(e) >= 2 for e in containers):
 		return [], set()
 	return containers, selected
+
+def selected_in_order(containers, selected):
+	"""
+	The selected references, in the order the list shows them.
+
+	The selection is a set, so it has no order of its own. The list does —
+	host by host, the way it was gathered — and both the confirmation and the
+	updates themselves follow it, so neither jumps between machines.
+	"""
+	return [cid for cid, _cname in containers if cid in selected]
 
 def clear_update_data(chat_id, message_id):
 	delete_cache_item(f"update_data_{chat_id}_{message_id}")
