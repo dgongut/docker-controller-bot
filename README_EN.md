@@ -197,6 +197,7 @@ Only what the bot needs **before** it can read its own settings is left here: ho
 |TELEGRAM_GROUP |❌| Group ChatId. If this bot is going to be in a group, you need to specify the chatId of that group. The bot needs to be admin of that group |
 |TELEGRAM_THREAD |❌| Thread id inside of a supergroup; it's a numeric value (2,3,4..). Default is 1. To be used with TELEGRAM_GROUP |
 |TZ |✅| Timezone (Example: Europe/Madrid) |
+|TELEMETRY |❌| `false` to turn anonymous statistics off without going through `/settings`. The usual way is `/settings`; this is for whoever prefers to pin it in the compose file |
 
 Everything else is configured from the bot itself and stored in `settings.json`, inside the mapped volume:
 
@@ -211,6 +212,7 @@ Everything else is configured from the bot itself and stored in `settings.json`,
 |Stopped containers| Whether stopped containers are checked for updates too. Enabled by default |
 |Notification channel| Channel where container status changes are exclusively published (start, stop, creation and automatic updates). Management still happens in the private chat with the bot or in TELEGRAM_GROUP. The bot verifies it can post there before saving it |
 |Docker hosts| The machines the bot manages. Added, tested, renamed and removed from here. See the remote hosts dropdown |
+|Anonymous statistics| Once a day it sends anonymous usage figures. Enabled by default. See the statistics dropdown |
 
 Changes made from `/settings` apply immediately, without restarting the container. If you prefer to edit `settings.json` by hand, a restart is needed for it to be read.
 
@@ -455,6 +457,21 @@ In my case I couldn't get SSH working reliably on Synology, so I went with the *
 - Adding the label `DCB-Auto-Update` to a container, it will update automatically without asking.
 
 See the full example in the FAQ: *"I've seen that you can add labels…"*.
+
+</details>
+
+<details>
+<summary>📊 Anonymous statistics</summary>
+
+Since 5.0.0 the bot sends a few anonymous figures once a day, to know how many people use it, on how many hosts and which features are used most. That way I know where to put the effort. The statistics are public: [stats.dgongut.com/docker-controller-bot](https://stats.dgongut.com/docker-controller-bot).
+
+**What is sent:** how many hosts and containers there are (containers in ranges), which settings are on, the bot and Docker versions, the architecture, and how many times a day each command and button was used. The complete list, field by field, is on [the privacy page](https://stats.dgongut.com/docker-controller-bot/privacy). The server discards anything that is not on it.
+
+**What is never sent:** container, image, host or project names, addresses, Telegram IDs, paths or anything you type. Your IP is not stored.
+
+**How to turn it off:** from `/settings` → *Anonymous statistics*, or with the *Turn off* button on the notice shown on the first start. Turning them off also deletes the installation's identifier.
+
+Nothing is sent until the notice has been shown and the bot has been running for at least 10 minutes. Nor is anything sent when the configuration is not on a volume, because without one every time the container was recreated it would count as a new installation.
 
 </details>
 
@@ -731,6 +748,7 @@ docker-controller-bot/
     ├── port_manager.py
     ├── schedule_manager.py
     ├── message_queue.py
+    ├── telemetry.py               # anonymous statistics (copy from dgongut/telemetry)
     ├── logger.py
     ├── tests
     │   ├── run_all.py

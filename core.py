@@ -15,6 +15,7 @@ import time
 import uuid
 import migration
 import store
+import telemetry
 from config import *
 from croniter import croniter
 from datetime import datetime, timedelta
@@ -35,7 +36,7 @@ from i18n import get_text, language
 from logger import debug, error, warning
 from message_queue import MessageQueue
 
-VERSION = "5.0.0_RC4"
+VERSION = "5.0.0_RC5"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -1424,6 +1425,7 @@ class DockerUpdateMonitor:
 		Kept out of the loop so a pass can be run on its own in a test: all the
 		loop adds is the waiting, and the waiting is measured in hours.
 		"""
+		count_usage("auto_update_check")
 		# Every reachable host, in the order they are configured. One being
 		# down degrades its own check and nothing else.
 		all_updates = []  # list of [reference, name] pairs, across every host
@@ -1506,6 +1508,7 @@ class DockerUpdateMonitor:
 						if store.get("bot.extended_messages") and not is_muted():
 							send_message_to_notification_channel(message=f'{host_label(host_id)}{get_text("auto_update", container.name)}')
 						debug(f"Auto-updating container {container.name}")
+						count_usage("auto_label_update")
 						# Build a send_fn that routes to the notification channel,
 						# or silently swallows messages (with a debug trace) when muted.
 						if is_muted():
@@ -1645,6 +1648,9 @@ class DockerScheduleMonitor:
 				debug(f"Schedule {schedule_name or action} skipped: host "
 					f"{host_registry.alias(schedule_host)} is paused")
 				return True
+
+			if action in SCHEDULE_ACTIONS:
+				count_usage(f"sched_{action}")
 
 			# Helper function to handle errors consistently
 			def handle_error(error_msg):
@@ -2582,6 +2588,7 @@ SETTINGS_TOGGLES = {
 	"check_update_stopped_containers": "button_settings_check_stopped",
 	"extended_messages": "button_settings_extended_messages",
 	"multi_selection": "button_settings_multi_selection",
+	"telemetry": "button_settings_telemetry",
 }
 
 # Which screen each toggle belongs to, so pressing one repaints the screen it
@@ -2591,7 +2598,223 @@ SETTINGS_TOGGLE_SCREEN = {
 	"multi_selection": "main",
 	"check_updates": "updates",
 	"check_update_stopped_containers": "updates",
+	"telemetry": "telemetry",
 }
+
+# --- ESTADÍSTICAS ANÓNIMAS ---------------------------------------------------
+#
+# Once a day, a snapshot of the settings and how many times each command and
+# button was used, sent to telemetry.dgongut.com. Numbers, yes/no and values
+# from closed lists only: never a name, an id or an address. What may be sent
+# is declared in the manifest of the telemetry repo, which also drops anything
+# that is not declared, and is listed on the project's privacy page.
+#
+# Nothing is counted or sent unless all three hold:
+#
+#	allowed    the storage is a volume, and TELEMETRY=0 is not set
+#	on         the setting, flipped from /settings or from the notice
+#	announced  the notice has been shown once
+#
+# Without a volume there is nothing to announce to: the install id would be
+# new on every recreate, so one installation would count as many, and turning
+# it off would not survive the next update any more than the notice would.
+
+TELEMETRY_PROJECT = "docker-controller-bot"
+# Shown instead of the whole list when the preview would not fit a message.
+TELEMETRY_PREVIEW_USAGE_KEYS = 25
+
+def telemetry_forced_off():
+	"""
+	Why telemetry is off whatever the setting says, or None when it is not.
+
+	Returns the variable that turned it off, or "volume" when the storage
+	would not survive a recreate.
+	"""
+	if telemetry.disabled_by_environment():
+		return "TELEMETRY"
+	if not store.is_persistent():
+		return "volume"
+	return None
+
+def telemetry_on():
+	"""Whether the setting is on and nothing overrides it."""
+	return telemetry_forced_off() is None and bool(store.get("bot.telemetry"))
+
+def telemetry_notice_pending():
+	"""Whether the notice still has to be shown before anything is sent."""
+	return telemetry_on() and not store.state_get("telemetry_notice_shown")
+
+def telemetry_active():
+	"""Whether usage is being counted and sent right now."""
+	return telemetry_on() and bool(store.state_get("telemetry_notice_shown"))
+
+def _containers_bucket(count):
+	"""A container count as the range the manifest declares, never the number."""
+	for limit, label in ((0, "0"), (5, "1-5"), (10, "6-10"), (25, "11-25"), (50, "26-50"), (100, "51-100")):
+		if count <= limit:
+			return label
+	return "101+"
+
+def collect_telemetry_metrics():
+	"""
+	The snapshot sent with each ping, on the telemetry thread.
+
+	Every key here has to be declared in the manifest, or the server drops it.
+	Counting containers is the slow part and the one that can fail: a host
+	that does not answer is simply left out, and without any host the key is
+	left out rather than sent as zero.
+	"""
+	configured = host_registry.hosts(include_paused=True)
+	schemes = [str(entry.get("url", "")).split("://", 1)[0].lower() for entry in configured]
+	try:
+		interval = float(store.get("bot.check_update_every_hours"))
+	except (TypeError, ValueError):
+		interval = None
+	metrics = {
+		"hosts": len(configured),
+		"hosts_paused": sum(1 for entry in configured if entry.get("paused")),
+		"hosts_ssh": schemes.count("ssh"),
+		"hosts_tcp": schemes.count("tcp"),
+		"schedules": sum(1 for schedule in schedule_manager.get_all_schedules() if schedule.get("enabled", True)),
+		"admins": len([admin for admin in str(TELEGRAM_ADMIN).split(",") if admin.strip()]),
+		# The environment and not the global: that one falls back to the admin
+		# when there is no group, which would make everyone look like a group.
+		"telegram_group": bool(os.environ.get("TELEGRAM_GROUP")),
+		"language": language(),
+		"button_columns": button_columns(),
+		"check_updates": bool(store.get("bot.check_updates")),
+		"check_update_stopped_containers": bool(store.get("bot.check_update_stopped_containers")),
+		"extended_messages": bool(store.get("bot.extended_messages")),
+		"multi_selection": bool(store.get("bot.multi_selection")),
+		"notification_channel": notification_channel() is not None,
+		"legacy_volume": store.uses_legacy_root(),
+	}
+	if interval is not None:
+		metrics["check_update_every_hours"] = interval
+
+	try:
+		listed = hosts_with_containers()
+		if listed:
+			total = auto_update = ignore_updates = 0
+			for _entry, _owner, containers in listed:
+				for container in containers:
+					labels = container.labels or {}
+					total += 1
+					auto_update += LABEL_AUTO_UPDATE in labels
+					ignore_updates += LABEL_IGNORE_CHECK_UPDATES in labels
+			metrics["containers"] = _containers_bucket(total)
+			metrics["containers_auto_update"] = auto_update
+			metrics["containers_ignore_updates"] = ignore_updates
+	except Exception as e:
+		debug(f"Telemetry could not count containers: {e}")
+
+	try:
+		docker_version = str(host_registry.client(host_registry.local_host_id()).version().get("Version", ""))
+		metrics["docker_major"] = int(docker_version.split(".", 1)[0])
+	except Exception as e:
+		debug(f"Telemetry could not read the Docker version: {e}")
+	return metrics
+
+telemetry_client = telemetry.Telemetry(
+	project=TELEMETRY_PROJECT,
+	version=VERSION,
+	state_path=os.path.join(store.state_dir(), "telemetry.json"),
+	metrics=collect_telemetry_metrics,
+	enabled=telemetry_active,
+	endpoint=TELEMETRY_ENDPOINT,
+	log=debug,
+	debug=TELEMETRY_DEBUG,
+)
+if TELEMETRY_DEBUG:
+	warning(f"TELEMETRY_DEBUG is on: statistics go to {TELEMETRY_ENDPOINT} a minute after every start")
+
+def count_usage(key):
+	"""Counts one use of `key` for today's ping. Never raises into the caller."""
+	try:
+		telemetry_client.count(key)
+	except Exception as e:
+		debug(f"Telemetry could not count {key}: {e}")
+
+def disable_telemetry():
+	"""
+	Turns telemetry off and forgets this installation.
+
+	The id goes with it, so turning it back on later starts as a new
+	installation rather than stitching the two periods together.
+	"""
+	store.set("bot.telemetry", False)
+	telemetry_client.forget()
+
+def telemetry_notice_text():
+	return get_text("telemetry_notice")
+
+def build_telemetry_notice_markup():
+	"""
+	Accept on a row of its own, above the other two.
+
+	Accepting is what most people will do, and it is the only one of the
+	three that just closes the question: the other two lead somewhere.
+	"""
+	markup = InlineKeyboardMarkup()
+	markup.row(InlineKeyboardButton(get_text("button_telemetry_accept"), callback_data="telemetryAccept"))
+	markup.row(
+		InlineKeyboardButton(get_text("button_telemetry_show"), callback_data="telemetryShow"),
+		InlineKeyboardButton(get_text("button_telemetry_disable"), callback_data="telemetryDisable"))
+	return markup
+
+def send_telemetry_notice_if_pending():
+	"""
+	Sends the notice as a message of its own, if it has not been shown yet.
+
+	For a new install, which is asked for its language first: the notice
+	waits for that answer so it is not the one message in the wrong language.
+	"""
+	if not telemetry_notice_pending():
+		return
+	if send_message(message=telemetry_notice_text(), reply_markup=build_telemetry_notice_markup()):
+		store.state_set("telemetry_notice_shown", True)
+
+def build_telemetry_preview():
+	"""
+	Exactly what the next ping would carry, as a message.
+
+	The usage counters are cut to the most used ones when the whole list
+	would not fit in a Telegram message, and the message says so.
+	"""
+	payload = telemetry_client.preview()
+	usage = payload.get("usage") or {}
+	hidden = 0
+	if len(usage) > TELEMETRY_PREVIEW_USAGE_KEYS:
+		ranked = sorted(usage.items(), key=lambda item: (-item[1], item[0]))
+		payload["usage"] = dict(ranked[:TELEMETRY_PREVIEW_USAGE_KEYS])
+		hidden = len(usage) - TELEMETRY_PREVIEW_USAGE_KEYS
+	body = html.escape(json.dumps(payload, indent=1, ensure_ascii=False, sort_keys=True))
+	text = f'{get_text("telemetry_preview")}\n\n<pre>{body}</pre>'
+	if hidden:
+		text += f'\n{get_text("telemetry_preview_truncated", hidden)}'
+	markup = InlineKeyboardMarkup()
+	markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
+	return text, markup
+
+def build_settings_telemetry():
+	"""
+	The statistics screen: what they are, the switch, and what they send.
+
+	When something outside the menu has turned them off there is no switch,
+	only the reason, because pressing it would change nothing.
+	"""
+	forced = telemetry_forced_off()
+	lines = [get_text("settings_telemetry_title"), "", get_text("settings_telemetry_help")]
+	markup = InlineKeyboardMarkup(row_width=1)
+	if forced == "volume":
+		lines += ["", get_text("settings_telemetry_forced_volume")]
+	elif forced:
+		lines += ["", get_text("settings_telemetry_forced_env", forced)]
+	else:
+		markup.add(_toggle_button("telemetry"))
+	markup.add(InlineKeyboardButton(get_text("button_telemetry_show"), callback_data="telemetryShow"))
+	_add_navigation(markup, "settings")
+	return "\n".join(lines), markup
 
 def _on_off(value):
 	return "✅" if value else "❌"
@@ -2669,6 +2892,9 @@ def build_settings():
 		callback_data="settingsHosts"))
 	if channel:
 		markup.add(InlineKeyboardButton(get_text("button_settings_clear_channel"), callback_data="settingsClearChannel"))
+	markup.add(InlineKeyboardButton(
+		get_text("settings_row_telemetry", _on_off(telemetry_on())),
+		callback_data="settingsTelemetry"))
 	_add_navigation(markup, "startMenu")
 
 	# Nothing but the title: every value is on a button, and the file location
@@ -2878,6 +3104,8 @@ def build_settings_screen(screen):
 		return build_settings_updates()
 	if screen == "hosts":
 		return build_settings_hosts()
+	if screen == "telemetry":
+		return build_settings_telemetry()
 	return build_settings()
 
 def send_settings_menu(prefix=None, screen="main"):
@@ -3286,6 +3514,9 @@ def command_controller(message):
 		send_message(chat_id=userId, message=get_text("user_not_admin"))
 		return
 
+	# One of the commands the handler is registered for, so never free text.
+	count_usage(f"cmd_{comando.split('@', 1)[0].lstrip('/')}")
+
 	if comando not in ('/start', f'/start@{bot.get_me().username}'):
 		delete_message(messageId)
 
@@ -3347,6 +3578,8 @@ def button_controller(call):
 			return
 
 		spec, args = callback_registry.parse(call.data)
+		# The registered name, never the arguments: those name containers.
+		count_usage(f"btn_{spec.name}")
 		ctx = callback_registry.Context(
 			call=call, comando=spec.name, messageId=messageId, chatId=chatId, userId=userId, **args)
 
@@ -7633,7 +7866,17 @@ def main():
 	delete_updater()
 	check_own_container()
 	check_mute()
-	send_message(message=build_starting_message())
+	# The statistics notice rides on the boot report rather than arriving as
+	# a message of its own. Not on a new install, though: that one is about
+	# to be asked its language, and the notice follows the answer instead.
+	starting = build_starting_message()
+	notice = telemetry_notice_pending() and not _migration.ask_for_language
+	if notice:
+		starting = f"{starting}\n\n{telemetry_notice_text()}"
+	sent = send_message(message=starting, reply_markup=build_telemetry_notice_markup() if notice else None)
+	if notice and sent:
+		store.state_set("telemetry_notice_shown", True)
 	if _migration.ask_for_language:
 		ask_initial_language()
+	telemetry_client.start()
 	bot.infinity_polling(timeout=60)

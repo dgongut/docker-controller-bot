@@ -394,5 +394,18 @@
   "on_host": " en <b>$1</b>",
   "pick_a_host": "En que host?",
   "container_on_several_hosts": "Hai un contedor chamado <b>$1</b> en máis dun host.\n\n<i>Cal?</i>",
-  "schedule_label_host": "🖥️ Host"
+  "schedule_label_host": "🖥️ Host",
+  "telemetry_notice": "📊 <b>Estatísticas anónimas</b>\nPara saber canta xente usa o bot e que funcións se usan máis, unha vez ao día envía cifras anónimas: cantos hosts e contedores hai, que axustes están activados e cantas veces se usou cada comando. Nunca nomes, IDs nin enderezos.\n\nAs estatísticas son públicas e de todos: <a href=\"https://stats.dgongut.com/docker-controller-bot\">podes velas aquí</a>, xunto con <a href=\"https://stats.dgongut.com/docker-controller-bot/privacy\">que se recolle exactamente</a>.\nPodes desactivalo cando queiras en /settings.",
+  "button_telemetry_accept": "✅ - Aceptar",
+  "button_telemetry_show": "👀 - Que se envía",
+  "button_telemetry_disable": "🚫 - Desactivar",
+  "telemetry_disabled": "📊 Estatísticas anónimas desactivadas: non se enviará nada máis e borrouse o identificador desta instalación. Podes volver activalas en /settings.",
+  "telemetry_preview": "📊 <b>Isto é o que se enviaría agora</b>\nO identificador créase no primeiro envío. <a href=\"https://stats.dgongut.com/docker-controller-bot/privacy\">Que significa cada campo</a>.",
+  "telemetry_preview_truncated": "<i>…e $1 contadores máis.</i>",
+  "settings_row_telemetry": "📊 - Estatísticas anónimas · $1",
+  "button_settings_telemetry": "Enviar estatísticas anónimas",
+  "settings_telemetry_title": "📊 <b>Estatísticas anónimas</b>",
+  "settings_telemetry_help": "Unha vez ao día o bot envía cifras anónimas para saber canta xente o usa e que funcións se usan máis. Nunca nomes, IDs nin enderezos.\n\nAs estatísticas son públicas e de todos: <a href=\"https://stats.dgongut.com/docker-controller-bot\">podes velas aquí</a>, xunto con <a href=\"https://stats.dgongut.com/docker-controller-bot/privacy\">que se recolle exactamente</a>.",
+  "settings_telemetry_forced_env": "🔒 Desactivadas pola variable <code>$1</code> do compose.",
+  "settings_telemetry_forced_volume": "🔒 Desactivadas porque a configuración non está nun volume: sen el, cada vez que se recrease o contedor contaría como unha instalación nova."
 }

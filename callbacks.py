@@ -591,6 +591,8 @@ def cb_settings(ctx):
 def cb_settingsToggle(ctx):
 	if ctx.field in core.SETTINGS_TOGGLES:
 		store.toggle(f"bot.{ctx.field}")
+		if ctx.field == "telemetry" and not store.get("bot.telemetry"):
+			core.telemetry_client.forget()
 		core.render_settings(ctx.chatId, ctx.messageId, core.SETTINGS_TOGGLE_SCREEN.get(ctx.field, "main"))
 	else:
 		core.warning(f"Ignored toggle of unknown setting: {ctx.field}")
@@ -622,8 +624,43 @@ def cb_settingsSetLanguage(ctx):
 		# in the previous language.
 		core.register_bot_commands()
 		core.render_settings(ctx.chatId, ctx.messageId)
+		# A new install hears about the statistics once it has a language.
+		core.send_telemetry_notice_if_pending()
 	else:
 		core.warning(f"Ignored unsupported language: {ctx.value}")
+
+@callback(
+	name='settingsTelemetry',
+	keeps_message=True,
+)
+def cb_settingsTelemetry(ctx):
+	core.render_settings(ctx.chatId, ctx.messageId, "telemetry")
+
+@callback(
+	name='telemetryShow',
+	keeps_message=True,
+)
+def cb_telemetryShow(ctx):
+	# A message of its own, so whatever it was pressed on stays as it was.
+	text, markup = core.build_telemetry_preview()
+	core.send_message(message=text, reply_markup=markup)
+
+@callback(
+	name='telemetryAccept',
+	keeps_message=True,
+)
+def cb_telemetryAccept(ctx):
+	# The notice stays, without its buttons: it is the record of what was agreed.
+	core.edit_message_reply_markup(ctx.chatId, ctx.messageId, InlineKeyboardMarkup())
+
+@callback(
+	name='telemetryDisable',
+	keeps_message=True,
+)
+def cb_telemetryDisable(ctx):
+	core.disable_telemetry()
+	core.edit_message_reply_markup(ctx.chatId, ctx.messageId, InlineKeyboardMarkup())
+	core.send_message(message=get_text("telemetry_disabled"))
 
 @callback(
 	name='settingsColumns',
@@ -698,6 +735,8 @@ def cb_startCommand(ctx):
 	if ctx.action is None:
 		core.warning(f"Unknown start menu command: {ctx.value}")
 	else:
+		# The same command as typing it, so it counts as the same thing.
+		core.count_usage(f"cmd_{ctx.value}")
 		ctx.action(user_id=ctx.userId, chat_id=ctx.chatId)
 
 @callback(

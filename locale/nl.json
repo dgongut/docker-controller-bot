@@ -394,5 +394,18 @@
   "on_host": " op <b>$1</b>",
   "pick_a_host": "Op welke host?",
   "container_on_several_hosts": "Er is een container met de naam <b>$1</b> op meer dan één host.\n\n<i>Welke?</i>",
-  "schedule_label_host": "🖥️ Host"
+  "schedule_label_host": "🖥️ Host",
+  "telemetry_notice": "📊 <b>Anonieme statistieken</b>\nOm te weten hoeveel mensen de bot gebruiken en welke functies het meest worden gebruikt, stuurt hij één keer per dag anonieme cijfers: hoeveel hosts en containers er zijn, welke instellingen aan staan en hoe vaak elk commando is gebruikt. Nooit namen, ID's of adressen.\n\nDe statistieken zijn openbaar en van iedereen: <a href=\"https://stats.dgongut.com/docker-controller-bot\">je kunt ze hier bekijken</a>, samen met <a href=\"https://stats.dgongut.com/docker-controller-bot/privacy\">wat er precies wordt verzameld</a>.\nJe kunt het altijd uitzetten in /settings.",
+  "button_telemetry_accept": "✅ - Accepteren",
+  "button_telemetry_show": "👀 - Wat wordt verstuurd",
+  "button_telemetry_disable": "🚫 - Uitzetten",
+  "telemetry_disabled": "📊 Anonieme statistieken uitgezet: er wordt niets meer verstuurd en de ID van deze installatie is verwijderd. Je kunt ze weer aanzetten in /settings.",
+  "telemetry_preview": "📊 <b>Dit zou er nu worden verstuurd</b>\nDe ID wordt bij de eerste verzending aangemaakt. <a href=\"https://stats.dgongut.com/docker-controller-bot/privacy\">Wat elk veld betekent</a>.",
+  "telemetry_preview_truncated": "<i>…en nog $1 tellers.</i>",
+  "settings_row_telemetry": "📊 - Anonieme statistieken · $1",
+  "button_settings_telemetry": "Anonieme statistieken versturen",
+  "settings_telemetry_title": "📊 <b>Anonieme statistieken</b>",
+  "settings_telemetry_help": "Eén keer per dag stuurt de bot anonieme cijfers om te weten hoeveel mensen hem gebruiken en welke functies het meest worden gebruikt. Nooit namen, ID's of adressen.\n\nDe statistieken zijn openbaar en van iedereen: <a href=\"https://stats.dgongut.com/docker-controller-bot\">je kunt ze hier bekijken</a>, samen met <a href=\"https://stats.dgongut.com/docker-controller-bot/privacy\">wat er precies wordt verzameld</a>.",
+  "settings_telemetry_forced_env": "🔒 Uitgezet door de variabele <code>$1</code> in de compose.",
+  "settings_telemetry_forced_volume": "🔒 Uitgezet omdat de configuratie niet op een volume staat: zonder volume zou elke keer dat de container opnieuw wordt aangemaakt als een nieuwe installatie tellen."
 }

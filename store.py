@@ -46,6 +46,8 @@ DEFAULTS = {
 		"check_updates": True,
 		"check_update_every_hours": 4.0,
 		"check_update_stopped_containers": True,
+		# Anonymous usage statistics, sent once a day. See telemetry.py.
+		"telemetry": True,
 	},
 	# Docker hosts the bot manages. Each entry is
 	# {"id": "h_xxxx", "alias": "casa", "url": "unix:///var/run/docker.sock"}.
@@ -57,6 +59,9 @@ DEFAULTS = {
 STATE_DEFAULTS = {
 	# Epoch seconds until which notifications are silenced. 0 means not muted.
 	"mute_until": 0,
+	# Whether the one-time notice about anonymous statistics has been shown.
+	# Nothing is sent before it has.
+	"telemetry_notice_shown": False,
 }
 
 _lock = threading.RLock()

@@ -197,6 +197,7 @@ Aquí solo quedan las variables que el bot necesita **antes** de poder leer sus 
 |TELEGRAM_GROUP |❌| ChatId del grupo. Si este bot va a formar parte de un grupo, es necesario especificar el chatId de dicho grupo. Es necesario que el bot sea administrador del grupo |
 |TELEGRAM_THREAD |❌| Thread del tema dentro de un supergrupo; valor numérico (2,3,4..). Por defecto 1. Se utiliza en conjunción con la variable TELEGRAM_GROUP |
 |TZ |✅| Timezone (Por ejemplo Europe/Madrid) |
+|TELEMETRY |❌| `false` para desactivar las estadísticas anónimas sin pasar por `/settings`. Lo normal es desactivarlas desde `/settings`; esto es para quien prefiera dejarlo fijado en el compose |
 
 Todo lo demás se configura desde el propio bot y se guarda en `settings.json`, dentro del volumen mapeado:
 
@@ -211,6 +212,7 @@ Todo lo demás se configura desde el propio bot y se guarda en `settings.json`, 
 |Contenedores parados| Si comprueba también las actualizaciones de los contenedores detenidos. Por defecto activado |
 |Canal de notificaciones| Canal donde se publicarán exclusivamente los cambios de estado de los contenedores (arranque, parada, creación y actualizaciones automáticas). La gestión se sigue haciendo desde el chat privado con el bot o desde TELEGRAM_GROUP. El bot comprueba que puede publicar ahí antes de guardarlo |
 |Hosts de Docker| Las máquinas que gestiona el bot. Se añaden, se prueban, se renombran y se quitan desde aquí. Ver desplegable de hosts remotos |
+|Estadísticas anónimas| Una vez al día envía cifras anónimas de uso. Por defecto activado. Ver desplegable de estadísticas |
 
 Los cambios hechos desde `/settings` se aplican al momento, sin reiniciar el contenedor. Si prefieres editar `settings.json` a mano, hará falta reiniciar para que los lea.
 
@@ -455,6 +457,21 @@ En `settings.json` solo va la URL y, para TLS, las rutas de los certificados. Ni
 - Añadiendo la etiqueta `DCB-Auto-Update` a un contenedor, se actualizará automáticamente sin preguntar.
 
 Ver ejemplo completo en la FAQ: *«He visto que se pueden añadir labels…»*.
+
+</details>
+
+<details>
+<summary>📊 Estadísticas anónimas</summary>
+
+Desde la 5.0.0 el bot envía una vez al día unas cifras anónimas para saber cuánta gente lo usa, en cuántos hosts y qué funciones se usan más. Así sé dónde poner el esfuerzo. Las estadísticas son públicas: [stats.dgongut.com/docker-controller-bot](https://stats.dgongut.com/docker-controller-bot).
+
+**Qué se envía:** cuántos hosts y contenedores hay (los contenedores, por tramos), qué ajustes están activados, la versión del bot y de Docker, la arquitectura, y cuántas veces al día se ha usado cada comando y cada botón. La lista completa, campo a campo, está en [la página de privacidad](https://stats.dgongut.com/docker-controller-bot/privacy). El servidor descarta cualquier dato que no esté en ella.
+
+**Qué no se envía nunca:** nombres de contenedores, imágenes, hosts o proyectos, direcciones, IDs de Telegram, rutas ni nada de lo que escribes. Tu IP no se guarda.
+
+**Cómo se desactiva:** desde `/settings` → *Estadísticas anónimas*, o con el botón *Desactivar* del aviso que aparece al arrancar la primera vez. Al desactivarlas se borra también el identificador de la instalación.
+
+Nada se envía hasta que se ha mostrado el aviso y el bot lleva al menos 10 minutos en marcha. Tampoco se envía si la configuración no está en un volumen, porque sin él cada vez que se recreara el contenedor contaría como una instalación nueva.
 
 </details>
 
@@ -731,6 +748,7 @@ docker-controller-bot/
     ├── port_manager.py
     ├── schedule_manager.py
     ├── message_queue.py
+    ├── telemetry.py               # estadísticas anónimas (copia de dgongut/telemetry)
     ├── logger.py
     ├── tests
     │   ├── run_all.py

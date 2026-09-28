@@ -3998,3 +3998,179 @@ def test_a_selection_is_confirmed_and_updated_in_the_order_of_the_list():
 	selected = {ref for ref, _ in pairs}
 	assert dcb.selected_in_order(pairs, selected) == [ref for ref, _ in pairs]
 	assert dcb.selected_in_order(pairs, {pairs[3][0], pairs[0][0]}) == [pairs[0][0], pairs[3][0]]
+
+
+# ---------------------------------------------------------------------------
+# Anonymous statistics
+# ---------------------------------------------------------------------------
+
+class _telemetry_state:
+	"""
+	Puts telemetry in a known state for one test and puts everything back.
+
+	The harness storage is a temporary directory, not a volume, so without
+	this telemetry would always read as switched off for lack of one.
+	"""
+
+	def __init__(self, persistent=True, on=True, announced=True):
+		self.wanted = (persistent, on, announced)
+
+	def __enter__(self):
+		persistent, on, announced = self.wanted
+		self.saved = (store.is_persistent, store.get("bot.telemetry"),
+					store.state_get("telemetry_notice_shown"), os.environ.pop("TELEMETRY", None))
+		store.is_persistent = lambda: persistent
+		store.set("bot.telemetry", on)
+		store.state_set("telemetry_notice_shown", announced)
+		dcb.telemetry_client.forget()
+		return self
+
+	def __exit__(self, *exc):
+		is_persistent, on, announced, variable = self.saved
+		store.is_persistent = is_persistent
+		store.set("bot.telemetry", on)
+		store.state_set("telemetry_notice_shown", announced)
+		if variable is not None:
+			os.environ["TELEMETRY"] = variable
+		else:
+			os.environ.pop("TELEMETRY", None)
+		dcb.telemetry_client.forget()
+
+
+def test_telemetry_needs_a_volume_the_setting_and_the_notice():
+	with _telemetry_state(persistent=True, on=True, announced=False):
+		assert dcb.telemetry_notice_pending() and not dcb.telemetry_active()
+		store.state_set("telemetry_notice_shown", True)
+		assert dcb.telemetry_active() and not dcb.telemetry_notice_pending()
+		store.set("bot.telemetry", False)
+		assert not dcb.telemetry_active() and not dcb.telemetry_notice_pending()
+	# Without a volume there is nothing to announce either: the notice would
+	# come back on every recreate, and so would a setting turned off.
+	with _telemetry_state(persistent=False, on=True, announced=False):
+		assert dcb.telemetry_forced_off() == "volume"
+		assert not dcb.telemetry_notice_pending() and not dcb.telemetry_active()
+
+
+def test_the_environment_can_only_turn_telemetry_off():
+	with _telemetry_state():
+		os.environ["TELEMETRY"] = "false"
+		assert dcb.telemetry_forced_off() == "TELEMETRY" and not dcb.telemetry_active()
+		# Any other spelling is off too: whoever wrote the variable wanted it off.
+		os.environ["TELEMETRY"] = "0"
+		assert dcb.telemetry_forced_off() == "TELEMETRY"
+		# Only off: TELEMETRY=true does not override a setting that is off.
+		os.environ["TELEMETRY"] = "true"
+		assert dcb.telemetry_forced_off() is None and dcb.telemetry_active()
+		store.set("bot.telemetry", False)
+		assert not dcb.telemetry_active()
+
+
+def test_nothing_is_counted_before_the_notice_was_shown():
+	with _telemetry_state(announced=False):
+		dcb.count_usage("cmd_list")
+		assert dcb.telemetry_client.preview()["usage"] == {}
+		store.state_set("telemetry_notice_shown", True)
+		dcb.count_usage("cmd_list")
+		dcb.count_usage("cmd_list")
+		assert dcb.telemetry_client.preview()["usage"] == {"cmd_list": 2}
+
+
+def test_a_press_counts_the_button_and_never_its_arguments():
+	"""The arguments name containers, which is exactly what must not leave."""
+	saved = (dcb.send_message, dcb.edit_message_text, dcb.delete_message)
+	with _telemetry_state():
+		harness.quiet(dcb)
+		try:
+			press = MagicMock()
+			press.data, press.id = "settingsHost|h_nas", "q1"
+			press.message.id, press.message.chat.id = 2, 1
+			press.from_user.id = int(str(dcb.TELEGRAM_ADMIN).split(",")[0])
+			dcb.button_controller(press)
+		finally:
+			dcb.send_message, dcb.edit_message_text, dcb.delete_message = saved
+		usage = dcb.telemetry_client.preview()["usage"]
+		assert usage == {"btn_settingsHost": 1}, usage
+
+
+def test_the_snapshot_never_carries_names_or_addresses():
+	_with_hosts([dict(HOST_FIXTURE[0], alias="casa-de-pepe"),
+				{"id": "h_x", "alias": "servidor-secreto", "url": "ssh://pepe@10.0.0.7", "paused": True}],
+				unreachable=())
+	try:
+		store.set("bot.notification_channel", "-100555")
+		metrics = dcb.collect_telemetry_metrics()
+	finally:
+		store.set("bot.notification_channel", "")
+		_restore_hosts()
+
+	sent = json.dumps(metrics)
+	for secret in ("casa-de-pepe", "servidor-secreto", "pepe", "10.0.0.7", "-100555",
+					str(dcb.TELEGRAM_ADMIN), "docker.sock"):
+		assert secret not in sent, secret
+	assert metrics["hosts"] == 2 and metrics["hosts_paused"] == 1 and metrics["hosts_ssh"] == 1
+	assert metrics["notification_channel"] is True
+	# Only numbers, yes/no and the two closed lists the manifest declares.
+	for key, value in metrics.items():
+		if isinstance(value, str):
+			assert key in ("language", "containers"), key
+
+
+def test_containers_are_counted_in_ranges():
+	assert [dcb._containers_bucket(n) for n in (0, 1, 5, 6, 25, 26, 100, 101, 5000)] == \
+		["0", "1-5", "1-5", "6-10", "11-25", "26-50", "51-100", "101+", "101+"]
+
+
+def test_the_notice_puts_accept_on_a_row_of_its_own():
+	markup = dcb.build_telemetry_notice_markup()
+	rows = [[button.callback_data for button in row] for row in markup.keyboard]
+	assert rows == [["telemetryAccept"], ["telemetryShow", "telemetryDisable"]], rows
+	# Words that link, not bare URLs: the public statistics and what is collected.
+	assert 'href="https://stats.dgongut.com/docker-controller-bot"' in dcb.telemetry_notice_text()
+	assert 'href="https://stats.dgongut.com/docker-controller-bot/privacy"' in dcb.telemetry_notice_text()
+
+
+def test_the_notice_waits_for_the_language_on_a_new_install():
+	with _telemetry_state(announced=False):
+		sent = []
+		original = dcb.send_message
+		dcb.send_message = lambda **kwargs: sent.append(kwargs) or MagicMock()
+		try:
+			dcb.send_telemetry_notice_if_pending()
+			dcb.send_telemetry_notice_if_pending()
+		finally:
+			dcb.send_message = original
+		assert len(sent) == 1, "el aviso sale una sola vez"
+		assert store.state_get("telemetry_notice_shown") is True
+
+
+def test_turning_telemetry_off_forgets_the_installation():
+	with _telemetry_state():
+		dcb.telemetry_client._state["install_id"] = "3f0c8f7e-5b1a-4b8e-9d57-2a9e0c1d4b6f"
+		dcb.count_usage("cmd_list")
+		dcb.disable_telemetry()
+		assert store.get("bot.telemetry") is False
+		preview = dcb.telemetry_client.preview()
+		assert preview["install_id"] is None and preview["usage"] == {}
+
+
+def test_the_statistics_screen_hides_the_switch_when_it_would_do_nothing():
+	with _telemetry_state():
+		assert "settingsTelemetry" in harness.keyboard_callbacks(dcb.build_settings()[1])
+		text, markup = dcb.build_settings_telemetry()
+		callbacks = harness.keyboard_callbacks(markup)
+		assert "settingsToggle|telemetry" in callbacks and "telemetryShow" in callbacks
+		assert callbacks[-2:] == ["settings", "cerrar"]
+		assert 'href="https://stats.dgongut.com/docker-controller-bot"' in text
+	with _telemetry_state(persistent=False):
+		text, markup = dcb.build_settings_telemetry()
+		assert "settingsToggle|telemetry" not in harness.keyboard_callbacks(markup)
+		assert "🔒" in text
+
+
+def test_the_preview_fits_in_one_message():
+	with _telemetry_state():
+		for index in range(300):
+			dcb.telemetry_client.count(f"btn_someVeryLongCallbackName{index}", index + 1)
+		text, _ = dcb.build_telemetry_preview()
+		assert len(text) < 4096, len(text)
+		assert "275" in text, "dice cuántos contadores no caben"

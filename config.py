@@ -52,6 +52,17 @@ SETTINGS_FROM_ENV = {
     "CHECK_UPDATE_STOPPED_CONTAINERS": ("bot.check_update_stopped_containers", _as_bool),
 }
 
+# Anonymous usage statistics. On by default, turned off from /settings or with
+# TELEMETRY=0, which telemetry.py reads itself: it is the same variable in all
+# of the projects that share that client.
+# Development only, not documented: sends a minute after every start instead
+# of once a day. Debug pings go to a server on the same machine unless told
+# otherwise, never to the real one, where they would count as installations.
+TELEMETRY_DEBUG = _as_bool(os.environ.get("TELEMETRY_DEBUG", "0"))
+TELEMETRY_ENDPOINT = os.environ.get(
+    "TELEMETRY_ENDPOINT",
+    "http://host.docker.internal:8000/v1/ping" if TELEMETRY_DEBUG else "https://telemetry.dgongut.com/v1/ping")
+
 # CONSTANTS
 UPDATER_IMAGE = "dgongut/docker-container-updater:latest"
 UPDATER_CONTAINER_NAME = "UPDATER-Docker-Controler-Bot"
