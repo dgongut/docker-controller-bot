@@ -36,7 +36,7 @@ from i18n import get_text, language
 from logger import debug, error, warning
 from message_queue import MessageQueue
 
-VERSION = "5.0.0_RC5"
+VERSION = "5.0.0_RC6"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -2609,15 +2609,15 @@ SETTINGS_TOGGLE_SCREEN = {
 # is declared in the manifest of the telemetry repo, which also drops anything
 # that is not declared, and is listed on the project's privacy page.
 #
-# Nothing is counted or sent unless all three hold:
+# On by default, with no notice asking first. Nothing is counted or sent
+# unless both hold:
 #
 #	allowed    the storage is a volume, and TELEMETRY=0 is not set
-#	on         the setting, flipped from /settings or from the notice
-#	announced  the notice has been shown once
+#	on         the setting, flipped from /settings
 #
-# Without a volume there is nothing to announce to: the install id would be
-# new on every recreate, so one installation would count as many, and turning
-# it off would not survive the next update any more than the notice would.
+# Without a volume the install id would be new on every recreate, so one
+# installation would count as many, and turning it off would not survive the
+# next update.
 
 TELEMETRY_PROJECT = "docker-controller-bot"
 # Shown instead of the whole list when the preview would not fit a message.
@@ -2639,14 +2639,6 @@ def telemetry_forced_off():
 def telemetry_on():
 	"""Whether the setting is on and nothing overrides it."""
 	return telemetry_forced_off() is None and bool(store.get("bot.telemetry"))
-
-def telemetry_notice_pending():
-	"""Whether the notice still has to be shown before anything is sent."""
-	return telemetry_on() and not store.state_get("telemetry_notice_shown")
-
-def telemetry_active():
-	"""Whether usage is being counted and sent right now."""
-	return telemetry_on() and bool(store.state_get("telemetry_notice_shown"))
 
 def _containers_bucket(count):
 	"""A container count as the range the manifest declares, never the number."""
@@ -2720,7 +2712,7 @@ telemetry_client = telemetry.Telemetry(
 	version=VERSION,
 	state_path=os.path.join(store.state_dir(), "telemetry.json"),
 	metrics=collect_telemetry_metrics,
-	enabled=telemetry_active,
+	enabled=telemetry_on,
 	endpoint=TELEMETRY_ENDPOINT,
 	log=debug,
 	debug=TELEMETRY_DEBUG,
@@ -2744,35 +2736,6 @@ def disable_telemetry():
 	"""
 	store.set("bot.telemetry", False)
 	telemetry_client.forget()
-
-def telemetry_notice_text():
-	return get_text("telemetry_notice")
-
-def build_telemetry_notice_markup():
-	"""
-	Accept on a row of its own, above the other two.
-
-	Accepting is what most people will do, and it is the only one of the
-	three that just closes the question: the other two lead somewhere.
-	"""
-	markup = InlineKeyboardMarkup()
-	markup.row(InlineKeyboardButton(get_text("button_telemetry_accept"), callback_data="telemetryAccept"))
-	markup.row(
-		InlineKeyboardButton(get_text("button_telemetry_show"), callback_data="telemetryShow"),
-		InlineKeyboardButton(get_text("button_telemetry_disable"), callback_data="telemetryDisable"))
-	return markup
-
-def send_telemetry_notice_if_pending():
-	"""
-	Sends the notice as a message of its own, if it has not been shown yet.
-
-	For a new install, which is asked for its language first: the notice
-	waits for that answer so it is not the one message in the wrong language.
-	"""
-	if not telemetry_notice_pending():
-		return
-	if send_message(message=telemetry_notice_text(), reply_markup=build_telemetry_notice_markup()):
-		store.state_set("telemetry_notice_shown", True)
 
 def build_telemetry_preview():
 	"""
@@ -3830,7 +3793,7 @@ def _execute_compose_project_action(action, project_name, show_extended=True, ho
 
 	# Per-action configuration
 	if action == 'restart':
-		send_message(message=f'{label}{get_text("restarting_project", project_name)}')
+		progress = send_message(message=f'{label}{get_text("restarting_project", project_name)}')
 		# Stop containers in reverse order
 		for container in reversed(sorted_containers):
 			service_name = container.labels.get('com.docker.compose.service', container.name)
@@ -3853,10 +3816,13 @@ def _execute_compose_project_action(action, project_name, show_extended=True, ho
 				debug(f"Error starting {service_name}: {e}")
 				if show_extended:
 					send_message(message=f'{get_text("error_starting_service", service_name)}{host_suffix(host_id)}')
+		# The progress line goes when the work is done, as it does for a single container
+		if progress:
+			delete_message(progress.message_id)
 		send_message(message=f'{get_text("project_restarted_success", project_name)}{host_suffix(host_id)}')
 
 	elif action == 'run':
-		send_message(message=f'{label}{get_text("starting_project", project_name)}')
+		progress = send_message(message=f'{label}{get_text("starting_project", project_name)}')
 		# Start containers in the correct order
 		for container in sorted_containers:
 			service_name = container.labels.get('com.docker.compose.service', container.name)
@@ -3868,10 +3834,12 @@ def _execute_compose_project_action(action, project_name, show_extended=True, ho
 				debug(f"Error starting {service_name}: {e}")
 				if show_extended:
 					send_message(message=f'{get_text("error_starting_service", service_name)}{host_suffix(host_id)}')
+		if progress:
+			delete_message(progress.message_id)
 		send_message(message=f'{get_text("project_started_success", project_name)}{host_suffix(host_id)}')
 
 	elif action == 'stop':
-		send_message(message=f'{label}{get_text("stopping_project", project_name)}')
+		progress = send_message(message=f'{label}{get_text("stopping_project", project_name)}')
 		# Stop containers in reverse order
 		for container in reversed(sorted_containers):
 			service_name = container.labels.get('com.docker.compose.service', container.name)
@@ -3883,6 +3851,8 @@ def _execute_compose_project_action(action, project_name, show_extended=True, ho
 				debug(f"Error stopping {service_name}: {e}")
 				if show_extended:
 					send_message(message=f'{get_text("error_stopping_service", service_name)}{host_suffix(host_id)}')
+		if progress:
+			delete_message(progress.message_id)
 		send_message(message=f'{get_text("project_stopped_success", project_name)}{host_suffix(host_id)}')
 
 def restart_compose_project(project_name, host_id=None):
@@ -4303,7 +4273,7 @@ def _batch_progress_text(index, total, host_id, name):
 def _update_containers_quietly(targets):
 	"""The summarised form of update_containers."""
 	total = len(targets)
-	failed = []
+	updated, failed = [], []
 	progress = None
 	for index, (ref, name) in enumerate(targets, start=1):
 		host_id = ref_host(ref)
@@ -4317,14 +4287,14 @@ def _update_containers_quietly(targets):
 		except Exception as e:
 			error(f"Could not update container {name}. Error: [{e}]")
 			ok = False
-		if not ok:
-			failed.append(f"<b>{name}</b>{host_suffix(host_id)}")
+		(updated if ok else failed).append(f"<b>{name}</b>{host_suffix(host_id)}")
 
 	# Deleted and sent anew rather than edited into the summary: an edit makes
 	# no sound, and the summary is the one message of the batch worth hearing.
 	if progress:
 		delete_message(progress.message_id, progress.chat.id)
-	summary = get_text("updated_batch", total - len(failed), total)
+	# The count alone left the chat asking which ones, so they are listed too.
+	summary = get_text("updated_batch", len(updated), total) + "".join(f"\n· {line}" for line in updated)
 	if failed:
 		summary += get_text("updated_batch_failed") + "".join(f"\n· {line}" for line in failed)
 	send_message(message=summary)
@@ -7866,16 +7836,7 @@ def main():
 	delete_updater()
 	check_own_container()
 	check_mute()
-	# The statistics notice rides on the boot report rather than arriving as
-	# a message of its own. Not on a new install, though: that one is about
-	# to be asked its language, and the notice follows the answer instead.
-	starting = build_starting_message()
-	notice = telemetry_notice_pending() and not _migration.ask_for_language
-	if notice:
-		starting = f"{starting}\n\n{telemetry_notice_text()}"
-	sent = send_message(message=starting, reply_markup=build_telemetry_notice_markup() if notice else None)
-	if notice and sent:
-		store.state_set("telemetry_notice_shown", True)
+	send_message(message=build_starting_message())
 	if _migration.ask_for_language:
 		ask_initial_language()
 	telemetry_client.start()

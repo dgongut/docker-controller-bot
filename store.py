@@ -59,9 +59,6 @@ DEFAULTS = {
 STATE_DEFAULTS = {
 	# Epoch seconds until which notifications are silenced. 0 means not muted.
 	"mute_until": 0,
-	# Whether the one-time notice about anonymous statistics has been shown.
-	# Nothing is sent before it has.
-	"telemetry_notice_shown": False,
 }
 
 _lock = threading.RLock()

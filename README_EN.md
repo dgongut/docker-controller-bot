@@ -469,9 +469,9 @@ Since 5.0.0 the bot sends a few anonymous figures once a day, to know how many p
 
 **What is never sent:** container, image, host or project names, addresses, Telegram IDs, paths or anything you type. Your IP is not stored.
 
-**How to turn it off:** from `/settings` → *Anonymous statistics*, or with the *Turn off* button on the notice shown on the first start. Turning them off also deletes the installation's identifier.
+**How to turn it off:** from `/settings` → *Anonymous statistics*. Turning them off also deletes the installation's identifier.
 
-Nothing is sent until the notice has been shown and the bot has been running for at least 10 minutes. Nor is anything sent when the configuration is not on a volume, because without one every time the container was recreated it would count as a new installation.
+They are on by default. Nothing is sent until the bot has been running for at least 10 minutes. Nor is anything sent when the configuration is not on a volume, because without one every time the container was recreated it would count as a new installation.
 
 </details>
 

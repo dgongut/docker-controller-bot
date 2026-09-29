@@ -469,9 +469,9 @@ Desde la 5.0.0 el bot envía una vez al día unas cifras anónimas para saber cu
 
 **Qué no se envía nunca:** nombres de contenedores, imágenes, hosts o proyectos, direcciones, IDs de Telegram, rutas ni nada de lo que escribes. Tu IP no se guarda.
 
-**Cómo se desactiva:** desde `/settings` → *Estadísticas anónimas*, o con el botón *Desactivar* del aviso que aparece al arrancar la primera vez. Al desactivarlas se borra también el identificador de la instalación.
+**Cómo se desactiva:** desde `/settings` → *Estadísticas anónimas*. Al desactivarlas se borra también el identificador de la instalación.
 
-Nada se envía hasta que se ha mostrado el aviso y el bot lleva al menos 10 minutos en marcha. Tampoco se envía si la configuración no está en un volumen, porque sin él cada vez que se recreara el contenedor contaría como una instalación nueva.
+Están activadas por defecto. Nada se envía hasta que el bot lleva al menos 10 minutos en marcha. Tampoco se envía si la configuración no está en un volumen, porque sin él cada vez que se recreara el contenedor contaría como una instalación nueva.
 
 </details>
 

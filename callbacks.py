@@ -624,8 +624,6 @@ def cb_settingsSetLanguage(ctx):
 		# in the previous language.
 		core.register_bot_commands()
 		core.render_settings(ctx.chatId, ctx.messageId)
-		# A new install hears about the statistics once it has a language.
-		core.send_telemetry_notice_if_pending()
 	else:
 		core.warning(f"Ignored unsupported language: {ctx.value}")
 
@@ -650,7 +648,8 @@ def cb_telemetryShow(ctx):
 	keeps_message=True,
 )
 def cb_telemetryAccept(ctx):
-	# The notice stays, without its buttons: it is the record of what was agreed.
+	# The notice is gone, but 5.0.0_RC5 sent it with these two buttons, and a
+	# press on an already sent one must not end in an error.
 	core.edit_message_reply_markup(ctx.chatId, ctx.messageId, InlineKeyboardMarkup())
 
 @callback(

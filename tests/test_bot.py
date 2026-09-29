@@ -13,6 +13,7 @@ import re
 import sys
 import threading
 import time
+import types
 from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -33,6 +34,7 @@ SEEDED = {
 	"language": store.get("bot.language"),
 	"button_columns": dcb.button_columns(),
 	"host_id": dcb.LOCAL_HOST_ID,
+	"telemetry": store.get("bot.telemetry"),
 }
 
 
@@ -2559,6 +2561,34 @@ def test_a_project_action_runs_on_the_project_host():
 		_restore_hosts()
 
 
+def test_a_project_action_removes_its_progress_line():
+	"""
+	The "Stopping project…" line was left behind for good, so the chat kept a
+	promise of work under the message saying it was already done.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	project = types.SimpleNamespace(containers=[])
+	original_info = dcb.DockerManager.get_project_info
+	dcb.DockerManager.get_project_info = lambda self, name: project
+	original_send, original_delete = dcb.send_message, dcb.delete_message
+	sent, deleted = [], []
+	def fake_send(**kw):
+		sent.append(kw["message"])
+		return types.SimpleNamespace(message_id=len(sent))
+	dcb.send_message = fake_send
+	dcb.delete_message = lambda message_id, *a, **kw: deleted.append(message_id)
+	try:
+		for action in (dcb.stop_compose_project, dcb.run_compose_project, dcb.restart_compose_project):
+			sent.clear(); deleted.clear()
+			action("media", "h_nas")
+			assert deleted == [1], (action.__name__, sent, deleted)
+			assert len(sent) == 2, sent
+	finally:
+		dcb.DockerManager.get_project_info = original_info
+		dcb.send_message, dcb.delete_message = original_send, original_delete
+		_restore_hosts()
+
+
 def test_a_project_on_an_unreachable_host_gives_no_names():
 	"""Rather than raising into whatever was iterating over them."""
 	_with_hosts(HOST_FIXTURE)
@@ -3891,7 +3921,9 @@ def test_an_update_batch_ends_in_one_summary_naming_what_failed():
 		summary = sent[-1]
 		assert summary.startswith(i18n.get_text("updated_batch", 2, 3)), summary
 		assert i18n.get_text("updated_batch_failed") in summary, summary
-		assert "plex" in summary and "nginx" not in summary, summary
+		ok_part, failed_part = summary.split(i18n.get_text("updated_batch_failed"))
+		assert "<b>nginx</b>" in ok_part and "<b>sonarr</b>" in ok_part and "plex" not in ok_part, summary
+		assert "<b>plex</b>" in failed_part and "nginx" not in failed_part, summary
 	finally:
 		restore()
 
@@ -3900,7 +3932,7 @@ def test_a_batch_where_everything_worked_says_nothing_failed():
 	calls, sent, edited, deleted, restore = _batch_stubs({})
 	try:
 		dcb.update_containers(_targets("nginx", "plex"))
-		assert sent[-1] == i18n.get_text("updated_batch", 2, 2), sent[-1]
+		assert sent[-1] == i18n.get_text("updated_batch", 2, 2) + "\n· <b>nginx</b>\n· <b>plex</b>", sent[-1]
 	finally:
 		restore()
 
@@ -3926,7 +3958,7 @@ def test_the_bot_updates_itself_last_and_outside_the_summary():
 	try:
 		dcb.update_containers(_targets("docker-controller-bot", "nginx"))
 		assert calls == [("nginx", True, False), ("docker-controller-bot", False, True)], calls
-		assert sent[-1] == i18n.get_text("updated_batch", 1, 1), sent
+		assert sent[-1] == i18n.get_text("updated_batch", 1, 1) + "\n· <b>nginx</b>", sent
 	finally:
 		restore()
 
@@ -4012,24 +4044,21 @@ class _telemetry_state:
 	this telemetry would always read as switched off for lack of one.
 	"""
 
-	def __init__(self, persistent=True, on=True, announced=True):
-		self.wanted = (persistent, on, announced)
+	def __init__(self, persistent=True, on=True):
+		self.wanted = (persistent, on)
 
 	def __enter__(self):
-		persistent, on, announced = self.wanted
-		self.saved = (store.is_persistent, store.get("bot.telemetry"),
-					store.state_get("telemetry_notice_shown"), os.environ.pop("TELEMETRY", None))
+		persistent, on = self.wanted
+		self.saved = (store.is_persistent, store.get("bot.telemetry"), os.environ.pop("TELEMETRY", None))
 		store.is_persistent = lambda: persistent
 		store.set("bot.telemetry", on)
-		store.state_set("telemetry_notice_shown", announced)
 		dcb.telemetry_client.forget()
 		return self
 
 	def __exit__(self, *exc):
-		is_persistent, on, announced, variable = self.saved
+		is_persistent, on, variable = self.saved
 		store.is_persistent = is_persistent
 		store.set("bot.telemetry", on)
-		store.state_set("telemetry_notice_shown", announced)
 		if variable is not None:
 			os.environ["TELEMETRY"] = variable
 		else:
@@ -4037,39 +4066,44 @@ class _telemetry_state:
 		dcb.telemetry_client.forget()
 
 
-def test_telemetry_needs_a_volume_the_setting_and_the_notice():
-	with _telemetry_state(persistent=True, on=True, announced=False):
-		assert dcb.telemetry_notice_pending() and not dcb.telemetry_active()
-		store.state_set("telemetry_notice_shown", True)
-		assert dcb.telemetry_active() and not dcb.telemetry_notice_pending()
+def test_telemetry_needs_a_volume_and_the_setting():
+	assert SEEDED["telemetry"] is True, "activadas por defecto"
+	with _telemetry_state(persistent=True, on=True):
+		assert dcb.telemetry_on()
 		store.set("bot.telemetry", False)
-		assert not dcb.telemetry_active() and not dcb.telemetry_notice_pending()
-	# Without a volume there is nothing to announce either: the notice would
-	# come back on every recreate, and so would a setting turned off.
-	with _telemetry_state(persistent=False, on=True, announced=False):
-		assert dcb.telemetry_forced_off() == "volume"
-		assert not dcb.telemetry_notice_pending() and not dcb.telemetry_active()
+		assert not dcb.telemetry_on()
+	# Without a volume a setting turned off would come back on every recreate.
+	with _telemetry_state(persistent=False, on=True):
+		assert dcb.telemetry_forced_off() == "volume" and not dcb.telemetry_on()
+
+
+def test_there_is_no_statistics_notice_to_accept():
+	"""On by default and explained in the README, without a message asking first."""
+	assert not hasattr(dcb, "build_telemetry_notice_markup")
+	assert "telemetry_notice_shown" not in store.STATE_DEFAULTS
+	for code in ("es", "en"):
+		assert "telemetry_notice" not in i18n.load_locale(code)
 
 
 def test_the_environment_can_only_turn_telemetry_off():
 	with _telemetry_state():
 		os.environ["TELEMETRY"] = "false"
-		assert dcb.telemetry_forced_off() == "TELEMETRY" and not dcb.telemetry_active()
+		assert dcb.telemetry_forced_off() == "TELEMETRY" and not dcb.telemetry_on()
 		# Any other spelling is off too: whoever wrote the variable wanted it off.
 		os.environ["TELEMETRY"] = "0"
 		assert dcb.telemetry_forced_off() == "TELEMETRY"
 		# Only off: TELEMETRY=true does not override a setting that is off.
 		os.environ["TELEMETRY"] = "true"
-		assert dcb.telemetry_forced_off() is None and dcb.telemetry_active()
+		assert dcb.telemetry_forced_off() is None and dcb.telemetry_on()
 		store.set("bot.telemetry", False)
-		assert not dcb.telemetry_active()
+		assert not dcb.telemetry_on()
 
 
-def test_nothing_is_counted_before_the_notice_was_shown():
-	with _telemetry_state(announced=False):
+def test_nothing_is_counted_with_the_setting_off():
+	with _telemetry_state(on=False):
 		dcb.count_usage("cmd_list")
 		assert dcb.telemetry_client.preview()["usage"] == {}
-		store.state_set("telemetry_notice_shown", True)
+		store.set("bot.telemetry", True)
 		dcb.count_usage("cmd_list")
 		dcb.count_usage("cmd_list")
 		assert dcb.telemetry_client.preview()["usage"] == {"cmd_list": 2}
@@ -4118,29 +4152,6 @@ def test_the_snapshot_never_carries_names_or_addresses():
 def test_containers_are_counted_in_ranges():
 	assert [dcb._containers_bucket(n) for n in (0, 1, 5, 6, 25, 26, 100, 101, 5000)] == \
 		["0", "1-5", "1-5", "6-10", "11-25", "26-50", "51-100", "101+", "101+"]
-
-
-def test_the_notice_puts_accept_on_a_row_of_its_own():
-	markup = dcb.build_telemetry_notice_markup()
-	rows = [[button.callback_data for button in row] for row in markup.keyboard]
-	assert rows == [["telemetryAccept"], ["telemetryShow", "telemetryDisable"]], rows
-	# Words that link, not bare URLs: the public statistics and what is collected.
-	assert 'href="https://stats.dgongut.com/docker-controller-bot"' in dcb.telemetry_notice_text()
-	assert 'href="https://stats.dgongut.com/docker-controller-bot/privacy"' in dcb.telemetry_notice_text()
-
-
-def test_the_notice_waits_for_the_language_on_a_new_install():
-	with _telemetry_state(announced=False):
-		sent = []
-		original = dcb.send_message
-		dcb.send_message = lambda **kwargs: sent.append(kwargs) or MagicMock()
-		try:
-			dcb.send_telemetry_notice_if_pending()
-			dcb.send_telemetry_notice_if_pending()
-		finally:
-			dcb.send_message = original
-		assert len(sent) == 1, "el aviso sale una sola vez"
-		assert store.state_get("telemetry_notice_shown") is True
 
 
 def test_turning_telemetry_off_forgets_the_installation():
