@@ -1586,9 +1586,22 @@ def schedule_container_ref(host_id, container_name):
 	Resolved on that host and nowhere else: a task names a container, and
 	acting on a same-named container elsewhere would be both silent and, for
 	stop or exec, destructive.
+
+	Returns None only when the answer is that the container is not there, which
+	disables the task. A host that cannot be asked raises HostUnavailable
+	instead: an ssh machine rebooting during a nightly restart, or one still
+	coming up when the @reboot tasks run, would otherwise burn the task for
+	good over a minute of downtime.
 	"""
-	short_id = find_container_id_on_host(host_id, container_name)
-	return make_ref(host_id, short_id) if short_id else None
+	if host_registry.host(host_id) is None:
+		# Removed from the bot: there is nowhere this task can ever run.
+		return None
+	owner = manager(host_id)
+	try:
+		container = owner.container_named(container_name)
+	except Exception as e:
+		raise host_registry.HostUnavailable(host_id, str(e))
+	return container_ref(host_id, container) if container is not None else None
 
 
 class DockerScheduleMonitor:
@@ -1731,6 +1744,12 @@ class DockerScheduleMonitor:
 
 			return True
 
+		except host_registry.HostUnavailable as e:
+			# Skipped for this run only. Said in the log and not in the chat: a
+			# task that fires every minute against a machine that is down for
+			# an hour would be sixty messages.
+			warning(f"Schedule {schedule.get('name') or action} skipped: {e}")
+			return False
 		except Exception as e:
 			error(f"Error executing schedule action [{action}]: [{str(e)}]")
 			return False

@@ -2986,6 +2986,46 @@ def test_a_schedule_on_a_paused_host_is_skipped_not_disabled():
 		(dcb.schedule_manager.update_schedule, dcb.send_message) = original
 		_restore_hosts()
 
+def test_a_schedule_on_an_unreachable_host_is_skipped_not_disabled():
+	"""
+	Not paused, just down for a moment: an ssh machine rebooting during the
+	nightly restart, or one still coming up when the @reboot tasks run. The
+	lookup turned "cannot ask" into "not found", and "not found" disables.
+	"""
+	_with_hosts(HOST_FIXTURE)   # nas no responde
+	disabled = []
+	messages = []
+	original = (dcb.schedule_manager.update_schedule, dcb.send_message, dcb.DockerManager.container_named)
+	dcb.schedule_manager.update_schedule = lambda name, **kwargs: disabled.append((name, kwargs))
+	dcb.send_message = lambda **kwargs: messages.append(kwargs) or None
+	try:
+		monitor = dcb.DockerScheduleMonitor()
+		for action in ("run", "stop", "restart", "exec"):
+			task = {"id": 1, "name": f"{action} nas", "cron": "@daily", "action": action,
+					"container": "plex", "host": "h_nas", "command": "ls", "enabled": True}
+			assert monitor._execute_schedule_action(task) is False
+		assert disabled == [] and messages == [], (disabled, messages)
+
+		# A daemon that answers with an error is the same: nothing is known.
+		dcb.DockerManager.container_named = lambda self, name: (_ for _ in ()).throw(Exception("EOF"))
+		task = {"id": 2, "name": "local roto", "cron": "@daily", "action": "restart",
+				"container": "nginx", "host": "h_local", "enabled": True}
+		assert monitor._execute_schedule_action(task) is False
+		assert disabled == [], disabled
+
+		# But a host that answers "no such container" still disables, and so
+		# does a host the bot no longer has: those tasks can never run.
+		dcb.DockerManager.container_named = lambda self, name: None
+		assert monitor._execute_schedule_action(task) is False
+		task = {"id": 3, "name": "host borrado", "cron": "@daily", "action": "restart",
+				"container": "plex", "host": "h_gone", "enabled": True}
+		assert monitor._execute_schedule_action(task) is False
+		assert [name for name, _ in disabled] == ["local roto", "host borrado"], disabled
+	finally:
+		(dcb.schedule_manager.update_schedule, dcb.send_message, dcb.DockerManager.container_named) = original
+		_restore_hosts()
+
+
 def test_removing_a_host_warns_about_the_schedules_it_would_orphan():
 	"""
 	A task naming a host that no longer exists raises HostUnavailable on every
