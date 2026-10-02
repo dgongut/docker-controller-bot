@@ -36,7 +36,7 @@ from i18n import get_text, language
 from logger import debug, error, warning
 from message_queue import MessageQueue
 
-VERSION = "5.0.0_RC6"
+VERSION = "5.0.0_RC7"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -7347,6 +7347,10 @@ def _send_message_direct(chat_id, message, reply_markup, parse_mode, disable_web
 def _send_document_direct(chat_id, document, reply_markup, caption, parse_mode, message_thread_id=None):
 	"""Sends a document directly without using the queue"""
 	try:
+		# La cola reintenta con el mismo objeto: sin rebobinarlo, el segundo
+		# intento leería un fichero ya consumido y mandaría uno vacío.
+		if hasattr(document, "seek"):
+			document.seek(0)
 		if message_thread_id is None:
 			return bot.send_document(chat_id, document=document, reply_markup=reply_markup, caption=caption, parse_mode=parse_mode)
 		else:
@@ -7431,7 +7435,7 @@ def send_message(chat_id=None, message=None, reply_markup=None, parse_mode="html
 	if chat_id is None:
 		chat_id = get_reply_chat_id()
 	message_thread_id = get_reply_thread_id(chat_id)
-	return message_queue.add_message(_send_message_direct, chat_id, message, reply_markup, parse_mode, disable_web_page_preview, message_thread_id, wait_for_result=True)
+	return message_queue.add_message(_send_message_direct, chat_id, message, reply_markup, parse_mode, disable_web_page_preview, message_thread_id, wait_for_result=True, idempotent=False)
 
 def send_message_to_notification_channel(chat_id=None, message=None, reply_markup=None, parse_mode="html", disable_web_page_preview=True):
 	"""
@@ -7451,7 +7455,7 @@ def send_document(chat_id=None, document=None, reply_markup=None, caption=None, 
 	if chat_id is None:
 		chat_id = get_reply_chat_id()
 	message_thread_id = get_reply_thread_id(chat_id)
-	return message_queue.add_message(_send_document_direct, chat_id, document, reply_markup, caption, parse_mode, message_thread_id, wait_for_result=True)
+	return message_queue.add_message(_send_document_direct, chat_id, document, reply_markup, caption, parse_mode, message_thread_id, wait_for_result=True, idempotent=False)
 
 def edit_message_text(text, chat_id, message_id, parse_mode="html", reply_markup=None):
 	"""Edits the text of a message using the queue (async, does not block on failure)"""

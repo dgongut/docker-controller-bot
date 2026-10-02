@@ -42,6 +42,17 @@ def _is_permanent(error_message):
 	return any(marker in lowered for marker in PERMANENT_FAILURES)
 
 
+def _is_ambiguous(error_message):
+	"""Whether the request may have been carried out even though it failed."""
+	# Un tiempo de lectura agotado quiere decir que la petición salió y lo que
+	# no llegó fue la respuesta: Telegram pudo haberla atendido igual. Para una
+	# edición o un borrado da lo mismo repetirla, pero un envío repetido es un
+	# mensaje duplicado —y el primero, además, sin botones que funcionen,
+	# porque su message_id no se llegó a saber—. Un fallo al conectar no entra
+	# aquí: la petición no salió y reintentarla es seguro.
+	return "read timed out" in error_message.lower()
+
+
 class MessageQueue:
 	def __init__(self, delay_between_messages=0.5, max_retries=3):
 		self.queue = queue.Queue()
@@ -74,6 +85,7 @@ class MessageQueue:
 		args = message_data['args']
 		kwargs = message_data['kwargs']
 		result_queue = message_data.get('result_queue')
+		idempotent = message_data.get('idempotent', True)
 
 		try:
 			for attempt in range(self.max_retries):
@@ -89,6 +101,13 @@ class MessageQueue:
 					# attempts while every other message waits.
 					if _is_permanent(error_msg):
 						debug(f"Not retrying, Telegram will answer the same: {error_msg}")
+						if result_queue:
+							result_queue.put(None)
+						return None
+					# Repetirlo podría publicarlo dos veces: mejor un aviso
+					# perdido, que queda en el log, que uno duplicado.
+					if not idempotent and _is_ambiguous(error_msg):
+						warning(f"Not retrying, it may have been delivered already: {error_msg}")
 						if result_queue:
 							result_queue.put(None)
 						return None
@@ -114,14 +133,21 @@ class MessageQueue:
 			if result_queue:
 				result_queue.put(None)
 
-	def add_message(self, func, *args, wait_for_result=False, **kwargs):
-		"""Adds a message to the queue. If wait_for_result=True, waits for the result"""
+	def add_message(self, func, *args, wait_for_result=False, idempotent=True, **kwargs):
+		"""
+		Adds a message to the queue. If wait_for_result=True, waits for the result.
+
+		idempotent=False marks what publishes something new (a message, a
+		document): it is not retried after a timeout that leaves it unknown
+		whether Telegram already did it.
+		"""
 		result_queue = queue.Queue() if wait_for_result else None
 		self.queue.put({
 			'func': func,
 			'args': args,
 			'kwargs': kwargs,
-			'result_queue': result_queue
+			'result_queue': result_queue,
+			'idempotent': idempotent,
 		})
 		if wait_for_result:
 			try:

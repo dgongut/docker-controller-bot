@@ -13,4 +13,3 @@ services:
         build:
           context: .
           dockerfile: ./Dockerfile_local
-        tty: true

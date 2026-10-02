@@ -60,7 +60,6 @@ services:
         container_name: docker-controller-bot
         restart: always
         network_mode: host
-        tty: true
 ```
 
 ```bash

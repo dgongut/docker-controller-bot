@@ -1264,6 +1264,81 @@ def test_the_queue_still_retries_a_rate_limit():
 		queue.shutdown()
 
 
+def test_the_queue_does_not_resend_after_a_read_timeout():
+	"""
+	A read timeout leaves it unknown whether Telegram published the message:
+	the request went out and only the answer was lost. Sending it again is
+	what put two identical "updates available" messages a minute apart in the
+	chat, and only the second one had working buttons.
+	"""
+	import message_queue as mq
+
+	calls = []
+
+	def times_out(*args, **kwargs):
+		calls.append(1)
+		raise Exception("HTTPSConnectionPool(host='api.telegram.org', port=443): Read timed out. (read timeout=30)")
+
+	queue = mq.MessageQueue(delay_between_messages=0)
+	try:
+		assert queue.add_message(times_out, wait_for_result=True, idempotent=False) is None
+		assert len(calls) == 1, f"lo ha enviado {len(calls)} veces"
+	finally:
+		queue.shutdown()
+
+
+def test_the_queue_still_retries_a_timeout_that_is_safe_to_repeat():
+	"""An edit or a delete repeated lands the same, so those keep retrying."""
+	import message_queue as mq
+
+	calls = []
+
+	def times_out_once(*args, **kwargs):
+		calls.append(1)
+		if len(calls) < 2:
+			raise Exception("Read timed out. (read timeout=30)")
+		return "editado"
+
+	queue = mq.MessageQueue(delay_between_messages=0)
+	try:
+		assert queue.add_message(times_out_once, wait_for_result=True) == "editado"
+		assert len(calls) == 2, calls
+	finally:
+		queue.shutdown()
+
+
+def test_sends_are_marked_as_not_safe_to_repeat():
+	"""The queue only holds back what the call sites say publishes something."""
+	import inspect
+	for fn in (dcb.send_message, dcb.send_document):
+		assert "idempotent=False" in inspect.getsource(fn), fn.__name__
+
+
+def test_a_retried_document_is_sent_from_the_start():
+	"""The queue retries with the same file object; it must not arrive empty."""
+	import io
+	read = []
+
+	class FakeBot:
+		def send_document(self, chat_id, document=None, **kwargs):
+			read.append(document.read())
+			if len(read) < 2:
+				raise Exception("Bad Gateway")
+
+	original = dcb.bot
+	dcb.bot = FakeBot()
+	try:
+		document = io.BytesIO(b"contenido")
+		for _ in range(2):
+			try:
+				dcb._send_document_direct(1, document, None, None, "html")
+			except Exception:
+				pass
+	finally:
+		dcb.bot = original
+	assert read == [b"contenido", b"contenido"], read
+
+
 def _press_every_button_through_the_dispatcher():
 	"""
 	Sends a synthetic press for every callback through button_controller, and

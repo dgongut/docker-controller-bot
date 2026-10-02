@@ -687,3 +687,24 @@ def test_no_module_imports_a_name_it_never_uses():
 
 	assert not problems, (
 		"imports que nadie lee:\n" + "\n".join(problems))
+
+
+def test_every_image_logs_as_it_goes():
+	"""
+	Without a TTY, Python holds stdout in a buffer, and every debug() line sat
+	there for over a day: /logfile showed the errors from telebot (stderr goes
+	out at once) and the bot's own lines stopped hours before. A container that
+	is stopped loses whatever is still in the buffer.
+	"""
+	for name in ("Dockerfile", "Dockerfile_debug", "Dockerfile_local"):
+		with open(os.path.join(harness.REPO, name), encoding="utf-8") as f:
+			assert "PYTHONUNBUFFERED=1" in f.read(), f"{name} no lleva PYTHONUNBUFFERED=1"
+
+
+def test_the_image_ships_every_module():
+	"""The release Dockerfile copies the modules one by one; a new one is easy to forget."""
+	with open(os.path.join(harness.REPO, "Dockerfile"), encoding="utf-8") as f:
+		dockerfile = f.read()
+	modules = [n for n in os.listdir(harness.REPO) if n.endswith(".py")]
+	missing = [n for n in modules if f"/{n} /app" not in dockerfile]
+	assert not missing, f"el Dockerfile no copia: {missing}"

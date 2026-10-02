@@ -1,6 +1,7 @@
 FROM alpine:3.24.2
 
-ENV TZ=UTC
+ENV TZ=UTC \
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
