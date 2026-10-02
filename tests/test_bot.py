@@ -2799,6 +2799,52 @@ def test_a_project_action_removes_its_progress_line():
 		_restore_hosts()
 
 
+def test_a_host_that_hangs_does_not_hold_the_others():
+	"""
+	manager() built the client with the lock every host shares held. Over ssh a
+	machine that drops off without closing the connection hangs that build, so
+	one press on it stalled every other host's menu until the sweeps gave up
+	on them and marked them down as well.
+	"""
+	import host_registry
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	dcb.forget_managers()
+	release = threading.Event()
+	entered = threading.Event()
+	original = host_registry.client
+
+	def client(host_id):
+		if host_id == "h_nas":
+			entered.set()
+			release.wait(10)
+		return original(host_id)
+
+	host_registry.client = client
+	try:
+		hanging = threading.Thread(target=lambda: dcb.manager("h_nas"), daemon=True)
+		hanging.start()
+		assert entered.wait(5)
+		started = time.monotonic()
+		local = dcb.manager("h_local")
+		assert time.monotonic() - started < 2, "el host local ha esperado al colgado"
+		assert local.host_id == "h_local"
+	finally:
+		release.set()
+		hanging.join(5)
+		host_registry.client = original
+		dcb.forget_managers()
+		_restore_hosts()
+
+
+def test_ssh_hosts_are_bounded_in_every_image():
+	"""docker-py reads the ssh pipe with no timeout; ssh's own keepalive is the only bound."""
+	for name in ("Dockerfile", "Dockerfile_debug", "Dockerfile_local"):
+		with open(os.path.join(harness.REPO, name), encoding="utf-8") as f:
+			text = f.read()
+		for option in ("BatchMode yes", "ConnectTimeout", "ServerAliveInterval", "ServerAliveCountMax"):
+			assert option in text, f"{name} no fija {option}"
+
+
 def test_a_project_on_an_unreachable_host_gives_no_names():
 	"""Rather than raising into whatever was iterating over them."""
 	_with_hosts(HOST_FIXTURE)

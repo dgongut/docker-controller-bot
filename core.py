@@ -201,9 +201,9 @@ class DockerManager:
 	pass along.
 	"""
 
-	def __init__(self, host_id=None):
+	def __init__(self, host_id=None, client=None):
 		self.host_id = host_id or host_registry.local_host_id()
-		self.client = host_registry.client(self.host_id)
+		self.client = client or host_registry.client(self.host_id)
 		self.compose_manager = ComposeProjectManager(self.client)
 
 	@property
@@ -850,11 +850,21 @@ def manager(host_id=None):
 	callers sweeping several hosts catch to skip the ones that are down.
 	"""
 	host_id = host_id or host_registry.local_host_id()
+	# Outside the lock: reaching a host that is not answering takes as long as
+	# its timeout, and over ssh longer. Holding the one lock every host shares
+	# meant a press on a dead machine stalled the menus of all the others,
+	# until the parallel sweeps gave up on them and marked them down too.
+	current = host_registry.client(host_id)
 	with _managers_lock:
 		existing = _managers.get(host_id)
-		if existing is not None and existing.client is host_registry.client(host_id):
+		if existing is not None and existing.client is current:
 			return existing
-		built = DockerManager(host_id)
+	built = DockerManager(host_id, client=current)
+	with _managers_lock:
+		existing = _managers.get(host_id)
+		if existing is not None and existing.client is current:
+			# Another thread built one for the same client meanwhile.
+			return existing
 		_managers[host_id] = built
 		return built
 

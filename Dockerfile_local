@@ -16,6 +16,13 @@ RUN export PIP_BREAK_SYSTEM_PACKAGES=1 && \
     pip3 install --no-cache-dir -Ur /app/requirements.txt && \
     pip3 install --no-cache-dir debugpy watchdog[watchmedo]
 
+# A remote ssh:// host that stops answering has to fail, not hang: docker-py
+# reads the ssh pipe with no timeout of its own, so these are the only bound.
+# Written as the system defaults, so a ~/.ssh/config mapped in still wins.
+RUN mkdir -p /etc/ssh/ssh_config.d && \
+    printf 'Host *\n    BatchMode yes\n    ConnectTimeout 10\n    ServerAliveInterval 10\n    ServerAliveCountMax 3\n' \
+        > /etc/ssh/ssh_config.d/docker-controller-bot.conf
+
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD python3 -c "import sys; sys.exit(0)" || exit 1
