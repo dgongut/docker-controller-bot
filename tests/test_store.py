@@ -283,3 +283,14 @@ def test_persistence_looks_at_parent_directories():
 	finally:
 		store._is_mounted = original
 	shutil.rmtree(root, ignore_errors=True)
+
+
+def test_removing_a_host_forgets_its_update_cache():
+	"""Nothing else ever cleared those entries: they stayed in updates.json for good."""
+	root = fresh_root()
+	store.set_update_status("h_nas1", "plex", "plex:latest", True)
+	store.set_update_status("h_nas1", "sonarr", "sonarr:latest", False)
+	store.set_update_status("h_casa", "plex", "plex:latest", True)
+	store.forget_host_updates("h_nas1")
+	assert list(store.update_entries()) == ["h_casa:plex"], store.update_entries()
+	shutil.rmtree(root, ignore_errors=True)

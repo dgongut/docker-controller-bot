@@ -10,16 +10,24 @@ import docker.errors
 import time
 import threading
 
-# Global lock dictionary to prevent concurrent updates of the same container
-_container_locks = {}
-_locks_lock = threading.Lock()
+# The containers being updated right now, so the same one is never updated
+# twice at once. A set that empties as updates finish, rather than a lock per
+# id kept for good: every update gives the container a new id, so that map
+# gained an entry each time and never lost one.
+_updating = set()
+_updating_lock = threading.Lock()
 
-def get_container_lock(container_id):
-	"""Get or create a lock for a specific container to prevent concurrent updates."""
-	with _locks_lock:
-		if container_id not in _container_locks:
-			_container_locks[container_id] = threading.Lock()
-		return _container_locks[container_id]
+def _start_updating(container_id):
+	"""Claims a container for an update; False when one is already running."""
+	with _updating_lock:
+		if container_id in _updating:
+			return False
+		_updating.add(container_id)
+		return True
+
+def _done_updating(container_id):
+	with _updating_lock:
+		_updating.discard(container_id)
 
 
 # What Docker waits before killing a container that set no stop_grace_period.
@@ -464,10 +472,8 @@ def perform_update(client, container, config, container_name, message, edit_mess
 	Returns:
 		str: Success or error message
 	"""
-	# Acquire lock for this container to prevent concurrent updates
-	container_lock = get_container_lock(container.id)
-
-	if not container_lock.acquire(blocking=False):
+	# Claim this container to prevent concurrent updates
+	if not _start_updating(container.id):
 		error_msg = f"Container {container_name} is already being updated. Please wait."
 		debug_func(f"[UPDATE_START] ❌ {error_msg}")
 		error_func(error_msg)
@@ -478,7 +484,7 @@ def perform_update(client, container, config, container_name, message, edit_mess
 									   debug_func, error_func, get_text_func, save_status_func,
 									   container_id_length, telegram_group, skip_pull=skip_pull)
 	finally:
-		container_lock.release()
+		_done_updating(container.id)
 
 
 def _perform_update_locked(client, container, config, container_name, message, edit_message_func,

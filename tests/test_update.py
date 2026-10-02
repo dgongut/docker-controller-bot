@@ -225,3 +225,31 @@ def test_nothing_stops_a_container_behind_the_helpers_back():
 	allowed = ("container.stop(timeout=grace)",)
 	offenders = [o for o in offenders if not o.endswith(allowed)]
 	assert not offenders, "\n".join(offenders)
+
+
+def test_an_update_in_progress_is_claimed_and_then_released():
+	"""
+	A lock per container id was kept for good, and every update gives the
+	container a new id: one more entry each time, never one fewer.
+	"""
+	from unittest.mock import MagicMock
+	container = MagicMock()
+	container.id = "a" * 64
+	seen = []
+	original = docker_update._perform_update_locked
+
+	def locked(*args, **kwargs):
+		# While this one runs, a second update of the same container is refused.
+		seen.append(docker_update.perform_update(None, container, {}, "plex", None, None,
+			lambda *a: None, lambda *a: None, None, None, 5, None))
+		return "ok"
+
+	docker_update._perform_update_locked = locked
+	try:
+		result = docker_update.perform_update(None, container, {}, "plex", None, None,
+			lambda *a: None, lambda *a: None, None, None, 5, None)
+		assert result == "ok", result
+		assert "already being updated" in seen[0], seen
+		assert docker_update._updating == set(), docker_update._updating
+	finally:
+		docker_update._perform_update_locked = original

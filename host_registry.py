@@ -654,6 +654,7 @@ def remove_host(host_id):
 	with _lock:
 		store.set("hosts", [h for h in hosts(include_paused=True) if h["id"] != host_id])
 	drop(host_id)
+	store.forget_host_updates(host_id)
 	debug(f"Removed host {host_id}")
 	return True
 

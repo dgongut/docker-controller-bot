@@ -541,6 +541,23 @@ def forget_update_status(host_id, container_name):
 			_flush("updates")
 
 
+def forget_host_updates(host_id):
+	"""
+	Drops the cached update state of every container on one host.
+
+	For a host that was removed: nothing else ever clears those entries, and
+	they stayed in updates.json for good.
+	"""
+	prefix = _update_key(host_id, "")
+	with _lock:
+		entries = _updates_document()["entries"]
+		gone = [key for key in entries if key.startswith(prefix)]
+		for key in gone:
+			del entries[key]
+		if gone:
+			_flush("updates")
+
+
 def update_entries():
 	"""The whole cache, as {key: entry}. Read-only view for callers."""
 	with _lock:
