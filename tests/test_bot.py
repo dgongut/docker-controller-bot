@@ -2118,6 +2118,29 @@ def test_someone_who_is_not_an_administrator_learns_nothing_from_a_name():
 			dcb.is_admin, dcb._bot_identity, dcb.is_allowed_origin) = original
 
 
+def test_a_mute_someone_asked_for_is_always_confirmed():
+	"""
+	Without extended messages /mute answered nothing, which reads as it not
+	having worked. A scheduled mute, and the timer running out, stay quiet.
+	"""
+	sent = []
+	original = (dcb.send_message, store.get("bot.extended_messages"))
+	dcb.send_message = lambda **kw: sent.append(kw.get("message"))
+	store.set("bot.extended_messages", False)
+	try:
+		commands.cmd_mute(argument="5")
+		commands.cmd_mute(argument="0")
+		assert sent == [i18n.get_text("muted", 5), i18n.get_text("unmuted")], sent
+		sent.clear()
+		dcb.mute(5)
+		dcb.unmute()
+		assert sent == [], sent
+	finally:
+		dcb.unmute()   # con el envío aún interceptado
+		dcb.send_message = original[0]
+		store.set("bot.extended_messages", original[1])
+
+
 def test_every_command_survives_the_host_being_down():
 	"""Same promise as the buttons: a machine that is gone degrades, not crashes."""
 	import docker

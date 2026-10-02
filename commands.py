@@ -176,7 +176,7 @@ def cmd_mute(user_id=None, chat_id=None, container_id=None, container_name=None,
 	if minutes < 0 or minutes > MUTE_MAX_MINUTES:
 		send_message(message=get_text("error_use_mute_command"))
 		return
-	mute(minutes)
+	mute(minutes, asked=True)
 
 # Registered by importing this module. The core reads the registry rather than
 # importing this file, which is what keeps the dependency going one way only.

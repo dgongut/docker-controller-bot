@@ -4708,12 +4708,19 @@ def get_temporal_file(data, fileName):
 	fichero_temporal.name = f"{fileName}_{fecha_hora_formateada}.txt"
 	return fichero_temporal
 
-def mute(minutes):
-	"""Mute the bot with thread-safe lock to prevent race conditions."""
+def mute(minutes, asked=False):
+	"""
+	Mute the bot with thread-safe lock to prevent race conditions.
+
+	`asked` is for a /mute someone typed or pressed: that one is always
+	confirmed. Without extended messages it used to answer nothing at all,
+	which reads as the command not having worked. A scheduled mute stays
+	quiet unless extended messages are on, as it always has.
+	"""
 	global _unmute_timer
 
 	if minutes == 0:
-		unmute()
+		unmute(asked=asked)
 		return
 
 	# Use lock to prevent race conditions with unmute timer
@@ -4734,7 +4741,7 @@ def mute(minutes):
 
 		store.state_set("mute_until", time.time() + minutes * 60)
 		debug(f"Bot muted for {minutes} minutes")
-		if store.get("bot.extended_messages"):
+		if asked or store.get("bot.extended_messages"):
 			if minutes == 1:
 				send_message(message=get_text("muted_singular"))
 			else:
@@ -4746,8 +4753,13 @@ def mute(minutes):
 		_unmute_timer.daemon = True
 		_unmute_timer.start()
 
-def unmute():
-	"""Unmute the bot with thread-safe lock to prevent race conditions."""
+def unmute(asked=False):
+	"""
+	Unmute the bot with thread-safe lock to prevent race conditions.
+
+	`asked` as in mute(): a /mute 0 is confirmed; the timer running out is
+	only said with extended messages on.
+	"""
 	global _unmute_timer
 
 	# Use lock to prevent race conditions with mute timer
@@ -4759,7 +4771,7 @@ def unmute():
 
 		store.state_set("mute_until", 0)
 		debug("Bot unmuted")
-		if store.get("bot.extended_messages"):
+		if asked or store.get("bot.extended_messages"):
 			send_message(message=get_text("unmuted"))
 
 def _mute_until():
