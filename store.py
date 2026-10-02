@@ -374,6 +374,28 @@ def _default_for(dotted_key):
 	return container.get(last)
 
 
+def _as_type_of(default, value):
+	"""
+	`value` read the way `default` is typed, for what a hand edit can get wrong.
+
+	Callers test these settings for truth, and any non-empty string is true:
+	`"telemetry": "false"` written by hand turned the statistics on. A string
+	is on only when it plainly says so, the way the 4.x variables were read.
+	"""
+	if isinstance(default, bool) and not isinstance(value, bool):
+		if isinstance(value, str):
+			return value.strip().lower() in ("1", "true", "yes", "on")
+		if isinstance(value, (int, float)):
+			return bool(value)
+		return default
+	if isinstance(default, int) and not isinstance(default, bool) and isinstance(value, str):
+		try:
+			return int(value.strip())
+		except ValueError:
+			return default
+	return value
+
+
 def get(dotted_key):
 	"""
 	Reads a setting by dotted path, e.g. get("bot.language").
@@ -385,7 +407,7 @@ def get(dotted_key):
 		container, last = _walk(_settings_document(), dotted_key)
 		if container is None or last not in container:
 			return _default_for(dotted_key)
-		value = container[last]
+		value = _as_type_of(_default_for(dotted_key), container[last])
 		# A copy of anything mutable. Handing out the live list of hosts let a
 		# caller change an entry in place without this lock —pausing a host
 		# did— while another thread was in json.dump of the same document:

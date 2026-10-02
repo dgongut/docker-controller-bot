@@ -70,6 +70,20 @@ def test_what_get_hands_out_cannot_change_the_store():
 	shutil.rmtree(root, ignore_errors=True)
 
 
+def test_a_hand_edited_value_is_read_as_the_type_it_should_be():
+	"""`"telemetry": "false"` is a non-empty string, and every caller tests for truth."""
+	root = fresh_root()
+	for raw, expected in (("false", False), ("0", False), ("no", False), ("", False), ("falso", False),
+							("true", True), ("1", True), (" Yes ", True), (0, False), (1, True), (None, True)):
+		store.set("bot.telemetry", raw)
+		assert store.get("bot.telemetry") is expected, (raw, store.get("bot.telemetry"))
+	store.set("bot.button_columns", "3")
+	assert store.get("bot.button_columns") == 3
+	store.set("bot.button_columns", "tres")
+	assert store.get("bot.button_columns") == 2
+	shutil.rmtree(root, ignore_errors=True)
+
+
 def test_unknown_keys_are_preserved():
 	"""A downgrade must not throw away what a newer version wrote."""
 	root = fresh_root()
