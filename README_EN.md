@@ -83,6 +83,7 @@ Open Telegram, find your bot and send it `/start`. You will see the button-based
   ```
 
   **Same left-hand side, and no files are moved**: they are already in your volume and keep their names. Then `docker compose up -d` to recreate the container. Until you do, the bot reminds you in its start-up message.
+- **`tty: true` is no longer needed.** Up to 4.x the compose carried it so the bot's logs showed up in `docker logs`; from 5.0 the image writes them straight away without it. You can remove it, or leave it: it does no harm.
 - **`CONTAINER_NAME` is no longer needed.** Up to 4.x you had to tell the bot the name of its own container, so it would know not to stop or delete itself. It now works that out on its own: it reads its id from `/proc/self/mountinfo` and asks Docker which one it is. If you still have the variable set the bot starts fine and the log tells you that you can drop it.
 - On the first start the bot imports the values of your environment variables into `settings.json` and keeps them as they were. From then on `settings.json` is the only source and those variables are no longer read; the log tells you which ones you can remove from the docker-compose.
 
@@ -213,7 +214,7 @@ Everything else is configured from the bot itself and stored in `settings.json`,
 |Docker hosts| The machines the bot manages. Added, tested, renamed and removed from here. See the remote hosts dropdown |
 |Anonymous statistics| Once a day it sends anonymous usage figures. Enabled by default. See the statistics dropdown |
 
-Changes made from `/settings` apply immediately, without restarting the container. If you prefer to edit `settings.json` by hand, a restart is needed for it to be read.
+Changes made from `/settings` apply immediately, without restarting the container.
 
 </details>
 

@@ -83,6 +83,7 @@ Abre Telegram, busca tu bot y envíale `/start`. Verás el menú principal con b
   ```
 
   **La misma parte izquierda, y no se mueve ningún fichero**: los ficheros ya están en tu volumen y se llaman igual. Después, `docker compose up -d` para recrear el contenedor. Mientras no lo hagas, el bot te lo recuerda en su mensaje de arranque.
+- **`tty: true` ya no hace falta.** Hasta la 4.x el compose lo llevaba para que los logs del bot salieran en `docker logs`; desde la 5.0 la imagen los escribe al momento sin él. Puedes quitarlo, o dejarlo: no molesta.
 - **`CONTAINER_NAME` ya no hace falta.** Hasta la 4.x había que decirle al bot cómo se llamaba su propio contenedor, para que supiera no pararse ni eliminarse a sí mismo. Ahora lo averigua solo: lee su id en `/proc/self/mountinfo` y le pregunta a Docker cuál es. Si la tienes puesta el bot arranca igual y te avisa en el log de que puedes quitarla.
 - En el primer arranque el bot importa los valores de tus variables de entorno a `settings.json` y los conserva tal cual. A partir de ahí manda `settings.json`, y esas variables ya no se leen; el log te avisa de las que puedes borrar del docker-compose.
 
@@ -213,7 +214,7 @@ Todo lo demás se configura desde el propio bot y se guarda en `settings.json`, 
 |Hosts de Docker| Las máquinas que gestiona el bot. Se añaden, se prueban, se renombran y se quitan desde aquí. Ver desplegable de hosts remotos |
 |Estadísticas anónimas| Una vez al día envía cifras anónimas de uso. Por defecto activado. Ver desplegable de estadísticas |
 
-Los cambios hechos desde `/settings` se aplican al momento, sin reiniciar el contenedor. Si prefieres editar `settings.json` a mano, hará falta reiniciar para que los lea.
+Los cambios hechos desde `/settings` se aplican al momento, sin reiniciar el contenedor.
 
 </details>
 
