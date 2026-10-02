@@ -1428,6 +1428,9 @@ def wait_for_next_update_check():
 
 
 class DockerUpdateMonitor:
+	# A labelled bot found to need an update, waiting for the end of the pass.
+	_deferred_self_update = None
+
 	def detectar_actualizaciones(self):
 		while True:
 			if not store.get("bot.check_updates"):
@@ -1466,6 +1469,7 @@ class DockerUpdateMonitor:
 		# down degrades its own check and nothing else.
 		all_updates = []  # list of [reference, name] pairs, across every host
 		anything_new = False
+		self._deferred_self_update = None
 		for entry, owner, containers in hosts_with_containers():
 			try:
 				found, has_new = self._check_host(entry, owner, cold_cache, containers)
@@ -1473,6 +1477,17 @@ class DockerUpdateMonitor:
 				anything_new = anything_new or has_new
 			except Exception as e:
 				error(f"Update check failed on {entry.get('alias', entry['id'])}: [{e}]")
+		try:
+			self._announce(all_updates, anything_new)
+		finally:
+			# Last of all, once everything else has been checked and said:
+			# from here the bot is replaced by the new one.
+			if self._deferred_self_update:
+				reference, name = self._deferred_self_update
+				self._auto_update(ref_host(reference), reference, name)
+
+	def _announce(self, all_updates, anything_new):
+		"""The single fleet-wide message for what a pass found."""
 
 		# One message for the whole fleet rather than one per host: with four
 		# hosts that was four taps to update everything, and the keyboard
@@ -1500,6 +1515,23 @@ class DockerUpdateMonitor:
 			# nothing has to be asked of each daemon a second time.
 			save_container_refs(message.chat.id, message.message_id, all_updates)
 
+	def _auto_update(self, host_id, reference, name):
+		"""Updates a container labelled for it, saying so where notifications go."""
+		if store.get("bot.extended_messages") and not is_muted():
+			send_message_to_notification_channel(message=f'{host_label(host_id)}{get_text("auto_update", name)}')
+		debug(f"Auto-updating container {name}")
+		count_usage("auto_label_update")
+		# Build a send_fn that routes to the notification channel,
+		# or silently swallows messages (with a debug trace) when muted.
+		if is_muted():
+			def _auto_update_send_fn(msg):
+				debug(f"Message [{msg}] omitted because muted")
+				return None
+		else:
+			def _auto_update_send_fn(msg):
+				return send_message_to_notification_channel(message=msg)
+		perform_container_update(reference, name, send_fn=_auto_update_send_fn)
+
 	def _check_host(self, entry, owner, cold_cache, containers):
 		"""
 		Checks one host for updates, returning ([reference, name], has_new).
@@ -1523,6 +1555,11 @@ class DockerUpdateMonitor:
 		host_id = entry["id"]
 		grouped_updates_containers = []  # list of [reference, name] pairs
 		should_notify = False
+		# One pull per image, not per container: five services on the same
+		# image were five manifest requests, each one counted against Docker
+		# Hub's anonymous rate limit. A failure is remembered too, so the rest
+		# of that image's containers do not ask again in the same pass.
+		pulled = {}
 		for container in containers:
 			if (container.status == "exited" or container.status == "dead") and not store.get("bot.check_update_stopped_containers"):
 				debug(f"Ignoring update check for container {container.name} (stopped)")
@@ -1537,24 +1574,25 @@ class DockerUpdateMonitor:
 			image_with_tag = container_attrs['Image']
 			try:
 				local_image = container.image.id
-				remote_image = owner.client.images.pull(image_with_tag)
+				if image_with_tag not in pulled:
+					try:
+						pulled[image_with_tag] = owner.client.images.pull(image_with_tag)
+					except Exception as pull_error:
+						pulled[image_with_tag] = pull_error
+				remote_image = pulled[image_with_tag]
+				if isinstance(remote_image, Exception):
+					raise remote_image
 				debug(f"Checking update: {container.name} ({image_with_tag}): LOCAL IMAGE [{local_image.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}] - REMOTE IMAGE [{remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}]")
 				if local_image != remote_image.id:
+					if LABEL_AUTO_UPDATE in labels and is_own_container(host_id, container.id, container.name):
+						# Updating the bot recreates it, which would end this
+						# pass halfway, with the hosts after this one unchecked.
+						# So it waits for the end of the pass.
+						debug(f"Auto-update of the bot itself deferred to the end of the pass")
+						self._deferred_self_update = (container_ref(host_id, container), container.name)
+						continue
 					if LABEL_AUTO_UPDATE in labels:
-						if store.get("bot.extended_messages") and not is_muted():
-							send_message_to_notification_channel(message=f'{host_label(host_id)}{get_text("auto_update", container.name)}')
-						debug(f"Auto-updating container {container.name}")
-						count_usage("auto_label_update")
-						# Build a send_fn that routes to the notification channel,
-						# or silently swallows messages (with a debug trace) when muted.
-						if is_muted():
-							def _auto_update_send_fn(msg):
-								debug(f"Message [{msg}] omitted because muted")
-								return None
-						else:
-							def _auto_update_send_fn(msg):
-								return send_message_to_notification_channel(message=msg)
-						perform_container_update(container_ref(host_id, container), container.name, send_fn=_auto_update_send_fn)
+						self._auto_update(host_id, container_ref(host_id, container), container.name)
 						continue
 					old_has_update = read_container_update_status(image_with_tag, container.name, host_id)
 					has_update = True

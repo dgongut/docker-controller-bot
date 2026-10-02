@@ -848,6 +848,67 @@ def test_a_failed_pull_keeps_what_was_known_about_the_update():
 		_restore_hosts()
 
 
+def test_one_pull_per_image_and_pass():
+	"""Five services on one image were five manifest requests against Docker Hub's rate limit."""
+	_with_hosts([HOST_FIXTURE[0]], unreachable=())
+	services = []
+	for name in ("web", "worker", "beat"):
+		service = _container(name, "running", image="app:latest")
+		service.image.id = "sha256:same"
+		services.append(service)
+	owner = MagicMock()
+	owner.client.images.pull.return_value = MagicMock(id="sha256:same")
+	try:
+		dcb.DockerUpdateMonitor()._check_host(HOST_FIXTURE[0], owner, False, services)
+		assert owner.client.images.pull.call_count == 1, owner.client.images.pull.call_args_list
+		# A failure is remembered for the rest of the pass too.
+		owner.client.images.pull.reset_mock()
+		owner.client.images.pull.side_effect = Exception("429 Too Many Requests")
+		dcb.DockerUpdateMonitor()._check_host(HOST_FIXTURE[0], owner, False, services)
+		assert owner.client.images.pull.call_count == 1, owner.client.images.pull.call_args_list
+	finally:
+		for name in ("web", "worker", "beat"):
+			dcb.save_container_update_status("app:latest", name, None, "h_local")
+		_restore_hosts()
+
+
+def test_a_bot_labelled_for_auto_update_waits_for_the_end_of_the_pass():
+	"""
+	Updating the bot recreates it. Done where it was found, the hosts after
+	its own were never checked in that pass.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	me = _container("docker-controller-bot", "running", image="dcb:latest")
+	me.id = "1" * 64
+	me.image.id = "sha256:old"
+	me.labels = {dcb.LABEL_AUTO_UPDATE: ""}
+	plex = _container("plex", "running", image="plex:latest")
+	plex.image.id = "sha256:old"
+	events = []
+	undo = _pretend_to_be(me)
+	listed = {"h_local": [me], "h_nas": [plex]}
+	original = (dcb.DockerManager.list_containers, dcb.DockerUpdateMonitor._auto_update,
+				dcb.DockerUpdateMonitor._announce, dcb.is_own_container)
+	dcb.DockerManager.list_containers = lambda self, comando="": listed[self.host_id]
+	dcb.DockerUpdateMonitor._auto_update = lambda self, host_id, ref, name: events.append(("auto", name))
+	dcb.DockerUpdateMonitor._announce = lambda self, found, new: events.append(("announce", [n for _, n in found]))
+	dcb.is_own_container = lambda host_id=None, container_id=None, container_name=None: container_name == me.name
+	try:
+		for owner in dcb.managers():
+			owner.client.images.pull = lambda image: (events.append(("pull", image)), MagicMock(id="sha256:new"))[1]
+		dcb.DockerUpdateMonitor()._check_fleet(cold_cache=False)
+		assert events[-1] == ("auto", me.name), events
+		assert ("pull", "plex:latest") in events[:-1], events
+		assert ("announce", ["plex"]) in events, events
+	finally:
+		(dcb.DockerManager.list_containers, dcb.DockerUpdateMonitor._auto_update,
+			dcb.DockerUpdateMonitor._announce, dcb.is_own_container) = original
+		for name, image in ((me.name, "dcb:latest"), ("plex", "plex:latest")):
+			dcb.save_container_update_status(image, name, None, "h_local")
+			dcb.save_container_update_status(image, name, None, "h_nas")
+		undo(); _restore_hosts()
+
+
 def test_one_pass_reports_the_whole_fleet_in_one_message():
 	"""
 	One message for the fleet rather than one per host: with four machines
