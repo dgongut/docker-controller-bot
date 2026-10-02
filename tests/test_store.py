@@ -55,6 +55,21 @@ def test_writes_survive_a_reload():
 	shutil.rmtree(root, ignore_errors=True)
 
 
+def test_what_get_hands_out_cannot_change_the_store():
+	"""
+	The live list went out, so changing an entry in place —pausing a host
+	did— changed the document with no lock held, while another thread could
+	be writing it out.
+	"""
+	root = fresh_root()
+	store.set("hosts", [{"id": "h_a91c", "alias": "nas"}])
+	hosts = store.get("hosts")
+	hosts[0]["paused"] = True
+	hosts.append({"id": "h_otro"})
+	assert store.get("hosts") == [{"id": "h_a91c", "alias": "nas"}]
+	shutil.rmtree(root, ignore_errors=True)
+
+
 def test_unknown_keys_are_preserved():
 	"""A downgrade must not throw away what a newer version wrote."""
 	root = fresh_root()

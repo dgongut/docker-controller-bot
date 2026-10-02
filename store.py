@@ -385,7 +385,14 @@ def get(dotted_key):
 		container, last = _walk(_settings_document(), dotted_key)
 		if container is None or last not in container:
 			return _default_for(dotted_key)
-		return container[last]
+		value = container[last]
+		# A copy of anything mutable. Handing out the live list of hosts let a
+		# caller change an entry in place without this lock —pausing a host
+		# did— while another thread was in json.dump of the same document:
+		# "dictionary changed size during iteration", and a lost write.
+		if isinstance(value, (dict, list)):
+			return json.loads(json.dumps(value))
+		return value
 
 
 def set(dotted_key, value):
