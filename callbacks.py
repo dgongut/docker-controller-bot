@@ -1236,10 +1236,13 @@ def register_project_navigation(action):
 											host_id=ctx.hostId)
 
 	def back(ctx):
+		# The button carries no reference, so the dispatcher can only guess the
+		# local host; the message itself remembers which one it was showing.
+		host_id = core.message_host(ctx.chatId, ctx.messageId) or ctx.hostId
 		if multi:
-			core.back_to_level1_multi_aware(action, ctx.chatId, ctx.messageId, ctx.hostId)
+			core.back_to_level1_multi_aware(action, ctx.chatId, ctx.messageId, host_id)
 			return
-		result = core.build_back_to_level1_keyboard(action, ctx.chatId, ctx.messageId, host_id=ctx.hostId)
+		result = core.build_back_to_level1_keyboard(action, ctx.chatId, ctx.messageId, host_id=host_id)
 		if result:
 			markup, message_key = result
 			core.edit_message_text(get_text(message_key), ctx.chatId, ctx.messageId, reply_markup=markup)
@@ -1258,7 +1261,8 @@ for _action in PROJECT_NAVIGATION_ACTIONS:
 
 def _back_to_compose_level1(ctx):
 	"""Compose has no generated enter, but its way back is everyone else's."""
-	result = core.build_back_to_level1_keyboard("Compose", ctx.chatId, ctx.messageId, host_id=ctx.hostId)
+	host_id = core.message_host(ctx.chatId, ctx.messageId) or ctx.hostId
+	result = core.build_back_to_level1_keyboard("Compose", ctx.chatId, ctx.messageId, host_id=host_id)
 	if result:
 		markup, message_key = result
 		core.edit_message_text(get_text(message_key), ctx.chatId, ctx.messageId, reply_markup=markup)

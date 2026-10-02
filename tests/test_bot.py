@@ -2720,6 +2720,53 @@ def test_editing_a_tasks_container_offers_every_host_and_moves_the_host_too():
 		_restore_hosts()
 
 
+def test_back_from_a_project_returns_to_the_host_it_came_from():
+	"""
+	"Back" carries no reference, so the dispatcher left the press on the local
+	host and that won over everything: a remote project's Back showed the local
+	list, and Cancel on deleting a remote project landed on the local delete
+	menu. The message's own cache says which host it was showing.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	asked = []
+	original_build = dcb.build_back_to_level1_keyboard
+	dcb.build_back_to_level1_keyboard = lambda action, chat, msg, **kw: asked.append((action, kw.get("host_id")))
+	chat, message = 501, 9001
+	try:
+		dcb.save_container_cache(chat, message, [_container("plex", "running")], "h_nas")
+		base = {"call": MagicMock(id="q1"), "chatId": chat, "messageId": message, "userId": 1,
+				"multiAction": None, "hostId": "h_local", "containerId": None}
+		names = [f"backTo{a}Level1" for a in callbacks.PROJECT_NAVIGATION_ACTIONS] + ["backToComposeLevel1"]
+		for name in names:
+			spec = callback_registry.specs()[name]
+			spec.handler(callback_registry.Context(comando=name, **base))
+		wrong = [(action, host) for action, host in asked if host != "h_nas"]
+		assert len(asked) == len(names) and not wrong, wrong or asked
+
+		# A multi-selection session is the message's record too, and it wins
+		# over the dispatcher's default.
+		asked.clear()
+		dcb.clear_container_cache(chat, message)
+		dcb.save_multi_action(chat, message, "Stop", 2, "media", set(), "h_nas")
+		dcb.back_to_level1_multi_aware("Stop", chat, message, "h_local")
+		assert asked == [("Stop", "h_nas")], asked
+	finally:
+		dcb.build_back_to_level1_keyboard = original_build
+		dcb.clear_container_cache(chat, message)
+		dcb.clear_multi_action(chat, message)
+		_restore_hosts()
+
+
+def test_a_message_cached_before_the_host_was_stored_still_says_it():
+	"""Menus already open when the bot is upgraded keep only references."""
+	dcb.write_cache_item("containers_1_2", {"containers": {"h_nas:abc12": "plex"}})
+	try:
+		assert dcb.message_host(1, 2) == "h_nas"
+		assert dcb.message_host(1, 3) is None
+	finally:
+		dcb.clear_container_cache(1, 2)
+
+
 def test_the_bot_is_never_offered_to_a_scheduled_task():
 	_with_hosts([HOST_FIXTURE[0]], unreachable=())
 	original = dcb.DockerManager.list_containers

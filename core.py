@@ -5675,7 +5675,10 @@ def enter_project_multi_aware(action_type, project_name, chatId, messageId, host
 	"""
 	session = load_multi_action(chatId, messageId)
 	done = session["done"] if session else None
-	host_id = host_id or (session["host"] if session else None)
+	# The session is the message's own record of its host, so it wins: what
+	# the press carries is only the dispatcher's default when nothing in the
+	# button names a machine.
+	host_id = (session["host"] if session and session.get("host") else None) or host_id
 	if session:
 		save_multi_action(chatId, messageId, session["action"], 2, project_name, done, host_id)
 	handle_enter_project_level2(action_type, project_name, chatId, messageId,
@@ -5685,7 +5688,10 @@ def back_to_level1_multi_aware(action_type, chatId, messageId, host_id=None):
 	"""Returns to the top-level list, keeping any multi-action session in sync."""
 	session = load_multi_action(chatId, messageId)
 	done = session["done"] if session else None
-	host_id = host_id or (session["host"] if session else None)
+	# The session is the message's own record of its host, so it wins: what
+	# the press carries is only the dispatcher's default when nothing in the
+	# button names a machine.
+	host_id = (session["host"] if session and session.get("host") else None) or host_id
 	if session:
 		save_multi_action(chatId, messageId, session["action"], 1, None, done, host_id)
 	result = build_back_to_level1_keyboard(action_type, chatId, messageId, marked_names=done, host_id=host_id)
@@ -7107,12 +7113,33 @@ def save_container_cache(chat_id, message_id, containers, host_id=None):
 	from datetime import datetime
 	cache_data = {
 		"_timestamp": datetime.now().isoformat(),
+		# Which machine the message is about, for the buttons that carry no
+		# reference of their own: "Back" from a project has to return to the
+		# list of the host it came from, not to the local one.
+		"host": host_id,
 		"containers": {}
 	}
 	for container in containers:
 		cache_data["containers"][container_ref(host_id, container)] = container.name
 
 	write_cache_item(f"containers_{chat_id}_{message_id}", cache_data)
+
+def message_host(chat_id, message_id):
+	"""
+	The host a menu message is about, or None when the bot no longer knows.
+
+	Messages cached before the host was stored still say it through their
+	references, which all point at the same machine.
+	"""
+	cache_data = read_cache_item(f"containers_{chat_id}_{message_id}")
+	if not cache_data:
+		return None
+	if cache_data.get("host"):
+		return cache_data["host"]
+	for reference in cache_data.get("containers", {}):
+		if ":" in reference:
+			return ref_host(reference)
+	return None
 
 def load_container_name(chat_id, message_id, container_id):
 	"""
