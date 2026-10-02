@@ -192,6 +192,8 @@
   "error_no_containers_available": "❌ No hi ha contenidors disponibles",
   "error_schedule_disabled": "❌ La programació <b>$1</b> ha fallat i s'ha deshabilitat",
   "error_schedule_not_found": "❌ Programació no trobada",
+  "schedule_host_back": "✅ <b>$1</b> torna a respondre: les seves programacions s'executen de nou.",
+  "schedule_skipped_host_down": "⏭️ La programació <b>$1</b> no s'ha executat: <b>$2</b> no respon. Les d'aquest host se saltaran sense avisar; t'aviso quan torni.",
   "schedule_added_success": "✅ Programació <b>$1</b> afegida exitosament",
   "schedule_ask_action": "<b>🎯 Quina acció vols realitzar?</b>",
   "schedule_ask_command": "<b>💻 Introdueix la comanda a executar</b>\n\n(ex: ls, docker ps, npm start):",

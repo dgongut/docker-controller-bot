@@ -192,6 +192,8 @@
   "error_no_containers_available": "❌ No hay contenedores disponibles",
   "error_schedule_disabled": "❌ La programación <b>$1</b> ha fallado y se ha deshabilitado",
   "error_schedule_not_found": "❌ Programación no encontrada",
+  "schedule_host_back": "✅ <b>$1</b> vuelve a responder: sus programaciones se ejecutan de nuevo.",
+  "schedule_skipped_host_down": "⏭️ La programación <b>$1</b> no se ha ejecutado: <b>$2</b> no responde. Las de ese host se irán saltando sin avisar; te digo cuando vuelva.",
   "schedule_added_success": "✅ Programación <b>$1</b> añadida exitosamente",
   "schedule_ask_action": "<b>🎯 ¿Qué acción deseas realizar?</b>",
   "schedule_ask_command": "<b>💻 Introduce el comando a ejecutar</b>\n\n(ej: ls, docker ps, npm start):",

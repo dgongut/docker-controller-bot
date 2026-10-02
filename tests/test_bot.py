@@ -3513,7 +3513,11 @@ def test_a_schedule_on_an_unreachable_host_is_skipped_not_disabled():
 			task = {"id": 1, "name": f"{action} nas", "cron": "@daily", "action": action,
 					"container": "plex", "host": "h_nas", "command": "ls", "enabled": True}
 			assert monitor._execute_schedule_action(task) is False
-		assert disabled == [] and messages == [], (disabled, messages)
+		assert disabled == [], disabled
+		# Said once for the outage, naming the first task it cost, and not again.
+		assert [m["message"] for m in messages] == [
+			i18n.get_text("schedule_skipped_host_down", "run nas", "nas")], messages
+		messages.clear()
 
 		# A daemon that answers with an error is the same: nothing is known.
 		dcb.DockerManager.container_named = lambda self, name: (_ for _ in ()).throw(Exception("EOF"))
@@ -3596,6 +3600,30 @@ def test_reboot_tasks_run_in_the_daemon_not_when_it_is_built():
 		assert ran == ["al arrancar"], ran
 	finally:
 		dcb.schedule_manager.get_all_schedules, dcb.DockerScheduleMonitor._execute_schedule_action = original
+
+
+def test_the_user_hears_when_a_host_whose_schedules_were_skipped_is_back():
+	"""Checked every minute: a daily task would otherwise say so up to a day late."""
+	import host_registry
+	from datetime import datetime
+	_with_hosts(HOST_FIXTURE)   # nas no responde
+	messages = []
+	original = (dcb.send_message, dcb.schedule_manager.get_all_schedules, host_registry.status_snapshot)
+	dcb.send_message = lambda **kwargs: messages.append(kwargs.get("message")) or None
+	dcb.schedule_manager.get_all_schedules = lambda: []
+	try:
+		monitor = dcb.DockerScheduleMonitor()
+		monitor._down_hosts["h_nas"] = True
+		host_registry.status_snapshot = lambda entries=None, **kw: {e["id"]: (False, "down") for e in entries}
+		monitor._tick(datetime(2026, 10, 2, 3, 0))
+		assert messages == [] and "h_nas" in monitor._down_hosts, messages
+		host_registry.status_snapshot = lambda entries=None, **kw: {e["id"]: (True, "") for e in entries}
+		monitor._tick(datetime(2026, 10, 2, 3, 1))
+		monitor._tick(datetime(2026, 10, 2, 3, 2))
+		assert messages == [i18n.get_text("schedule_host_back", "nas")], messages
+	finally:
+		(dcb.send_message, dcb.schedule_manager.get_all_schedules, host_registry.status_snapshot) = original
+		_restore_hosts()
 
 
 def test_removing_a_host_warns_about_the_schedules_it_would_orphan():

@@ -192,6 +192,8 @@
   "error_no_containers_available": "❌ Nessun contenitore disponibile",
   "error_schedule_disabled": "❌ La pianificazione <b>$1</b> non è riuscita ed è stata disabilitata",
   "error_schedule_not_found": "❌ Pianificazione non trovata",
+  "schedule_host_back": "✅ <b>$1</b> risponde di nuovo: le sue pianificazioni vengono eseguite di nuovo.",
+  "schedule_skipped_host_down": "⏭️ La pianificazione <b>$1</b> non è stata eseguita: <b>$2</b> non risponde. Quelle di quell'host verranno saltate senza avvisare; ti avviso quando torna.",
   "schedule_added_success": "✅ Pianificazione <b>$1</b> aggiunta con successo",
   "schedule_ask_action": "<b>🎯 Quale azione vuoi eseguire?</b>",
   "schedule_ask_command": "<b>💻 Inserisci il comando da eseguire</b>\n\n(es: ls, docker ps, npm start):",

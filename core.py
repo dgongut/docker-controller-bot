@@ -1891,6 +1891,10 @@ class DockerScheduleMonitor:
 		# The last minute whose tasks were evaluated. Each minute is looked at
 		# once, which is what keeps a task from running twice in it.
 		self._last_minute = None
+		# Hosts whose tasks are being skipped because they do not answer, as
+		# {host_id: True}. The user hears once when it starts and once when
+		# it ends, not on every skipped run.
+		self._down_hosts = {}
 
 	def _execute_reboot_tasks(self):
 		"""Execute all @reboot tasks, once, when the daemon starts"""
@@ -2021,10 +2025,15 @@ class DockerScheduleMonitor:
 			return True
 
 		except host_registry.HostUnavailable as e:
-			# Skipped for this run only. Said in the log and not in the chat: a
-			# task that fires every minute against a machine that is down for
-			# an hour would be sixty messages.
+			# Skipped for this run only, and said once per outage: a task that
+			# fires every minute against a machine down for an hour would be
+			# sixty messages, and saying nothing left a host down for days
+			# with nobody knowing its tasks were not running.
 			warning(f"Schedule {schedule.get('name') or action} skipped: {e}")
+			if e.host_id not in self._down_hosts:
+				self._down_hosts[e.host_id] = True
+				self._notify(get_text("schedule_skipped_host_down",
+										html.escape(schedule.get("name") or action), host_alias(e.host_id)))
 			return False
 		except Exception as e:
 			error(f"Error executing schedule action [{action}]: [{str(e)}]")
@@ -2078,8 +2087,39 @@ class DockerScheduleMonitor:
 			self._last_minute = due[-1]
 		return due
 
+	def _notify(self, message):
+		"""One of the scheduler's own notices, kept quiet while muted."""
+		if is_muted():
+			debug(f"Message [{message}] omitted because muted")
+			return
+		send_message_to_notification_channel(message=message)
+
+	def _check_down_hosts(self):
+		"""
+		Says when a host whose tasks were being skipped answers again.
+
+		Asked every minute rather than left for its next task to find out: a
+		daily task would otherwise announce the host back up to a day late.
+		Only the hosts that are down are asked, so a healthy fleet costs
+		nothing here.
+		"""
+		if not self._down_hosts:
+			return
+		entries = [host_registry.host(host_id) for host_id in self._down_hosts]
+		for host_id in [h for h, entry in zip(list(self._down_hosts), entries) if entry is None]:
+			# Removed meanwhile: nothing will come back.
+			self._down_hosts.pop(host_id, None)
+		statuses = host_registry.status_snapshot(entries=[e for e in entries if e])
+		for host_id, (ok, _reason) in statuses.items():
+			if ok and self._down_hosts.pop(host_id, None):
+				self._notify(get_text("schedule_host_back", host_alias(host_id)))
+
 	def _tick(self, now):
 		"""Runs every task due in the minutes not yet evaluated."""
+		try:
+			self._check_down_hosts()
+		except Exception as e:
+			debug(f"Could not check the hosts whose schedules were skipped: {e}")
 		due = self._minutes_due(now)
 		if not due:
 			return

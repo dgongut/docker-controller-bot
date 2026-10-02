@@ -192,6 +192,8 @@
   "error_no_containers_available": "❌ No containers available",
   "error_schedule_disabled": "❌ Schedule <b>$1</b> failed and has been disabled",
   "error_schedule_not_found": "❌ Schedule not found",
+  "schedule_host_back": "✅ <b>$1</b> is answering again: its schedules are running again.",
+  "schedule_skipped_host_down": "⏭️ Schedule <b>$1</b> did not run: <b>$2</b> is not answering. That host's schedules will be skipped without further notice; I will tell you when it is back.",
   "schedule_added_success": "✅ Schedule <b>$1</b> added successfully",
   "schedule_ask_action": "<b>🎯 What action do you want to perform?</b>",
   "schedule_ask_command": "<b>💻 Enter the command to execute</b>\n\n(e.g., ls, docker ps, npm start):",

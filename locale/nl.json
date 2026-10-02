@@ -192,6 +192,8 @@
   "error_no_containers_available": "❌ Geen containers beschikbaar",
   "error_schedule_disabled": "❌ Schema <b>$1</b> is mislukt en uitgeschakeld",
   "error_schedule_not_found": "❌ Schema niet gevonden",
+  "schedule_host_back": "✅ <b>$1</b> reageert weer: de schema's ervan worden weer uitgevoerd.",
+  "schedule_skipped_host_down": "⏭️ Schema <b>$1</b> is niet uitgevoerd: <b>$2</b> reageert niet. De schema's van die host worden zonder melding overgeslagen; ik laat het weten zodra hij terug is.",
   "schedule_added_success": "✅ Schema <b>$1</b> succesvol toegevoegd",
   "schedule_ask_action": "<b>🎯 Welke actie wil je uitvoeren?</b>",
   "schedule_ask_command": "<b>💻 Voer de uit te voeren opdracht in</b>\n\n(bijv. ls, docker ps, npm start):",
