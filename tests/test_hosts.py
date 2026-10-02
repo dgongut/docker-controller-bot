@@ -525,3 +525,42 @@ def test_two_sweeps_at_once_both_see_a_healthy_host():
 		host_registry.probe_client = original
 		host_registry.reset()
 		shutil.rmtree(root, ignore_errors=True)
+
+
+def test_the_clients_used_only_to_check_a_host_are_closed():
+	"""
+	Over ssh a client has a process behind it. Adding a host built one to see
+	whether it answered and never closed it, and one whose ping failed was
+	dropped on the floor the same way.
+	"""
+	import docker
+
+	_, root = setup()
+	built = []
+
+	def client(**kwargs):
+		fake = MagicMock()
+		built.append(fake)
+		return fake
+
+	original = docker.DockerClient
+	docker.DockerClient = client
+	try:
+		host_registry.add_host("nas", "tcp://nas:2375")
+		assert built and built[-1].close.called, "el cliente de comprobación quedó abierto"
+
+		def failing(**kwargs):
+			fake = client(**kwargs)
+			fake.ping.side_effect = Exception("connection refused")
+			return fake
+
+		docker.DockerClient = failing
+		try:
+			host_registry.add_host("otro", "tcp://otro:2375")
+		except host_registry.HostUnavailable:
+			pass
+		assert built[-1].close.called, "el cliente que falló el ping quedó abierto"
+	finally:
+		docker.DockerClient = original
+		host_registry.reset()
+		shutil.rmtree(root, ignore_errors=True)

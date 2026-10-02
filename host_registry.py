@@ -292,10 +292,16 @@ def _build_client(entry, verify=False, timeout=None):
 
 	try:
 		built = docker.DockerClient(**kwargs)
-		if verify:
-			built.ping()
 	except Exception as e:
 		raise HostUnavailable(host_id, str(e))
+	if verify:
+		try:
+			built.ping()
+		except Exception as e:
+			# Built and then failed: over ssh that client already has a
+			# process behind it, which nobody would ever close.
+			_close((("", built),), host_id)
+			raise HostUnavailable(host_id, str(e))
 	return built
 
 
@@ -624,7 +630,9 @@ def add_host(alias_name, url, tls=None, timeout=None):
 	if timeout:
 		entry["timeout"] = int(timeout)
 
-	_build_client(entry, verify=True)  # raises HostUnavailable
+	# Only to find out whether it answers, so it is closed straight away: the
+	# working client is built on first use, like every other host's.
+	_close((("", _build_client(entry, verify=True)),), entry["id"])  # raises HostUnavailable
 
 	with _lock:
 		configured = hosts(include_paused=True)
