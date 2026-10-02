@@ -827,6 +827,27 @@ def test_a_pass_that_fails_does_not_end_the_update_checks():
 		store.set("bot.check_updates", was_checking)
 
 
+def test_a_failed_pull_keeps_what_was_known_about_the_update():
+	"""
+	A failed pull —a Docker Hub rate limit, say— forgot the cached state, so
+	the next pass that worked took an already announced update for a new one
+	and announced it again.
+	"""
+	_with_hosts([HOST_FIXTURE[0]], unreachable=())
+	plex = _container("plex", "running", image="plex:latest")
+	plex.image.id = "sha256:old"
+	owner = MagicMock()
+	owner.client.images.pull.side_effect = Exception("429 Too Many Requests")
+	try:
+		dcb.save_container_update_status("plex:latest", "plex", True, "h_local")
+		found, has_new = dcb.DockerUpdateMonitor()._check_host(HOST_FIXTURE[0], owner, False, [plex])
+		assert (found, has_new) == ([], False), (found, has_new)
+		assert dcb.read_container_update_status("plex:latest", "plex", "h_local") is True
+	finally:
+		dcb.save_container_update_status("plex:latest", "plex", None, "h_local")
+		_restore_hosts()
+
+
 def test_one_pass_reports_the_whole_fleet_in_one_message():
 	"""
 	One message for the fleet rather than one per host: with four machines

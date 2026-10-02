@@ -1590,8 +1590,12 @@ class DockerUpdateMonitor:
 				else: # Contenedor actualizado
 					has_update = False
 			except Exception as e:
+				# What was known stays as it was. Forgetting it on a failed pull
+				# —a Docker Hub rate limit, a registry down for the night— made
+				# the next pass that worked take an update it had already
+				# announced for a new one, and announce it again.
 				error(f"Could not check update: [{e}]")
-				has_update = None
+				continue
 			save_container_update_status(image_with_tag, container.name, has_update, host_id)
 
 		return grouped_updates_containers, should_notify
