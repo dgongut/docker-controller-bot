@@ -1300,6 +1300,50 @@ def test_the_queue_gives_up_on_what_telegram_will_refuse_again():
 		queue.shutdown()
 
 
+def test_the_queue_gives_up_on_any_request_telegram_rejects():
+	"""
+	A user who never opened a chat with the bot answers 403 for good, and so
+	does a message Telegram cannot parse. Retried with sleeps, each one held
+	every other message about ten seconds: a non-administrator pressing a
+	button in the group was enough to freeze the bot for everyone.
+	"""
+	import message_queue as mq
+	import telebot
+
+	rejected = [
+		(403, "Forbidden: bot can't initiate conversation with a user"),
+		(400, "Bad Request: can't parse entities: Unsupported start tag"),
+		(400, "Bad Request: message is too long"),
+	]
+	queue = mq.MessageQueue(delay_between_messages=0)
+	try:
+		for code, description in rejected:
+			calls = []
+
+			def refuse(*args, **kwargs):
+				calls.append(1)
+				raise telebot.apihelper.ApiTelegramException(
+					"sendMessage", None, {"error_code": code, "description": description})
+
+			assert queue.add_message(refuse, wait_for_result=True, idempotent=False) is None
+			assert len(calls) == 1, f"{description}: {len(calls)} intentos"
+
+		# A gateway error is Telegram's side, and passes: that one is retried.
+		calls = []
+
+		def bad_gateway(*args, **kwargs):
+			calls.append(1)
+			if len(calls) < 2:
+				raise telebot.apihelper.ApiTelegramException(
+					"sendMessage", None, {"error_code": 502, "description": "Bad Gateway"})
+			return "enviado"
+
+		assert queue.add_message(bad_gateway, wait_for_result=True) == "enviado"
+		assert len(calls) == 2, calls
+	finally:
+		queue.shutdown()
+
+
 def test_the_queue_still_retries_a_rate_limit():
 	"""The backoff is the whole point of the queue; only the futile part goes."""
 	import message_queue as mq

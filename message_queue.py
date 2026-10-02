@@ -36,9 +36,20 @@ PERMANENT_FAILURES = (
 )
 
 
-def _is_permanent(error_message):
+# Lo que Telegram rechaza por la petición en sí, no por cómo está él: un 400 es
+# un mensaje mal formado o demasiado largo, un 403 un usuario que nunca abrió
+# el chat con el bot. Ninguno cambia al repetirlo. La lista de arriba se queda
+# para los que llegan sin código.
+PERMANENT_CODES = (400, 401, 403, 404)
+
+
+def _is_permanent(error_message, error_code=None):
 	"""Whether asking again would get the same answer."""
+	if error_code in PERMANENT_CODES:
+		return True
 	lowered = error_message.lower()
+	if any(f"error code: {code}." in lowered for code in PERMANENT_CODES):
+		return True
 	return any(marker in lowered for marker in PERMANENT_FAILURES)
 
 
@@ -99,7 +110,7 @@ class MessageQueue:
 					# Nothing to gain from asking again, and the queue is
 					# serial: give up now instead of sleeping through two more
 					# attempts while every other message waits.
-					if _is_permanent(error_msg):
+					if _is_permanent(error_msg, getattr(e, 'error_code', None)):
 						debug(f"Not retrying, Telegram will answer the same: {error_msg}")
 						if result_queue:
 							result_queue.put(None)
