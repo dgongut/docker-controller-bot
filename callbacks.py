@@ -535,6 +535,10 @@ def cb_prune(ctx):
 
 	result, data = getattr(owner, f"prune_{kind.lower()}")()
 	markup = core.create_simple_keyboard("button_delete")
+	if data is None:
+		# It failed: the message says so, and there is nothing to attach.
+		core.send_message(message=result, reply_markup=markup)
+		return
 	fichero_temporal = core.get_temporal_file(data, get_text(labels[kind]))
 	x = core.send_message(message=get_text("loading_file"))
 	core.send_document(document=fichero_temporal, reply_markup=markup, caption=result)

@@ -755,27 +755,30 @@ class DockerManager:
 			error(f"Could not delete container {container_name}. Error: [{e}]")
 			return get_text("error_deleting_container", container_name)
 
+	# Each prune returns (message, details): the details go out as a file, and
+	# are None when it failed, so there is no file to send. A failure used to
+	# return the message alone, which the callers' unpacking turned into a
+	# ValueError: the /prune button answered nothing, and a scheduled one only
+	# left a line in the log.
 	def prune_containers(self):
 		try:
 			pruned_containers = self.client.containers.prune()
-			if pruned_containers:
-				file_size_bytes = sizeof_fmt(pruned_containers['SpaceReclaimed'])
+			file_size_bytes = sizeof_fmt((pruned_containers or {}).get('SpaceReclaimed') or 0)
 			debug(f"Deleted: [{str(pruned_containers)}] - Space reclaimed: {str(file_size_bytes)}")
 			return get_text("prune_containers", str(file_size_bytes)), str(pruned_containers)
 		except Exception as e:
 			error(f"An error has occurred deleting unused containers. Error: [{e}]")
-			return get_text("error_prune_containers")
+			return get_text("error_prune_containers"), None
 
 	def prune_images(self):
 		try:
 			pruned_images = self.client.images.prune(filters={'dangling': False})
-			if pruned_images:
-				file_size_bytes = sizeof_fmt(pruned_images['SpaceReclaimed'])
+			file_size_bytes = sizeof_fmt((pruned_images or {}).get('SpaceReclaimed') or 0)
 			debug(f"Deleted: [{str(pruned_images)}] - Space reclaimed: {str(file_size_bytes)}")
 			return get_text("prune_images", str(file_size_bytes)), str(pruned_images)
 		except Exception as e:
 			error(f"An error occurred deleting unused images. Error: [{e}]")
-			return get_text("error_prune_images")
+			return get_text("error_prune_images"), None
 
 	def prune_networks(self):
 		try:
@@ -784,19 +787,18 @@ class DockerManager:
 			return get_text("prune_networks"), str(pruned_networks)
 		except Exception as e:
 			error(f"An error occurred while deleting unused networks. Error: [{e}]")
-			return get_text("error_prune_networks")
+			return get_text("error_prune_networks"), None
 
 
 	def prune_volumes(self):
 		try:
 			pruned_volumes = self.client.volumes.prune()
-			if pruned_volumes:
-				file_size_bytes = sizeof_fmt(pruned_volumes['SpaceReclaimed'])
+			file_size_bytes = sizeof_fmt((pruned_volumes or {}).get('SpaceReclaimed') or 0)
 			debug(f"Deleted: [{str(pruned_volumes)}] - Space reclaimed: {str(file_size_bytes)}")
 			return get_text("prune_volumes", str(file_size_bytes)), str(pruned_volumes)
 		except Exception as e:
 			error(f"An error occurred deleting unused volumes. Error: [{e}]")
-			return get_text("error_prune_volumes")
+			return get_text("error_prune_volumes"), None
 
 	def execute_command(self, container_id, container_name, command):
 		try:
@@ -1764,7 +1766,9 @@ class DockerScheduleMonitor:
 					return handle_error(f"Unknown prune type: {prune_type}")
 
 				# Show output if requested, otherwise just log
-				if show_output and result_message:
+				if show_output and result_message and data is None:
+					send_message(message=result_message)
+				elif show_output and result_message:
 					# Send the same format as manual /prune command
 					markup = InlineKeyboardMarkup(row_width=1)
 					markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))

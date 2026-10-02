@@ -3710,6 +3710,47 @@ def test_the_start_header_says_nothing_when_no_host_answers():
 		_restore_hosts()
 
 
+def test_a_prune_that_fails_says_so_instead_of_raising():
+	"""
+	On failure the prune methods returned the message alone and every caller
+	unpacked two values: Docker's own "a prune operation is already running"
+	became a ValueError, the button answered nothing, and a scheduled prune
+	only left a line in the log. An answer with nothing to reclaim raised too.
+	"""
+	_with_hosts([HOST_FIXTURE[0]], unreachable=())
+	owner = dcb.DockerManager("h_local")
+	owner.client = MagicMock()
+	busy = Exception("409 Conflict: a prune operation is already running")
+	for collection in ("containers", "images", "networks", "volumes"):
+		getattr(owner.client, collection).prune.side_effect = busy
+	try:
+		for kind in ("containers", "images", "networks", "volumes"):
+			message, details = getattr(owner, f"prune_{kind}")()
+			assert details is None and message == i18n.get_text(f"error_prune_{kind}"), kind
+		owner.client.images.prune.side_effect = None
+		owner.client.images.prune.return_value = {"ImagesDeleted": None}
+		message, details = owner.prune_images()
+		assert details is not None and "0.0B" in message, message
+	finally:
+		_restore_hosts()
+
+	# And the button sends the message, with no file to attach.
+	sent, documents = [], []
+	original = (dcb.manager, dcb.send_message, dcb.send_document)
+	failing = MagicMock()
+	failing.prune_images.return_value = ("falló", None)
+	dcb.manager = lambda host_id=None: failing
+	dcb.send_message = lambda **kw: sent.append(kw.get("message"))
+	dcb.send_document = lambda **kw: documents.append(kw)
+	try:
+		callbacks.cb_prune(callback_registry.Context(
+			call=MagicMock(id="q"), comando="prune", chatId=1, messageId=2, userId=1,
+			multiAction=None, hostId="h_local", containerId=None, action="pruneImages", value="h_local"))
+		assert sent == ["falló"] and documents == [], (sent, documents)
+	finally:
+		dcb.manager, dcb.send_message, dcb.send_document = original
+
+
 def test_container_output_does_not_break_the_log_message():
 	"""
 	The logs go inside <pre><code> in a message parsed as HTML, and what a
