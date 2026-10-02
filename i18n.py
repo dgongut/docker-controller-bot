@@ -26,9 +26,15 @@ def language():
 	"""
 	configured = str(store.get("bot.language") or "ES").lower()
 	if configured not in [supported.lower() for supported in SUPPORTED_LANGUAGES]:
-		warning(f"Unsupported language {configured}, falling back to ES")
+		# Once per value: this runs on every text the bot renders, hundreds a
+		# screen, and a hand-edited language would bury the log.
+		if configured not in _warned_languages:
+			_warned_languages.add(configured)
+			warning(f"Unsupported language {configured}, falling back to ES")
 		return "es"
 	return configured
+
+_warned_languages = set()
 
 # Resolved from this file's own location rather than hardcoded to /app, so the
 # bot also runs straight from a checkout.

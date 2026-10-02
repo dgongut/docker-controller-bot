@@ -311,3 +311,21 @@ def test_removing_a_host_forgets_its_update_cache():
 	store.forget_host_updates("h_nas1")
 	assert list(store.update_entries()) == ["h_casa:plex"], store.update_entries()
 	shutil.rmtree(root, ignore_errors=True)
+
+
+def test_an_unsupported_language_is_warned_about_once():
+	"""It is read on every text rendered: hundreds of identical warnings a screen."""
+	import i18n
+	root = fresh_root()
+	warned = []
+	original = i18n.warning
+	i18n.warning = warned.append
+	i18n._warned_languages.clear()
+	try:
+		store.set("bot.language", "klingon")
+		for _ in range(50):
+			assert i18n.language() == "es"
+		assert len(warned) == 1, warned
+	finally:
+		i18n.warning = original
+		shutil.rmtree(root, ignore_errors=True)
