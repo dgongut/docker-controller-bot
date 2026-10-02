@@ -81,7 +81,7 @@ _settings_unreadable = None
 # —esta línea se ejecuta antes que el def— pero solo por eso: mover una de las
 # dos, o volver a ejecutar el módulo, convierte esto en un TypeError. Decirlo
 # explícitamente cuesta una palabra y quita la trampa.
-_batch_depth = 0
+_batch_depth = {}   # document name -> how many batch() blocks are deferring it
 _batch_dirty = builtins.set()
 
 
@@ -280,7 +280,7 @@ def _flush(name):
 
 	`name` is one of "settings", "state" or "updates".
 	"""
-	if _batch_depth > 0:
+	if _batch_depth.get(name, 0) > 0:
 		_batch_dirty.add(name)
 		return
 	if name == "settings":
@@ -295,28 +295,34 @@ def _flush(name):
 
 
 @contextmanager
-def batch():
+def batch(*names):
 	"""
 	Coalesces the writes made inside the block into one write per document.
 
-	An update-check cycle touches every container, and rewriting the whole
-	cache once per container would be hundreds of writes per pass. Wrapping the
-	cycle keeps it to one, which matters on the SD cards this runs on.
-	"""
-	global _batch_depth
+	`names` limits it to some documents ("settings", "state", "updates"); with
+	none, all three. The limit is what makes it safe to wrap something slow:
+	the deferral is global, not per thread, so a block deferring the settings
+	would hold back a change made from /settings on another thread until it
+	ended, and lose it if the container stopped first.
 
+	The update check wraps each host in batch("updates"): one write of the
+	cache per host instead of one per container, which matters on the SD cards
+	this runs on.
+	"""
+	deferred = names or ("settings", "state", "updates")
 	with _lock:
-		_batch_depth += 1
+		for name in deferred:
+			_batch_depth[name] = _batch_depth.get(name, 0) + 1
 	try:
 		yield
 	finally:
 		with _lock:
-			_batch_depth -= 1
-			if _batch_depth == 0:
-				pending = sorted(_batch_dirty)
-				_batch_dirty.clear()
-				for name in pending:
-					_flush(name)
+			for name in deferred:
+				_batch_depth[name] -= 1
+			ready = sorted(n for n in _batch_dirty if _batch_depth.get(n, 0) == 0)
+			_batch_dirty.difference_update(ready)
+			for name in ready:
+				_flush(name)
 
 
 # ---------------------------------------------------------------------------

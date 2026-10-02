@@ -249,6 +249,23 @@ def test_batch_writes_once():
 	shutil.rmtree(root, ignore_errors=True)
 
 
+def test_a_batch_of_one_document_does_not_hold_back_the_others():
+	"""
+	The update check holds the cache back for a whole host, minutes over ssh.
+	A setting changed from /settings meanwhile has to reach the disk at once.
+	"""
+	root = fresh_root()
+	updates = os.path.join(store.state_dir(), store.UPDATES_FILE)
+	with store.batch("updates"):
+		store.set_update_status("h_1", "plex", "plex:1", True)
+		store.set("bot.language", "EN")
+		with open(store.settings_path(), encoding="utf-8") as handle:
+			assert '"EN"' in handle.read(), "el ajuste esperó al lote de la caché"
+		assert not os.path.exists(updates) or "plex" not in open(updates).read()
+	assert "plex" in open(updates).read()
+	shutil.rmtree(root, ignore_errors=True)
+
+
 def test_the_legacy_volume_wins_when_it_is_the_one_with_data():
 	"""A compose written for 4.x maps /app/schedule and must keep working."""
 	root = tempfile.mkdtemp()

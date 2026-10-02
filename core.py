@@ -1602,7 +1602,9 @@ class DockerUpdateMonitor:
 		self._deferred_self_update = None
 		for entry, owner, containers in hosts_with_containers():
 			try:
-				found, has_new = self._check_host(entry, owner, cold_cache, containers)
+				# The cache written once for the host, not once per container.
+				with store.batch("updates"):
+					found, has_new = self._check_host(entry, owner, cold_cache, containers)
 				all_updates.extend(found)
 				anything_new = anything_new or has_new
 			except Exception as e:

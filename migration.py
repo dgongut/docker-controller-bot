@@ -225,17 +225,13 @@ def _migrate_schedules(local_host_id):
 	if not stamped and not cleared:
 		return
 
-	temporary = f"{path}.tmp"
-	try:
-		with open(temporary, "w", encoding="utf-8") as handle:
-			json.dump(document, handle, indent=2, ensure_ascii=False)
-		os.replace(temporary, path)
-		if stamped:
-			debug(f"Pinned {stamped} existing schedules to the local host")
-		if cleared:
-			debug(f"Cleared the host from {cleared} schedules that do not act on a host")
-	except Exception as e:
-		error(f"Could not write the migrated schedules to {path}: {e}")
+	# Through the store's writer, flushed and synced before the rename: what a
+	# power cut at the wrong moment would cost here is every task there is.
+	store.write_document(path, document)
+	if stamped:
+		debug(f"Pinned {stamped} existing schedules to the local host")
+	if cleared:
+		debug(f"Cleared the host from {cleared} schedules that do not act on a host")
 
 
 def _discard_legacy_cache():
