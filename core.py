@@ -5084,6 +5084,9 @@ def confirm_update(containerId, containerName):
 
 def confirm_update_selected(chatId, messageId):
 	containers, selected = load_update_data(chatId, messageId)
+	if not containers or not selected:
+		send_message(message=get_text("update_list_expired"))
+		return
 	# Build id -> name map from cached containers (list of [id, name] pairs)
 	id_to_name = {cid: cname for cid, cname in containers}
 	# If only one container is selected, show the detailed comparison view
@@ -7102,6 +7105,36 @@ def selected_in_order(containers, selected):
 
 def clear_update_data(chat_id, message_id):
 	delete_cache_item(f"update_data_{chat_id}_{message_id}")
+
+# Serialises every read-modify-write of an update list. Two quick taps on the
+# toggles each read the selection before the other wrote it, and one was lost;
+# two on "confirm" each found the list still there and ran the batch twice.
+update_data_lock = threading.Lock()
+
+def take_update_data(chat_id, message_id):
+	"""
+	An update list's containers and selection, forgotten in the same step.
+
+	For what acts on the list rather than repaints it: whoever takes it is the
+	only one who gets it, so a second tap finds nothing left to run.
+	"""
+	with update_data_lock:
+		containers, selected = load_update_data(chat_id, message_id)
+		clear_update_data(chat_id, message_id)
+	return containers, selected
+
+def expire_update_list(call_id, chat_id, message_id):
+	"""
+	Says an update list can no longer be used, and takes its buttons away.
+
+	Its data goes after a week untouched, or with an upgrade from 4.x. Until
+	now a tap then repainted a keyboard with no containers on it, and
+	confirming updated nothing without a word. The daemon marks what it
+	announced as notified, so that message was the only way in, and silence
+	looked like the updates having been applied.
+	"""
+	answer_callback_quietly(call_id, text=get_text("update_list_expired"), show_alert=True)
+	edit_message_reply_markup(chat_id, message_id, reply_markup=None)
 
 # Generic cache helpers
 def save_schedule_state(user_id, state):

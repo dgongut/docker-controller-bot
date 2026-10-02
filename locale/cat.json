@@ -287,6 +287,7 @@
   "healthy_ready": "✅ <b>$1</b> està saludable, continuant",
   "recreating_namespace_dependent": "♻️ Recreant <b>$1</b> (comparteix namespace amb el pare actualitzat)...",
   "error_recreating_namespace_dependent": "❌ Error en recrear <b>$1</b>",
+  "update_list_expired": "⌛ Aquesta llista ja no serveix: ha caducat o ja s'ha fet servir. Demana'n una de nova amb /updateall.",
   "update_current_image": "Imatge actual",
   "update_new_image": "Imatge nova",
   "update_tag": "Tag",

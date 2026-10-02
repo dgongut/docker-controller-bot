@@ -4718,6 +4718,76 @@ def test_a_selection_is_confirmed_and_updated_in_the_order_of_the_list():
 	assert dcb.selected_in_order(pairs, {pairs[3][0], pairs[0][0]}) == [pairs[0][0], pairs[3][0]]
 
 
+def _update_ctx(name, chat, message, **extra):
+	fields = {"call": MagicMock(id="q"), "comando": name, "chatId": chat, "messageId": message,
+				"userId": 1, "multiAction": None, "hostId": "h_local", "containerId": None}
+	fields.update(extra)
+	return callback_registry.Context(**fields)
+
+
+def test_a_double_tap_on_confirm_updates_once():
+	"""The list was cleared only after the batch, so a second tap found it still there."""
+	pairs = [[dcb.make_ref("h_local", "aaaaa"), "plex"]]
+	batches = []
+	original = (dcb.update_containers, dcb.find_container, dcb.update_available, dcb.send_message)
+	found = MagicMock(host_id="h_local")
+	plex = _container("plex", "running")
+	plex.id = "aaaaa" + "0" * 59
+	dcb.update_containers = batches.append
+	dcb.find_container = lambda ref: (found, plex)
+	dcb.update_available = lambda container, host_id: True
+	sent = []
+	dcb.send_message = lambda **kw: sent.append(kw.get("message"))
+	try:
+		dcb.save_update_data(5, 50, pairs, {pairs[0][0]})
+		for _ in range(2):
+			callbacks.cb_updateSelected(_update_ctx("updateSelected", 5, 51, originalMessageId="50"))
+		assert len([b for b in batches if b]) == 1, batches
+		assert sent == [i18n.get_text("update_list_expired")], sent
+	finally:
+		(dcb.update_containers, dcb.find_container, dcb.update_available, dcb.send_message) = original
+		dcb.clear_update_data(5, 50)
+
+
+def test_an_update_list_that_expired_says_so():
+	"""
+	After a week, or an upgrade from 4.x, the list's data is gone. A tap
+	repainted a keyboard with no containers and confirming updated nothing,
+	silently; and the daemon will not announce those updates again.
+	"""
+	alerts, stripped, sent = [], [], []
+	original = (dcb.answer_callback_quietly, dcb.edit_message_reply_markup, dcb.send_message,
+				dcb.edit_message_reply_markup_sync)
+	dcb.answer_callback_quietly = lambda call_id, text=None, show_alert=False: alerts.append((text, show_alert))
+	dcb.edit_message_reply_markup = lambda chat, message, reply_markup=None: stripped.append((message, reply_markup))
+	dcb.edit_message_reply_markup_sync = lambda *a, **k: None
+	dcb.send_message = lambda **kw: sent.append(kw.get("message"))
+	expired = i18n.get_text("update_list_expired")
+	try:
+		ref = dcb.make_ref("h_local", "aaaaa")
+		callbacks.cb_toggleUpdate(_update_ctx("toggleUpdate", 6, 60, containerId=ref, containerName="plex"))
+		callbacks.cb_toggleUpdateAll(_update_ctx("toggleUpdateAll", 6, 60))
+		assert alerts == [(expired, True)] * 2, alerts
+		assert stripped == [(60, None)] * 2, stripped
+		dcb.confirm_update_selected(6, 60)
+		callbacks.cb_updateSelected(_update_ctx("updateSelected", 6, 61, originalMessageId="60"))
+		assert sent == [expired] * 2, sent
+
+		# A container recreated since the list was sent: the dispatcher points
+		# the press at the live one, and the toggle still finds its own entry.
+		alerts.clear()
+		old = dcb.make_ref("h_local", "aaaaa")
+		dcb.save_update_data(6, 60, [[old, "plex"]], set())
+		callbacks.cb_toggleUpdate(_update_ctx("toggleUpdate", 6, 60,
+			containerId=dcb.make_ref("h_local", "zzzzz"), containerName="plex"))
+		assert dcb.load_update_data(6, 60)[1] == {old}, dcb.load_update_data(6, 60)
+		assert alerts == [(None, False)], alerts
+	finally:
+		(dcb.answer_callback_quietly, dcb.edit_message_reply_markup, dcb.send_message,
+			dcb.edit_message_reply_markup_sync) = original
+		dcb.clear_update_data(6, 60)
+
+
 # ---------------------------------------------------------------------------
 # Anonymous statistics
 # ---------------------------------------------------------------------------

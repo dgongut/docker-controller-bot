@@ -241,14 +241,20 @@ def cb_deleteSchedule(ctx):
 	answer_immediately=False,
 )
 def cb_toggleUpdate(ctx):
-	containers, selected = core.load_update_data(ctx.chatId, ctx.messageId)
-	was_selected = ctx.containerId in selected
-
-	if was_selected:
-		selected.remove(ctx.containerId)
-	else:
-		selected.add(ctx.containerId)
-	core.save_update_data(ctx.chatId, ctx.messageId, containers, selected)
+	with core.update_data_lock:
+		containers, selected = core.load_update_data(ctx.chatId, ctx.messageId)
+		if not containers:
+			core.expire_update_list(ctx.call.id, ctx.chatId, ctx.messageId)
+			return
+		reference = _listed_reference(containers, ctx)
+		if reference is None:
+			core.expire_update_list(ctx.call.id, ctx.chatId, ctx.messageId)
+			return
+		if reference in selected:
+			selected.remove(reference)
+		else:
+			selected.add(reference)
+		core.save_update_data(ctx.chatId, ctx.messageId, containers, selected)
 
 	markup = core.build_generic_keyboard(containers, selected, ctx.messageId, "Update", get_text("button_update"), get_text("button_update_all"))
 
@@ -261,19 +267,36 @@ def cb_toggleUpdate(ctx):
 		core.error(f"Error updating toggle: {e}")
 		core.answer_callback_quietly(ctx.call.id)
 
+def _listed_reference(containers, ctx):
+	"""
+	The reference the list holds for the pressed button, or None.
+
+	The dispatcher points a button at the live container when the one it was
+	made for has been recreated since, which is right for acting on it and
+	wrong here: the list still holds the old reference, so the toggle matched
+	nothing. Found by name on the same host instead.
+	"""
+	for cid, cname in containers:
+		if cid == ctx.containerId:
+			return cid
+	for cid, cname in containers:
+		if cname == ctx.containerName and core.ref_host(cid) == core.ref_host(ctx.containerId):
+			return cid
+	return None
+
 @callback(
 	name='toggleUpdateAll',
 	keeps_message=True,
 	answer_immediately=False,
 )
 def cb_toggleUpdateAll(ctx):
-	containers, selected = core.load_update_data(ctx.chatId, ctx.messageId)
-	newly_selected_count = 0
-	for cid, _cname in containers:
-		if cid not in selected:
-			selected.add(cid)
-			newly_selected_count += 1
-	core.save_update_data(ctx.chatId, ctx.messageId, containers, selected)
+	with core.update_data_lock:
+		containers, selected = core.load_update_data(ctx.chatId, ctx.messageId)
+		if not containers:
+			core.expire_update_list(ctx.call.id, ctx.chatId, ctx.messageId)
+			return
+		selected.update(cid for cid, _cname in containers)
+		core.save_update_data(ctx.chatId, ctx.messageId, containers, selected)
 
 	markup = core.build_generic_keyboard(containers, selected, ctx.messageId, "Update", get_text("button_update"), get_text("button_update_all"))
 
@@ -298,7 +321,11 @@ def cb_confirmUpdateSelected(ctx):
 	params=('originalMessageId',),
 )
 def cb_updateSelected(ctx):
-	containers, selected = core.load_update_data(ctx.chatId, ctx.originalMessageId)
+	# Taken, not read: a second tap on "confirm" finds nothing and runs nothing.
+	containers, selected = core.take_update_data(ctx.chatId, ctx.originalMessageId)
+	if not containers or not selected:
+		core.send_message(message=get_text("update_list_expired"))
+		return
 	targets = []
 	for ref in core.selected_in_order(containers, selected):
 		# Each selection carries its own host: an /updateall list can span
@@ -312,7 +339,6 @@ def cb_updateSelected(ctx):
 		if core.update_available(container, owner.host_id):
 			targets.append((core.container_ref(owner.host_id, container), container.name))
 	core.update_containers(targets)
-	core.clear_update_data(ctx.chatId, ctx.originalMessageId)
 
 @callback(
 	name='restartWholeProject',

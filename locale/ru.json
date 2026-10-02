@@ -287,6 +287,7 @@
   "healthy_ready": "✅ <b>$1</b> готов (healthy), продолжаем",
   "recreating_namespace_dependent": "♻️ Пересоздание <b>$1</b> (общий namespace с обновлённым родителем)...",
   "error_recreating_namespace_dependent": "❌ Ошибка пересоздания <b>$1</b>",
+  "update_list_expired": "⌛ Этот список больше недействителен: он устарел или уже был использован. Запросите новый с помощью /updateall.",
   "update_current_image": "Текущий образ",
   "update_new_image": "Новый образ",
   "update_tag": "Тег",

@@ -287,6 +287,7 @@
   "healthy_ready": "✅ <b>$1</b> è healthy, si continua",
   "recreating_namespace_dependent": "♻️ Ricreazione di <b>$1</b> (condivide il namespace con il parent aggiornato)...",
   "error_recreating_namespace_dependent": "❌ Errore nella ricreazione di <b>$1</b>",
+  "update_list_expired": "⌛ Questa lista non è più valida: è scaduta o è già stata usata. Chiedine una nuova con /updateall.",
   "update_current_image": "Immagine attuale",
   "update_new_image": "Nuova immagine",
   "update_tag": "Tag",
