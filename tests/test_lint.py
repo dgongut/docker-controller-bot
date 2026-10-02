@@ -708,3 +708,32 @@ def test_the_image_ships_every_module():
 	modules = [n for n in os.listdir(harness.REPO) if n.endswith(".py")]
 	missing = [n for n in modules if f"/{n} /app" not in dockerfile]
 	assert not missing, f"el Dockerfile no copia: {missing}"
+
+
+def test_no_text_is_handed_more_values_than_it_shows():
+	"""
+	Four messages about a schedule were passed its name and had no $1 to put
+	it in, so "schedule disabled" never said which one. A value handed to a
+	text with nowhere to go is almost always a placeholder someone forgot.
+	"""
+	import json
+	import re
+
+	with open(os.path.join(harness.REPO, "locale", "es.json"), encoding="utf-8") as f:
+		texts = json.load(f)
+	problems = []
+	for filename in SOURCES + ("schedule_manager.py",):
+		path = os.path.join(harness.REPO, filename)
+		for node in ast.walk(ast.parse(io.open(path, encoding="utf-8").read())):
+			if not (isinstance(node, ast.Call) and _call_name(node).split(".")[-1] == "get_text"):
+				continue
+			if not node.args or not isinstance(node.args[0], ast.Constant) or not isinstance(node.args[0].value, str):
+				continue
+			key = node.args[0].value
+			if key not in texts or any(isinstance(a, ast.Starred) for a in node.args):
+				continue
+			shown = max((int(n) for n in re.findall(r"\$(\d+)", texts[key])), default=0)
+			given = len(node.args) - 1
+			if given > shown:
+				problems.append(f"  {filename}:{node.lineno}  {key}: recibe {given}, muestra {shown}")
+	assert not problems, "textos con valores que no se ven:\n" + "\n".join(problems)
