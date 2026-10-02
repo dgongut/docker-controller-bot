@@ -737,3 +737,17 @@ def test_no_text_is_handed_more_values_than_it_shows():
 			if given > shown:
 				problems.append(f"  {filename}:{node.lineno}  {key}: recibe {given}, muestra {shown}")
 	assert not problems, "textos con valores que no se ven:\n" + "\n".join(problems)
+
+
+def test_no_module_defines_a_function_twice():
+	"""is_valid_cron was written twice in core.py, and only the second one ever ran."""
+	problems = []
+	for filename in SOURCES + ("schedule_manager.py", "docker_update.py", "telemetry.py"):
+		tree = ast.parse(io.open(os.path.join(harness.REPO, filename), encoding="utf-8").read())
+		seen = {}
+		for node in tree.body:
+			if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+				if node.name in seen:
+					problems.append(f"  {filename}:{node.lineno}  {node.name} ya estaba en la línea {seen[node.name]}")
+				seen[node.name] = node.lineno
+	assert not problems, "definiciones repetidas:\n" + "\n".join(problems)

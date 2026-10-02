@@ -2369,19 +2369,19 @@ def test_a_port_question_about_a_host_that_is_gone_says_so():
 def _capture_updateall():
 	"""Runs /updateall and returns the message and keyboard it sent."""
 	captured = {}
-	original = (commands.send_message, commands.update_available,
+	original = (commands.send_message, dcb.update_available,
 				commands.save_update_data, commands.save_container_refs)
 	commands.send_message = lambda message="", reply_markup=None, **kwargs: captured.update(
 		message=message, reply_markup=reply_markup) or None
 	# The update cache is not what this is about: every container has one
 	# pending, so the list is the whole fleet.
-	commands.update_available = lambda container, host_id=None: True
+	dcb.update_available = lambda container, host_id=None: True
 	commands.save_update_data = lambda *a, **k: None
 	commands.save_container_refs = lambda *a, **k: None
 	try:
 		commands.cmd_updateall()
 	finally:
-		(commands.send_message, commands.update_available,
+		(commands.send_message, dcb.update_available,
 			commands.save_update_data, commands.save_container_refs) = original
 	return captured.get("message", ""), captured.get("reply_markup")
 

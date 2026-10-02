@@ -20,14 +20,14 @@ from core import (
 	register_command,
 	VERSION, ask_command, ask_text_input,
 	build_generic_keyboard, change_tag_container,
-	compose, confirm_delete, container_ref, create_simple_keyboard,
+	compose, confirm_delete, create_simple_keyboard,
 	delete_message_later, display_all_hosts,
-	hosts_with_containers, info, log_file, logs,
+	info, log_file, logs,
 	mute, print_donors, restart,
 	run, save_container_refs, save_update_data,
 	send_message, send_settings_menu,
-	send_ports_menu, show_schedule_menu, sort_containers_by_priority,
-	stop, update_available,
+	send_ports_menu, show_schedule_menu,
+	stop, pending_updates,
 )
 
 
@@ -115,15 +115,7 @@ def cmd_updateall(user_id=None, chat_id=None, container_id=None, container_name=
 	# the local machine disagreed with it about what needs updating — and its
 	# buttons carried bare ids, which resolve against the local host wherever
 	# the container actually lives.
-	containersToUpdate = []  # list of [reference, name] pairs
-	for _, owner, containers in hosts_with_containers():
-		# Sorted within each host: bot first, then running, then stopped (all
-		# alphabetically). Sorting the fleet as one list would interleave
-		# machines, and the host is the coarser grouping. Parallel listing,
-		# so a hung host degrades this instead of holding it for its timeout.
-		for container in sort_containers_by_priority(containers):
-			if update_available(container, owner.host_id):
-				containersToUpdate.append([container_ref(owner.host_id, container), container.name])
+	containersToUpdate = pending_updates()  # list of [reference, name] pairs
 	if not containersToUpdate:
 		send_message(message=get_text("already_updated_all"))
 		return

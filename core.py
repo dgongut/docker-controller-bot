@@ -2102,10 +2102,6 @@ def _build_schedule_summary(state: dict) -> str:
 
 	return "\n".join(lines)
 
-def _validate_containers_available() -> bool:
-	"""Check if there are containers available (excluding bot container)"""
-	return len(_get_available_containers()) > 0
-
 def _get_available_containers() -> list:
 	"""
 	The containers a scheduled task can act on, as (host_entry, container).
@@ -2469,15 +2465,8 @@ def ask_schedule_prune_type(user_id: int, state: dict):
 	save_schedule_state(user_id, state)
 
 
-def is_valid_cron(cron_expr: str) -> bool:
-	"""Validate cron expression"""
-	try:
-		croniter(cron_expr)
-		return True
-	except:
-		return False
-
 def confirm_schedule_creation(user_id: int, state: dict):
+	"""Show confirmation of schedule creation"""
 	# A task that acts on Docker always ends up with a host, so the executor
 	# never has to guess: a prune on a single-host setup never got asked. A
 	# mute is the bot's own notifications and gets none.
@@ -2487,7 +2476,6 @@ def confirm_schedule_creation(user_id: int, state: dict):
 	elif state.get("action") not in HOST_SCOPED_SCHEDULE_ACTIONS:
 		state["host"] = None
 		save_schedule_state(user_id, state)
-	"""Show confirmation of schedule creation"""
 	# Delete previous message if exists
 	if state.get("last_message_id"):
 		try:
@@ -6444,6 +6432,24 @@ def display_containers(containers, host_id=None):
 	result += "</pre>"
 	return result
 
+def pending_updates():
+	"""
+	Every container with an update waiting, across the fleet, as [reference,
+	name] pairs: host by host, each one sorted the way its lists are.
+
+	One list for /updateall and for its button, which had a copy each.
+	"""
+	pending = []
+	for entry, owner, containers in hosts_with_containers():
+		# Sorted within each host: bot first, then running, then stopped (all
+		# alphabetically). Sorting the fleet as one list would interleave
+		# machines, and the host is the coarser grouping. Parallel listing,
+		# so a hung host degrades this instead of holding it for its timeout.
+		for container in sort_containers_by_priority(containers, entry["id"]):
+			if update_available(container, entry["id"]):
+				pending.append([container_ref(entry["id"], container), container.name])
+	return pending
+
 def sort_containers_by_priority(containers, host_id=None):
 	"""
 	Sort containers with consistent priority:
@@ -7663,11 +7669,6 @@ def resolve_project_hash(value):
 	if isinstance(entry, str):
 		return host_registry.local_host_id(), entry
 	return entry.get("host") or host_registry.local_host_id(), entry.get("name")
-
-def resolve_project_name(value):
-	"""Just the project name for a hash, or None. Kept for callers that have
-	the host from somewhere else."""
-	return resolve_project_hash(value)[1]
 
 def generate_docker_compose(container):
 	"""

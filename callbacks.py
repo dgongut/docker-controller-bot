@@ -125,12 +125,7 @@ def cb_updateAll(ctx):
 	Host by host in sequence, because updating pulls images and doing several
 	machines at once would fight over the same network.
 	"""
-	targets = []
-	for entry, owner, containers in core.hosts_with_containers():
-		for container in core.sort_containers_by_priority(containers, entry["id"]):
-			if core.update_available(container, entry["id"]):
-				targets.append((core.container_ref(entry["id"], container), container.name))
-	core.update_containers(targets)
+	core.update_containers([tuple(pair) for pair in core.pending_updates()])
 
 @callback(
 	name='confirmDelete',

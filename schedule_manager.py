@@ -26,7 +26,6 @@ class ScheduleManager:
         # a lock that only covered the file left both unprotected.
         self._lock = threading.RLock()
         self._cache = None  # Cache for schedules
-        self._cache_dirty = False  # Flag to track if cache needs refresh
         self._next_id = 1  # Track next available ID
         # Where an unreadable schedules.json was set aside, for the start-up
         # message to say so. None when the file was fine.
@@ -67,9 +66,6 @@ class ScheduleManager:
 
     def _read_schedules(self) -> List[Dict[str, Any]]:
         """Get schedules from cache (optimized)"""
-        if self._cache_dirty:
-            self._load_cache()
-            self._cache_dirty = False
         return self._cache if self._cache is not None else []
 
     def _write_schedules(self):
@@ -84,7 +80,6 @@ class ScheduleManager:
         """
         with self._lock:
             store.write_document(self.full_path, {"schedules": self._cache})
-            self._cache_dirty = False
     
     def add_schedule(self, name: str, cron: str, action: str, container: str = None,
                      minutes: int = None, show_output: bool = False, command: str = None,
@@ -180,15 +175,10 @@ class ScheduleManager:
 
     def toggle_schedule(self, name: str) -> Optional[bool]:
         """Toggle schedule enabled/disabled status. Returns new status or None if not found"""
-        schedules = self._read_schedules()
-        for schedule in schedules:
-            if schedule["name"] == name:
-                schedule["enabled"] = not schedule.get("enabled", True)
-                self._write_schedules()
-                return schedule["enabled"]
-        return None
-
-    def get_enabled_schedules(self) -> List[Dict[str, Any]]:
-        """Get only enabled schedules (optimized with list comprehension)"""
-        return [s for s in self._read_schedules() if s.get("enabled", True)]
-
+        with self._lock:
+            for schedule in self._read_schedules():
+                if schedule["name"] == name:
+                    schedule["enabled"] = not schedule.get("enabled", True)
+                    self._write_schedules()
+                    return schedule["enabled"]
+            return None
