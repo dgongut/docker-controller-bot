@@ -782,7 +782,7 @@ def cb_scheduleSelectDelete(ctx):
 	if idx >= 0:
 		schedule_to_delete = schedules[idx]
 		core.schedule_manager.delete_schedule(schedule_to_delete["name"])
-		core.send_message(message=get_text("schedule_deleted", schedule_to_delete["name"]))
+		core.send_message(message=get_text("schedule_deleted", html.escape(schedule_to_delete["name"])))
 		# Show the updated schedule menu
 		core.show_schedule_menu(ctx.userId, ctx.chatId)
 	else:
@@ -800,9 +800,9 @@ def cb_scheduleSelectToggle(ctx):
 		new_status = core.schedule_manager.toggle_schedule(schedule_to_toggle["name"])
 		if new_status is not None:
 			if new_status:
-				core.send_message(message=get_text("schedule_enabled", schedule_to_toggle["name"]))
+				core.send_message(message=get_text("schedule_enabled", html.escape(schedule_to_toggle["name"])))
 			else:
-				core.send_message(message=get_text("schedule_disabled", schedule_to_toggle["name"]))
+				core.send_message(message=get_text("schedule_disabled", html.escape(schedule_to_toggle["name"])))
 		else:
 			core.send_message(message=get_text("error_invalid_selection"))
 	else:
@@ -1001,7 +1001,7 @@ def cb_scheduleConfirm(ctx):
 			if not added:
 				core.send_message(message=get_text("schedule_name_exists"))
 				return
-			core.send_message(message=get_text("schedule_added_success", schedule_state["name"]))
+			core.send_message(message=get_text("schedule_added_success", html.escape(schedule_state["name"])))
 			core.clear_schedule_state(ctx.userId)
 			# Show the updated schedule menu
 			core.show_schedule_menu(ctx.userId, ctx.chatId)
@@ -1034,7 +1034,7 @@ def cb_scheduleEditField(ctx):
 		if ctx.field == "name":
 			message_text = f"<b>{get_text('schedule_edit_name')}</b>\n\n"
 			message_text += f"{get_text('schedule_ask_name')}\n"
-			message_text += f"<i>{get_text('current_value')}: {schedule_name}</i>"
+			message_text += f"<i>{get_text('current_value')}: {html.escape(schedule_name)}</i>"
 
 			# For text fields, ask for input
 			markup = InlineKeyboardMarkup(row_width=1)
@@ -1102,7 +1102,7 @@ def cb_scheduleEditField(ctx):
 			current_command = schedule.get('command', '')
 			message_text = f"<b>{get_text('schedule_edit_command')}</b>\n\n"
 			message_text += f"{get_text('schedule_ask_command')}\n"
-			message_text += f"<i>{get_text('current_value')}: {current_command}</i>"
+			message_text += f"<i>{get_text('current_value')}: {html.escape(str(current_command or ''))}</i>"
 
 			# For text fields, ask for input
 			markup = InlineKeyboardMarkup(row_width=1)
@@ -1160,10 +1160,10 @@ def cb_scheduleEditValue(ctx):
 		# Update the schedule based on field type
 		if ctx.field == "show_output":
 			core.schedule_manager.update_schedule(schedule_name, show_output=(ctx.value == "yes"))
-			core.send_message(message=get_text("schedule_updated_success", schedule_name))
+			core.send_message(message=get_text("schedule_updated_success", html.escape(schedule_name)))
 		elif ctx.field == "prune_type":
 			core.schedule_manager.update_schedule(schedule_name, prune_type=ctx.value)
-			core.send_message(message=get_text("schedule_updated_success", schedule_name))
+			core.send_message(message=get_text("schedule_updated_success", html.escape(schedule_name)))
 		elif ctx.field == "container":
 			# value is now the container index, retrieve name from edit state
 			edit_state = core.load_schedule_state(ctx.userId)
@@ -1174,13 +1174,13 @@ def cb_scheduleEditValue(ctx):
 				# The host moves with the name: keeping the old one would point
 				# the task at a namesake on the wrong machine, or at nothing.
 				core.schedule_manager.update_schedule(schedule_name, container=container_name, host=container_host)
-				core.send_message(message=get_text("schedule_updated_success", schedule_name))
+				core.send_message(message=get_text("schedule_updated_success", html.escape(schedule_name)))
 			else:
 				core.send_message(message=get_text("error_invalid_selection"))
 				return
 		elif ctx.field == "command":
 			core.schedule_manager.update_schedule(schedule_name, command=ctx.value)
-			core.send_message(message=get_text("schedule_updated_success", schedule_name))
+			core.send_message(message=get_text("schedule_updated_success", html.escape(schedule_name)))
 
 		# Show the schedule menu again
 		core.show_schedule_menu(ctx.userId, ctx.chatId)
@@ -1201,7 +1201,7 @@ def cb_scheduleEditStatus(ctx):
 			core.schedule_manager.update_schedule(schedule_name, enabled=new_enabled)
 
 			# Show success message
-			core.send_message(message=get_text("schedule_updated_success", schedule_name))
+			core.send_message(message=get_text("schedule_updated_success", html.escape(schedule_name)))
 
 			# Show the schedule menu again
 			core.show_schedule_menu(ctx.userId, ctx.chatId)

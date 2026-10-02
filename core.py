@@ -821,7 +821,7 @@ class DockerManager:
 			return self._decode_exec_output(result)
 		except Exception as e:
 			error(f"Error executing command [{command}] in container {container_name}. Error: [{e}]")
-			return get_text("error_executing_command_container", command, container_name)
+			return get_text("error_executing_command_container", html.escape(command), container_name)
 
 	def _decode_exec_output(self, result):
 		output = result.output.decode('utf-8') if result.output else ''
@@ -1707,7 +1707,7 @@ class DockerScheduleMonitor:
 				# Disable the schedule instead of deleting it
 				if schedule_name:
 					self.schedule_manager.update_schedule(schedule_name, enabled=False)
-					send_message(message=get_text("error_schedule_disabled", schedule_name))
+					send_message(message=get_text("error_schedule_disabled", html.escape(schedule_name)))
 				return False
 
 			# Execute action based on type
@@ -1904,7 +1904,7 @@ def _build_schedule_summary(state: dict) -> str:
 
 	# Add schedule details
 	if state.get("name"):
-		lines.append(f"<b>{get_text('schedule_label_name')}:</b> {state.get('name')}")
+		lines.append(f"<b>{get_text('schedule_label_name')}:</b> {html.escape(str(state.get('name')))}")
 	if state.get("cron"):
 		lines.append(f"<b>{get_text('schedule_label_cron')}:</b> {state.get('cron')}")
 	if state.get("action"):
@@ -1926,7 +1926,7 @@ def _build_schedule_summary(state: dict) -> str:
 	if state.get("action") in ("exec", "prune") and state.get("show_output") is not None:
 		lines.append(f"<b>{get_text('schedule_label_show_output')}:</b> {get_text('schedule_yes') if state.get('show_output') else get_text('schedule_no')}")
 	if state.get("command"):
-		lines.append(f"<b>{get_text('schedule_label_command')}:</b> {state.get('command')}")
+		lines.append(f"<b>{get_text('schedule_label_command')}:</b> <code>{html.escape(str(state.get('command')))}</code>")
 
 	return "\n".join(lines)
 
@@ -1977,12 +1977,14 @@ def show_schedule_menu(user_id: int, chat_id: int):
 
 		for idx, sched in enumerate(schedules, 1):
 			# Unpack all values at once
-			name = sched['name']
+			# Typed by hand, so escaped: a command with `<` in it —`mysql < dump.sql`—
+			# made the whole listing fail to send, every time /schedule was opened.
+			name = html.escape(str(sched['name']))
 			action = sched.get('action', '')
 			cron = sched.get('cron', '* * * * *')
 			container = sched.get('container', '')
 			minutes = sched.get('minutes', '')
-			command = sched.get('command', '')
+			command = html.escape(str(sched.get('command') or ''))
 			show_output = sched.get('show_output', False)
 			prune_type = sched.get('prune_type', '')
 			enabled = sched.get('enabled', True)
@@ -2105,7 +2107,7 @@ def show_schedule_edit_options(user_id: int, schedule_name: str):
 	status_icon = "🟢" if enabled else "🔴"
 
 	# Build message with schedule details
-	message_text = f"<b>{schedule_name}</b>\n\n"
+	message_text = f"<b>{html.escape(schedule_name)}</b>\n\n"
 	message_text += f"<b>{get_text('schedule_label_status')}:</b> {status_icon} {status_text}\n"
 	message_text += f"<b>{get_text('schedule_label_cron')}:</b> <code>{cron}</code>\n"
 	message_text += f"<b>{get_text('schedule_label_action')}:</b> <b>{action}</b>\n"
@@ -2121,7 +2123,7 @@ def show_schedule_edit_options(user_id: int, schedule_name: str):
 		message_text += f"<b>{get_text('schedule_label_minutes')}:</b> <b>{minutes}</b>\n"
 	elif action == 'exec':
 		message_text += f"<b>{get_text('schedule_label_container')}:</b> <b>{container}</b>\n"
-		message_text += f"<b>{get_text('schedule_label_command')}:</b> <code>{command}</code>\n"
+		message_text += f"<b>{get_text('schedule_label_command')}:</b> <code>{html.escape(str(command or ''))}</code>\n"
 		message_text += host_line
 		message_text += f"<b>{get_text('schedule_label_show_output')}:</b> <b>{get_text('schedule_yes') if show_output else get_text('schedule_no')}</b>\n"
 	elif action == 'prune':
@@ -2371,7 +2373,7 @@ def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: in
 				# Re-ask for name
 				message_text = f"<b>{get_text('schedule_edit_name')}</b>\n\n"
 				message_text += f"{get_text('schedule_ask_name')}\n"
-				message_text += f"<i>{get_text('current_value')}: {schedule_name}</i>"
+				message_text += f"<i>{get_text('current_value')}: {html.escape(schedule_name)}</i>"
 				markup = InlineKeyboardMarkup(row_width=1)
 				markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 				msg = send_message(message=message_text, reply_markup=markup)
@@ -2379,7 +2381,7 @@ def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: in
 				save_schedule_state(user_id, state)
 				return
 			schedule_manager.update_schedule(schedule_name, name=user_input)
-			send_message(message=get_text("schedule_updated_success", user_input))
+			send_message(message=get_text("schedule_updated_success", html.escape(user_input)))
 			clear_schedule_state(user_id)
 			show_schedule_menu(user_id, chatId)
 			return
@@ -2407,19 +2409,19 @@ def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: in
 				save_schedule_state(user_id, state)
 				return
 			schedule_manager.update_schedule(schedule_name, cron=user_input)
-			send_message(message=get_text("schedule_updated_success", schedule_name))
+			send_message(message=get_text("schedule_updated_success", html.escape(schedule_name)))
 			clear_schedule_state(user_id)
 			show_schedule_menu(user_id, chatId)
 			return
 		elif field == "container":
 			schedule_manager.update_schedule(schedule_name, container=user_input)
-			send_message(message=get_text("schedule_updated_success", schedule_name))
+			send_message(message=get_text("schedule_updated_success", html.escape(schedule_name)))
 			clear_schedule_state(user_id)
 			show_schedule_menu(user_id, chatId)
 			return
 		elif field == "command":
 			schedule_manager.update_schedule(schedule_name, command=user_input)
-			send_message(message=get_text("schedule_updated_success", schedule_name))
+			send_message(message=get_text("schedule_updated_success", html.escape(schedule_name)))
 			clear_schedule_state(user_id)
 			show_schedule_menu(user_id, chatId)
 			return
@@ -2470,7 +2472,7 @@ def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: in
 				save_schedule_state(user_id, state)
 				return
 			schedule_manager.update_schedule(schedule_name, minutes=minutes)
-			send_message(message=get_text("schedule_updated_success", schedule_name))
+			send_message(message=get_text("schedule_updated_success", html.escape(schedule_name)))
 			clear_schedule_state(user_id)
 			show_schedule_menu(user_id, chatId)
 			return
@@ -3287,7 +3289,7 @@ def apply_settings_text_value(field, raw):
 			bot.get_chat(raw)
 		except Exception as e:
 			debug(f"Rejected notification channel {raw}: {e}")
-			send_message(message=get_text("settings_channel_unreachable", raw))
+			send_message(message=get_text("settings_channel_unreachable", html.escape(raw)))
 			return None
 		store.set("bot.notification_channel", raw)
 		return get_text("settings_updated")

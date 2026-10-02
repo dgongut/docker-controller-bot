@@ -3099,6 +3099,74 @@ def test_the_bot_is_never_offered_to_a_scheduled_task():
 		_restore_hosts()
 
 
+def _assert_telegram_html(text, where=""):
+	"""
+	Fails unless Telegram would parse `text`: only the tags it knows, balanced.
+
+	What it does with anything else is refuse the whole message, so a stray
+	`<` typed by the user is not a cosmetic problem but a screen that never
+	arrives.
+	"""
+	from html.parser import HTMLParser
+
+	allowed = {"b", "strong", "i", "em", "u", "ins", "s", "strike", "del", "code", "pre", "a",
+				"tg-spoiler", "span", "blockquote"}
+	stack = []
+
+	class Checker(HTMLParser):
+		def handle_starttag(self, tag, attrs):
+			assert tag in allowed, f"{where}: etiqueta <{tag}> en {text!r}"
+			stack.append(tag)
+
+		def handle_endtag(self, tag):
+			assert stack and stack[-1] == tag, f"{where}: </{tag}> sin abrir en {text!r}"
+			stack.pop()
+
+	Checker(convert_charrefs=True).feed(text)
+	assert not stack, f"{where}: sin cerrar {stack} en {text!r}"
+
+
+def test_what_the_user_typed_in_a_schedule_never_breaks_its_screens():
+	"""
+	A scheduled `mysql < dump.sql`, or a task called "copia <diaria>", went into
+	the HTML raw: Telegram rejected the message, and /schedule failed to open
+	every time from then on.
+	"""
+	_with_hosts([HOST_FIXTURE[0]], unreachable=())
+	task = {"id": 7, "name": "copia <diaria> & co", "cron": "@daily", "action": "exec",
+			"container": "db", "command": "mysql < dump.sql > out", "show_output": True,
+			"host": "h_local", "enabled": True}
+	sent = []
+	original = (dcb.send_message, dcb.schedule_manager.get_all_schedules,
+				dcb.schedule_manager.get_schedule, dcb.schedule_manager.get_schedule_by_id,
+				dcb.schedule_manager.update_schedule, dcb.schedule_manager.delete_schedule)
+	dcb.send_message = lambda **kwargs: sent.append(kwargs.get("message", "")) or MagicMock(message_id=1)
+	dcb.schedule_manager.get_all_schedules = lambda: [task]
+	dcb.schedule_manager.get_schedule = lambda _name: task
+	dcb.schedule_manager.get_schedule_by_id = lambda _id: task
+	dcb.schedule_manager.update_schedule = lambda *a, **k: True
+	try:
+		texts = {"resumen": dcb._build_schedule_summary(task)}
+		dcb.show_schedule_menu(1, 1)
+		dcb.show_schedule_edit_options(1, task["name"])
+		base = {"call": MagicMock(id="q"), "chatId": 1, "messageId": 2, "userId": 1,
+				"comando": "x", "multiAction": None, "hostId": "h_local", "containerId": None}
+		for field in ("name", "command"):
+			callbacks.cb_scheduleEditField(callback_registry.Context(**base, field=field, scheduleId="7"))
+		callbacks.cb_scheduleEditValue(callback_registry.Context(**base, field="show_output", scheduleId="7", value="yes"))
+		for i, text in enumerate(sent):
+			texts[f"mensaje {i}"] = text
+		for where, text in texts.items():
+			_assert_telegram_html(text, where)
+		joined = "\n".join(texts.values())
+		assert "&lt;diaria&gt;" in joined and "mysql &lt; dump.sql" in joined, joined
+	finally:
+		(dcb.send_message, dcb.schedule_manager.get_all_schedules, dcb.schedule_manager.get_schedule,
+			dcb.schedule_manager.get_schedule_by_id, dcb.schedule_manager.update_schedule,
+			dcb.schedule_manager.delete_schedule) = original
+		_restore_hosts()
+
+
 def test_the_three_renderers_put_the_host_in_the_same_place():
 	"""
 	The creation summary, the listing and the edit screen each build their own
