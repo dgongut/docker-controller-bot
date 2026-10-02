@@ -3322,6 +3322,69 @@ def test_a_schedule_on_an_unreachable_host_is_skipped_not_disabled():
 		_restore_hosts()
 
 
+def test_the_scheduler_evaluates_every_minute_exactly_once():
+	"""
+	It slept 60 s after doing the work and looked at whatever minute it landed
+	in, so every lap ran a little later and, sooner or later, one jumped from
+	:00:55 to :02:05: the task due at :01 never ran.
+	"""
+	from datetime import datetime
+	ran = []
+	tasks = [
+		{"name": "a la 1", "cron": "1 3 * * *", "action": "mute", "minutes": 1, "enabled": True},
+		{"name": "cada 5", "cron": "*/5 * * * *", "action": "mute", "minutes": 1, "enabled": True},
+		{"name": "apagada", "cron": "* * * * *", "action": "mute", "minutes": 1, "enabled": False},
+		{"name": "al arrancar", "cron": "@reboot", "action": "mute", "minutes": 1, "enabled": True},
+	]
+	original = dcb.schedule_manager.get_all_schedules
+	dcb.schedule_manager.get_all_schedules = lambda: tasks
+	try:
+		monitor = dcb.DockerScheduleMonitor()
+		monitor._execute_schedule_action = lambda task: ran.append(task["name"])
+
+		monitor._tick(datetime(2026, 10, 2, 3, 0, 55))
+		monitor._tick(datetime(2026, 10, 2, 3, 2, 5))     # se ha saltado las 3:01
+		assert ran == ["cada 5", "a la 1"], ran
+
+		ran.clear()
+		monitor._tick(datetime(2026, 10, 2, 3, 2, 40))    # el mismo minuto otra vez
+		assert ran == [], ran
+
+		# Making up several minutes runs a task once, not once per minute.
+		ran.clear()
+		monitor._tick(datetime(2026, 10, 2, 3, 6, 1))     # 3:03 a 3:06, con las 3:05
+		assert ran == ["cada 5"], ran
+
+		# The clock going back —the autumn change— does not run anything twice.
+		ran.clear()
+		monitor._tick(datetime(2026, 10, 2, 3, 5, 0))
+		assert ran == [], ran
+
+		# A gap too long to be a slow lap is not replayed: only the minute now.
+		ran.clear()
+		monitor._tick(datetime(2026, 10, 2, 9, 10, 0))
+		assert ran == ["cada 5"], ran
+	finally:
+		dcb.schedule_manager.get_all_schedules = original
+
+
+def test_reboot_tasks_run_in_the_daemon_not_when_it_is_built():
+	"""Built on the main thread: an exec that hangs held up the start of polling."""
+	ran = []
+	tasks = [{"name": "al arrancar", "cron": "@reboot", "action": "mute", "minutes": 1, "enabled": True},
+			{"name": "apagada", "cron": "@reboot", "action": "mute", "minutes": 1, "enabled": False}]
+	original = (dcb.schedule_manager.get_all_schedules, dcb.DockerScheduleMonitor._execute_schedule_action)
+	dcb.schedule_manager.get_all_schedules = lambda: tasks
+	dcb.DockerScheduleMonitor._execute_schedule_action = lambda self, task: ran.append(task["name"])
+	try:
+		monitor = dcb.DockerScheduleMonitor()
+		assert ran == [], "se ejecutó al construirlo"
+		monitor._execute_reboot_tasks()
+		assert ran == ["al arrancar"], ran
+	finally:
+		dcb.schedule_manager.get_all_schedules, dcb.DockerScheduleMonitor._execute_schedule_action = original
+
+
 def test_removing_a_host_warns_about_the_schedules_it_would_orphan():
 	"""
 	A task naming a host that no longer exists raises HostUnavailable on every

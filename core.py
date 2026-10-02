@@ -1639,25 +1639,25 @@ def schedule_container_ref(host_id, container_name):
 
 
 class DockerScheduleMonitor:
+	# How many minutes the loop makes up for when it falls behind —a slow
+	# action, a busy machine— before it gives up on them. Past that the gap is
+	# a suspended host or a clock that jumped, and replaying it would fire a
+	# burst of tasks for times long gone.
+	MAX_CATCH_UP_MINUTES = 5
+
 	def __init__(self):
 		super().__init__()
 		self.schedule_manager = schedule_manager  # Use the global instance
-		self.last_run = {}  # Track last execution time for each schedule
-		self._reboot_tasks_executed = set()  # Track which @reboot tasks have been executed
-		self._execute_reboot_tasks()  # Execute @reboot tasks on startup
+		# The last minute whose tasks were evaluated. Each minute is looked at
+		# once, which is what keeps a task from running twice in it.
+		self._last_minute = None
 
 	def _execute_reboot_tasks(self):
-		"""Execute all @reboot tasks immediately on bot startup"""
+		"""Execute all @reboot tasks, once, when the daemon starts"""
 		try:
-			schedules = self.schedule_manager.get_all_schedules()
-
-			for schedule in schedules:
-				# Only execute @reboot tasks
-				if schedule.get("cron") == "@reboot":
-					success = self._execute_schedule_action(schedule)
-					if success:
-						# Mark this task as executed
-						self._reboot_tasks_executed.add(schedule.get("name"))
+			for schedule in self.schedule_manager.get_all_schedules():
+				if schedule.get("enabled", True) and schedule.get("cron") == "@reboot":
+					self._execute_schedule_action(schedule)
 		except Exception as e:
 			error(f"Error reading schedule file: [{e}]")
 
@@ -1789,63 +1789,75 @@ class DockerScheduleMonitor:
 			return False
 
 	def run(self):
-		"""Main loop: check and execute scheduled tasks every minute"""
+		"""
+		Main loop: evaluates every minute exactly once.
+
+		It used to sleep 60 s after doing the work and then look at whatever
+		minute it had landed in. The work pushed every lap later, so sooner or
+		later a lap jumped from :00:55 to :02:05 and the tasks due at :01 never
+		ran. Now it wakes at the start of each minute and makes up for any it
+		missed.
+
+		The @reboot tasks run here and not when the monitor is built: that is
+		the main thread, and an exec that hangs there held up the start of
+		polling with it.
+		"""
+		self._execute_reboot_tasks()
 		while True:
 			try:
-				schedules = self.schedule_manager.get_all_schedules()
-				now = datetime.now()
-
-				for schedule in schedules:
-					# Skip disabled schedules
-					if not schedule.get("enabled", True):
-						continue
-
-					cron_expr = schedule.get("cron")
-					schedule_name = schedule.get("name")
-
-					# Skip @reboot tasks in the main loop (they're executed at startup)
-					if cron_expr == "@reboot":
-						continue
-
-					# Check if this task should run now
-					if self.should_run(schedule_name, cron_expr, now):
-						self._execute_schedule_action(schedule)
+				self._tick(datetime.now())
 			except Exception as e:
 				error(f"Error reading schedule file: [{e}]")
-			time.sleep(60)
+			time.sleep(60.5 - time.time() % 60)
+
+	def _minutes_due(self, now):
+		"""The minutes to evaluate now, oldest first, and marks them as done."""
+		current = now.replace(second=0, microsecond=0)
+		last = self._last_minute
+		if last is None or current - last > timedelta(minutes=self.MAX_CATCH_UP_MINUTES) \
+				or last - current > timedelta(hours=2):
+			# First lap, a gap too long to replay, or the clock set well back:
+			# start over from here.
+			if last is not None and current > last:
+				warning(f"Schedules: skipping {int((current - last).total_seconds() // 60) - 1} "
+						f"minute(s) the bot was not running for")
+			due = [current]
+		elif current <= last:
+			# The same minute again, or the clock went back a little —the
+			# autumn change—: those minutes were already evaluated.
+			due = []
+		else:
+			due = []
+			minute = last + timedelta(minutes=1)
+			while minute <= current:
+				due.append(minute)
+				minute += timedelta(minutes=1)
+		if due:
+			self._last_minute = due[-1]
+		return due
+
+	def _tick(self, now):
+		"""Runs every task due in the minutes not yet evaluated."""
+		due = self._minutes_due(now)
+		if not due:
+			return
+		for schedule in self.schedule_manager.get_all_schedules():
+			if not schedule.get("enabled", True):
+				continue
+			cron_expr = schedule.get("cron")
+			# @reboot tasks run once, when the daemon starts
+			if cron_expr == "@reboot":
+				continue
+			# Once even if it matches more than one of the minutes made up for:
+			# catching up is about not losing a run, not about bunching them.
+			if any(self.should_run(schedule.get("name"), cron_expr, minute) for minute in due):
+				self._execute_schedule_action(schedule)
 
 	def should_run(self, schedule_name, cron_expr, now):
-		"""
-		Check if a cron expression should run at the given time.
-		Uses a tracking system to ensure tasks only run once per scheduled time.
-
-		Note: @reboot tasks are handled separately in _execute_reboot_tasks()
-		and should not reach this method.
-		"""
+		"""Whether a cron expression fires in the minute of `now`."""
 		try:
-			# Create a croniter object starting from one minute ago
-			# This helps us detect if we should run in the current minute
-			one_minute_ago = now - timedelta(minutes=1)
-			cron = croniter(cron_expr, one_minute_ago)
-
-			# Get the next execution time after one minute ago
-			next_execution = cron.get_next(datetime)
-
-			# Check if the next execution is within the current minute
-			# (i.e., it should run now)
-			should_run = (next_execution.year == now.year and
-						 next_execution.month == now.month and
-						 next_execution.day == now.day and
-						 next_execution.hour == now.hour and
-						 next_execution.minute == now.minute)
-
-			# Track execution to avoid running multiple times in the same minute
-			task_key = f"{schedule_name}_{now.strftime('%Y-%m-%d %H:%M')}"
-			if should_run and task_key not in self.last_run:
-				self.last_run[task_key] = True
-				return True
-
-			return False
+			minute = now.replace(second=0, microsecond=0)
+			return croniter.match(cron_expr, minute)
 		except Exception as e:
 			debug(f"Error checking cron schedule '{schedule_name}' with expression '{cron_expr}': {e}")
 			return False
