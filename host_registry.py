@@ -546,32 +546,42 @@ def status_snapshot(deadline_seconds=PROBE_TIMEOUT_SECONDS, entries=None):
 			drop(host_id)
 			outcome = (False, str(e))
 		with _probe_lock:
-			_probe_results[host_id] = outcome
+			# Stamped with when it finished: two sweeps can share a check, and
+			# each needs to tell an answer given during it from one left over.
+			_probe_results[host_id] = (time.monotonic(), outcome)
 			_probes.pop(host_id, None)
 
+	started = time.monotonic()
 	threads = []
 	for entry in configured:
 		host_id = entry["id"]
 		with _probe_lock:
-			# Discard whatever the last sweep left: this one reports now.
-			_probe_results.pop(host_id, None)
 			pending = _probes.get(host_id)
 			if pending is not None and pending.is_alive():
+				# Waited on rather than skipped. Skipping left this sweep
+				# nothing to read but "no answer", often at once, whenever two
+				# ran together —the first update pass and the start-up message
+				# always do— and a healthy host was reported down.
+				threads.append(pending)
 				continue
 			thread = threading.Thread(target=check, args=(entry,), daemon=True)
 			_probes[host_id] = thread
 		thread.start()
 		threads.append(thread)
 
-	deadline = time.monotonic() + deadline_seconds
+	deadline = started + deadline_seconds
 	for thread in threads:
 		thread.join(max(0, deadline - time.monotonic()))
 
+	missing = (False, f"no answer in {deadline_seconds}s")
 	with _probe_lock:
-		return {
-			entry["id"]: _probe_results.pop(entry["id"], (False, f"no answer in {deadline_seconds}s"))
-			for entry in configured
-		}
+		report = {}
+		for entry in configured:
+			# Read, not consumed, so a sweep sharing the check sees it too; and
+			# only an answer given since this sweep began counts as its own.
+			stamped = _probe_results.get(entry["id"])
+			report[entry["id"]] = stamped[1] if stamped and stamped[0] >= started else missing
+		return report
 
 
 def same_url(one, other):

@@ -486,3 +486,42 @@ def test_connecting_to_one_host_does_not_hold_up_another():
 		barrier.abort()
 		host_registry.reset()
 		shutil.rmtree(root, ignore_errors=True)
+
+
+def test_two_sweeps_at_once_both_see_a_healthy_host():
+	"""
+	A sweep that found a check already running skipped the host, and the first
+	to finish consumed the shared answer: the other reported "no answer",
+	often at once. The first update pass and the start-up message always run
+	together, so a healthy remote host came up red on every start.
+	"""
+	import threading
+	import time
+
+	_, root = setup([
+		{"id": "h_local", "alias": "casa", "url": host_registry.LOCAL_SOCKET_URL, "local": True},
+		{"id": "h_nas", "alias": "nas", "url": "tcp://nas:2375"},
+	])
+	slow = MagicMock()
+	slow.ping.side_effect = lambda: time.sleep(0.5)
+	original = host_registry.probe_client
+	host_registry.probe_client = lambda host_id: slow
+	reports = []
+	try:
+		sweeps = [threading.Thread(target=lambda: reports.append(host_registry.status_snapshot(deadline_seconds=5)))
+					for _ in range(2)]
+		for sweep in sweeps:
+			sweep.start()
+			time.sleep(0.1)
+		for sweep in sweeps:
+			sweep.join(10)
+		assert len(reports) == 2, reports
+		for report in reports:
+			assert report["h_nas"] == (True, ""), report
+		# And a sweep after both does not take their answer for its own.
+		host_registry.probe_client = lambda host_id: (_ for _ in ()).throw(host_registry.HostUnavailable(host_id, "down"))
+		assert host_registry.status_snapshot(deadline_seconds=2)["h_nas"] == (False, "down")
+	finally:
+		host_registry.probe_client = original
+		host_registry.reset()
+		shutil.rmtree(root, ignore_errors=True)

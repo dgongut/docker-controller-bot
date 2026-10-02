@@ -2836,6 +2836,32 @@ def test_a_host_that_hangs_does_not_hold_the_others():
 		_restore_hosts()
 
 
+def test_two_listings_at_once_both_see_a_healthy_host():
+	"""Same as the probe: a listing already running is shared, not a reason to leave the host out."""
+	import host_registry
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	original = dcb.DockerManager.list_containers
+
+	def slow(self, comando=""):
+		time.sleep(0.5)
+		return [_container("plex" if self.host_id == "h_nas" else "nginx", "running")]
+
+	dcb.DockerManager.list_containers = slow
+	results = []
+	try:
+		sweeps = [threading.Thread(target=lambda: results.append(
+			{entry["id"] for entry, _, _ in dcb.hosts_with_containers()})) for _ in range(2)]
+		for sweep in sweeps:
+			sweep.start()
+			time.sleep(0.1)
+		for sweep in sweeps:
+			sweep.join(10)
+		assert results == [{"h_local", "h_nas"}] * 2, results
+	finally:
+		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+
 def test_ssh_hosts_are_bounded_in_every_image():
 	"""docker-py reads the ssh pipe with no timeout; ssh's own keepalive is the only bound."""
 	for name in ("Dockerfile", "Dockerfile_debug", "Dockerfile_local"):

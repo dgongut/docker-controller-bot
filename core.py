@@ -6714,9 +6714,12 @@ def display_all_hosts(comando=""):
 	return "\n\n".join(rendered) if rendered else get_text("error_no_containers_available")
 
 
-# The listing threads in flight, one per host at most. Module-level because the
-# point of them is what a *previous* call left behind: see hosts_with_containers.
+# The listing threads in flight, one per host and filter at most, with when
+# each was started; and the last answer each gave, stamped with when. Module-
+# level because the point of them is what another call started or left behind:
+# see hosts_with_containers.
 _listings = {}
+_listing_results = {}
 _listings_lock = threading.Lock()
 
 
@@ -6742,11 +6745,12 @@ def hosts_with_containers(comando="",
 	person looking at it. Waiting for the probe is bounded by the probe's
 	timeout, which is what its deadline is taken from.
 
-	A host whose listing is still running from an earlier sweep is not asked
-	again: it is not answering anyway, and starting a second one would leave a
-	thread behind on every refresh of a menu. It counts as down for this sweep,
-	and giving up on it closes its client, which is what lets the thread that
-	was left behind come back.
+	A listing another sweep started moments ago is shared rather than repeated.
+	One still running from longer ago than the deadline is not asked again: it
+	is not answering anyway, and starting a second one would leave a thread
+	behind on every refresh of a menu. It counts as down for this sweep, and
+	giving up on it closes its client, which is what lets the thread that was
+	left behind come back.
 	"""
 	configured = host_registry.hosts()
 	if not configured:
@@ -6754,52 +6758,61 @@ def hosts_with_containers(comando="",
 	statuses = host_registry.status_snapshot(
 		deadline_seconds=snapshot_deadline_seconds, entries=configured)
 
-	# Written by the threads, read once they are done or the deadline has
-	# passed: either (entry, manager, containers) or the exception that ended
-	# the attempt. Local to this call, so a thread that comes back late writes
-	# somewhere nobody is looking any more.
-	results = {}
-
-	def list_one(entry):
+	def list_one(entry, key):
 		host_id = entry["id"]
 		try:
 			owner = manager(host_id)
-			results[host_id] = (entry, owner, owner.list_containers(comando=comando))
+			outcome = (entry, owner, owner.list_containers(comando=comando))
 		except host_registry.HostUnavailable as e:
 			debug(f"Skipping host {entry.get('alias', host_id)}: {e.reason}")
-			results[host_id] = e
+			outcome = e
 		except Exception as e:
 			warning(f"Could not list containers on {entry.get('alias', host_id)}: {e}")
-			results[host_id] = e
-		finally:
-			with _listings_lock:
-				# Only if it is still this thread: a later sweep may have given
-				# up on this one and started its own.
-				if _listings.get(host_id) is threading.current_thread():
-					_listings.pop(host_id, None)
+			outcome = e
+		with _listings_lock:
+			# Stamped with when it finished, so every sweep sharing this
+			# listing can tell an answer given during it from a stale one.
+			_listing_results[key] = (time.monotonic(), outcome)
+			# Only if it is still this thread: a later sweep may have given
+			# up on this one and started its own.
+			if _listings.get(key, (None,))[0] is threading.current_thread():
+				_listings.pop(key, None)
 
+	started = time.monotonic()
 	asked = []
 	for entry in configured:
 		host_id = entry["id"]
 		if not statuses.get(host_id, (False, ""))[0]:
 			continue
+		# Per host and per filter: a /run menu and a /stop menu open at once
+		# want different lists, and neither can stand in for the other.
+		key = (host_id, comando)
 		with _listings_lock:
-			previous = _listings.get(host_id)
+			previous, since = _listings.get(key, (None, 0))
 			if previous is not None and previous.is_alive():
-				debug(f"Host {entry.get('alias', host_id)} is still listing from an earlier sweep: leaving it out")
+				if started - since > list_deadline_seconds:
+					debug(f"Host {entry.get('alias', host_id)} is still listing from an earlier sweep: leaving it out")
+					continue
+				# A sweep running alongside this one —two menus, or the update
+				# pass and the start-up message— asked a moment ago. Sharing
+				# its answer, rather than leaving the host out, is what keeps a
+				# healthy machine from being reported down.
+				asked.append((entry, key, previous))
 				continue
-			thread = threading.Thread(target=list_one, args=(entry,), daemon=True)
-			_listings[host_id] = thread
+			thread = threading.Thread(target=list_one, args=(entry, key), daemon=True)
+			_listings[key] = (thread, started)
 		thread.start()
-		asked.append((entry, thread))
+		asked.append((entry, key, thread))
 
-	deadline = time.monotonic() + list_deadline_seconds
-	for _, thread in asked:
+	deadline = started + list_deadline_seconds
+	for _, _, thread in asked:
 		thread.join(max(0, deadline - time.monotonic()))
 
 	sections = []
-	for entry, _ in asked:
-		outcome = results.get(entry["id"])
+	for entry, key, _ in asked:
+		with _listings_lock:
+			stamped = _listing_results.get(key)
+		outcome = stamped[1] if stamped and stamped[0] >= started else None
 		if isinstance(outcome, tuple):
 			sections.append(outcome)
 		else:
