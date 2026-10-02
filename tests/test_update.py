@@ -191,3 +191,37 @@ def test_a_successful_update_leaves_just_the_new_container():
 	assert _update(engine, original) == "updated_container"
 	assert [c.role for c in engine.containers.values()] == ["new"]
 	assert engine.named("nginx")[0].status == "running"
+
+
+def test_a_container_is_stopped_with_the_grace_period_it_asked_for():
+	"""
+	With no `t`, the daemon waits the container's own StopTimeout but the
+	client gives up after its request timeout: 60 s in 4.x, 30 s now. A
+	`stop_grace_period: 60s` came back as a timeout halfway through, and the
+	update reported failure on a container left stopping.
+	"""
+	from unittest.mock import MagicMock
+	import docker_update
+
+	for config, expected in (({"StopTimeout": 60}, 60), ({}, 10), ({"StopTimeout": None}, 10),
+							({"StopTimeout": 0}, 0), ({"StopTimeout": -1}, 10)):
+		container = MagicMock()
+		container.attrs = {"Config": config}
+		docker_update.stop_container(container)
+		container.stop.assert_called_once_with(timeout=expected)
+
+
+def test_nothing_stops_a_container_behind_the_helpers_back():
+	"""A bare stop() comes back on the 30 s client timeout; one with t=10 cuts a longer grace short."""
+	import re
+	offenders = []
+	for name in ("core.py", "docker_update.py", "docker_compose_manager.py", "callbacks.py"):
+		with open(os.path.join(harness.REPO, name), encoding="utf-8") as f:
+			for number, line in enumerate(f, 1):
+				if re.search(r"\bcontainer\.stop\(", line) and "def stop_container" not in line:
+					offenders.append(f"{name}:{number}: {line.strip()}")
+	# The helper itself. The rollback stops `new_container`, created a moment
+	# ago with no grace period of its own, and does not match.
+	allowed = ("container.stop(timeout=grace)",)
+	offenders = [o for o in offenders if not o.endswith(allowed)]
+	assert not offenders, "\n".join(offenders)

@@ -22,6 +22,27 @@ def get_container_lock(container_id):
 		return _container_locks[container_id]
 
 
+# What Docker waits before killing a container that set no stop_grace_period.
+DEFAULT_STOP_SECONDS = 10
+
+
+def stop_container(container):
+	"""
+	Stops a container giving it the grace period it asked for.
+
+	Passed explicitly because of how the SDK times the call: with no `t` the
+	daemon waits the container's own StopTimeout, but the client still gives
+	up after its request timeout. In 4.x that was 60 s; with the 30 s hosts
+	have now, a container with `stop_grace_period: 60s` came back as a timeout
+	halfway through stopping, and the update gave up on it. With `t` the SDK
+	adds the wait to the request timeout itself.
+	"""
+	grace = ((container.attrs or {}).get("Config") or {}).get("StopTimeout")
+	if not isinstance(grace, int) or isinstance(grace, bool) or grace < 0:
+		grace = DEFAULT_STOP_SECONDS
+	container.stop(timeout=grace)
+
+
 def _get_list(data, key, default=None):
 	"""Safely get a list value from a dict. Returns default if None or missing."""
 	if data is None:
@@ -515,7 +536,7 @@ def _perform_update_locked(client, container, config, container_name, message, e
 		if message:
 			edit_message_func(get_text_func("updating_stopping", container_name), telegram_group, message.message_id)
 		debug_func(f"[STOP_CONTAINER] Stopping container {container_name} (ID: {old_container_id})")
-		container.stop()
+		stop_container(container)
 		debug_func(f"[STOP_CONTAINER] Container stopped successfully")
 
 		# Rename to _old

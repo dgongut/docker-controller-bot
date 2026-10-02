@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 from telebot.types import InlineKeyboardButton
 from telebot.types import InlineKeyboardMarkup
 from compose_generator import ComposeGenerator
-from docker_update import extract_container_config, perform_update
+from docker_update import extract_container_config, perform_update, stop_container
 from docker_compose_manager import (
     ComposeDetector,
     ComposeProjectManager
@@ -312,7 +312,7 @@ class DockerManager:
 			if is_own_container(self.host_id, container_id, container_name):
 				return get_text("error_can_not_do_that")
 			container = self.client.containers.get(container_id)
-			container.stop()
+			stop_container(container)
 			# Send confirmation only for manual commands when muted: the event
 			# monitor is silent while muted, so the user gets no other feedback
 			if from_schedule is False and is_muted():
@@ -748,7 +748,7 @@ class DockerManager:
 			container_is_running = container.status in ['running', 'restarting', 'paused', 'created']
 			if container_is_running:
 				debug(f"Container {container_name} is running. It will be stopped.")
-				container.stop()
+				stop_container(container)
 			container.remove()
 			return get_text("deleted_container", container_name)
 		except Exception as e:
@@ -3868,7 +3868,7 @@ def _execute_compose_project_action(action, project_name, show_extended=True, ho
 			if store.get("bot.extended_messages") and show_extended:
 				send_message(message=f'{label}{get_text("stopping_service", service_name)}')
 			try:
-				container.stop(timeout=10)
+				stop_container(container)
 			except Exception as e:
 				debug(f"Error stopping {service_name}: {e}")
 				if show_extended:
@@ -3914,7 +3914,7 @@ def _execute_compose_project_action(action, project_name, show_extended=True, ho
 			if store.get("bot.extended_messages") and show_extended:
 				send_message(message=f'{label}{get_text("stopping_service", service_name)}')
 			try:
-				container.stop(timeout=10)
+				stop_container(container)
 			except Exception as e:
 				debug(f"Error stopping {service_name}: {e}")
 				if show_extended:
@@ -4117,7 +4117,7 @@ def _restart_dependents(owner, dependents, updated_service_name, new_parent_cont
 			continue
 		service_name = container.labels.get('com.docker.compose.service', container.name)
 		try:
-			container.stop(timeout=10)
+			stop_container(container)
 		except Exception as e:
 			debug(f"Error stopping {service_name}: {e}")
 			if store.get("bot.extended_messages"):
@@ -7583,7 +7583,7 @@ def delete_updater():
 		container = docker_manager.client.containers.get(container_id)
 		try:
 			updater_image = container.image.id
-			container.stop()
+			stop_container(container)
 			container.remove()
 			docker_manager.client.images.remove(updater_image)
 			send_message(message=f'{get_text("updated_container", own_container_name())}'
