@@ -2687,6 +2687,39 @@ def test_scheduling_offers_containers_from_every_host():
 		_restore_hosts()
 
 
+def test_editing_a_tasks_container_offers_every_host_and_moves_the_host_too():
+	"""
+	The edit screen still read container.name off what is now (host, container)
+	pairs, so choosing "Container" raised. And the value it saved was the name
+	alone: the task kept its old host and pointed at a namesake, or at nothing.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	original_list = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": (
+		[_container("plex", "running")] if self.host_id == "h_nas" else [_container("nginx", "running")])
+	undo = _quiet_bot()
+	manager = dcb.schedule_manager
+	manager.add_schedule(name="editame", cron="@daily", action="restart", container="nginx", host="h_local")
+	try:
+		task = next(s for s in manager.get_all_schedules() if s["name"] == "editame")
+		base = {"call": MagicMock(id="q1"), "chatId": 1, "messageId": 2, "userId": 77,
+				"comando": "x", "multiAction": None, "hostId": "h_local", "containerId": None}
+		callbacks.cb_scheduleEditField(callback_registry.Context(
+			**base, field="container", scheduleId=str(task["id"])))
+		state = dcb.load_schedule_state(77)
+		idx = next(k.split("_")[1] for k, v in state.items() if k.startswith("container_") and v == "plex")
+		assert state[f"container_host_{idx}"] == "h_nas", state
+		callbacks.cb_scheduleEditValue(callback_registry.Context(
+			**base, field="container", scheduleId=str(task["id"]), value=idx))
+		edited = manager.get_schedule_by_id(task["id"])
+		assert (edited["container"], edited["host"]) == ("plex", "h_nas"), edited
+	finally:
+		manager.delete_schedule("editame")
+		undo()
+		dcb.DockerManager.list_containers = original_list
+		_restore_hosts()
+
+
 def test_the_bot_is_never_offered_to_a_scheduled_task():
 	_with_hosts([HOST_FIXTURE[0]], unreachable=())
 	original = dcb.DockerManager.list_containers

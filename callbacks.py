@@ -1066,10 +1066,16 @@ def cb_scheduleEditField(ctx):
 				return
 
 			markup = InlineKeyboardMarkup(row_width=2)
-			# Store container mapping to avoid callback length issues (64 char limit)
-			for idx, container in enumerate(available_containers):
-				markup.add(InlineKeyboardButton(container.name, callback_data=f"scheduleEditValue|container|{ctx.scheduleId}|{idx}"))
+			# The same shape as choosing the container of a new schedule: the
+			# choice travels as an index and the name and host stay in the
+			# state, since a reference plus a name may not fit in 64 bytes.
+			for idx, (entry, container) in enumerate(available_containers):
+				label = container.name
+				if not host_registry.is_single_host():
+					label = f'{container.name} · {entry.get("alias", entry["id"])}'
+				markup.add(InlineKeyboardButton(label, callback_data=f"scheduleEditValue|container|{ctx.scheduleId}|{idx}"))
 				edit_state[f"container_{idx}"] = container.name
+				edit_state[f"container_host_{idx}"] = entry["id"]
 			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 			msg = core.send_message(message=message_text, reply_markup=markup)
 			edit_state["last_message_id"] = msg.message_id if msg else None
@@ -1158,9 +1164,12 @@ def cb_scheduleEditValue(ctx):
 			# value is now the container index, retrieve name from edit state
 			edit_state = core.load_schedule_state(ctx.userId)
 			container_name = edit_state.get(f"container_{ctx.value}") if edit_state else None
+			container_host = edit_state.get(f"container_host_{ctx.value}") if edit_state else None
 
-			if container_name:
-				core.schedule_manager.update_schedule(schedule_name, container=container_name)
+			if container_name and container_host:
+				# The host moves with the name: keeping the old one would point
+				# the task at a namesake on the wrong machine, or at nothing.
+				core.schedule_manager.update_schedule(schedule_name, container=container_name, host=container_host)
 				core.send_message(message=get_text("schedule_updated_success", schedule_name))
 			else:
 				core.send_message(message=get_text("error_invalid_selection"))
