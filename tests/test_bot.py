@@ -2915,6 +2915,38 @@ def test_ssh_hosts_are_bounded_in_every_image():
 			assert option in text, f"{name} no fija {option}"
 
 
+def test_a_typed_name_is_searched_with_the_menus_deadline():
+	"""
+	A typed "/stop plex" asked each host in turn with no bound, so one machine
+	hanging held the command for as long as it liked. It goes through the
+	parallel sweep the menus use, which gives up on a host at its deadline.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	original = (dcb.DockerManager.list_containers, dcb.disconnect_host)
+	release = threading.Event()
+
+	def listing(self, comando=""):
+		if self.host_id == "h_nas":
+			release.wait(10)
+			return [_container("plex", "running")]
+		return [_container("plex", "running"), _container("nginx", "running")]
+
+	dcb.DockerManager.list_containers = listing
+	dcb.disconnect_host = lambda host_id: None
+	original_sweep = dcb.hosts_with_containers
+	dcb.hosts_with_containers = lambda comando="": original_sweep(comando, list_deadline_seconds=1)
+	try:
+		started = time.monotonic()
+		found = dcb.find_containers_by_name("plex")
+		assert time.monotonic() - started < 5, "ha esperado al host colgado"
+		assert [entry["id"] for entry, _ in found] == ["h_local"], found
+	finally:
+		release.set()
+		dcb.hosts_with_containers = original_sweep
+		dcb.DockerManager.list_containers, dcb.disconnect_host = original
+		_restore_hosts()
+
+
 def test_a_project_on_an_unreachable_host_gives_no_names():
 	"""Rather than raising into whatever was iterating over them."""
 	_with_hosts(HOST_FIXTURE)

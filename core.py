@@ -5347,10 +5347,19 @@ def find_containers_by_name(container_name, host_id=None):
 	Names are unique within a daemon but not between them, so this can return
 	more than one and the caller has to decide what that means. `host_id`
 	restricts the search to one machine.
+
+	Across hosts it goes through the same parallel sweep as the menus, with
+	its deadline: asking each machine in turn left a typed "/stop plex"
+	waiting on a hung host for as long as that host cared to take.
 	"""
+	if not host_id:
+		return [(entry, container)
+				for entry, _, containers in hosts_with_containers()
+				for container in containers if container.name == container_name]
+
 	matches = []
 	for entry in host_registry.hosts():
-		if host_id and entry["id"] != host_id:
+		if entry["id"] != host_id:
 			continue
 		try:
 			owner = manager(entry["id"])
