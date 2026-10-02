@@ -33,8 +33,8 @@ LOCAL_SOCKET_URL = "unix:///var/run/docker.sock"
 # What the startup needs to know once storage is up to date.
 #
 # `ask_for_language` is true only on a genuinely new install: one where there
-# were no settings to read and no LANGUAGE to import either, so the bot has no
-# way of knowing which language to speak and may as well ask.
+# were no settings to read, no LANGUAGE to import and nothing left by 4.x, so
+# the bot has no way of knowing which language to speak and may as well ask.
 MigrationResult = namedtuple("MigrationResult", ["host_id", "ask_for_language"])
 
 
@@ -49,13 +49,19 @@ def run():
 	during the first one.
 	"""
 	store.init()
+	# Looked at before anything below writes: 4.x left schedules.json in its
+	# volume on every start, so finding one means this is an upgrade even
+	# when there are no settings yet. Such a user has been reading the bot in
+	# Spanish, the 4.x default, and a language picker with no way back is not
+	# what they should meet on their first start of 5.0.
+	upgrading = store.uses_legacy_root() or os.path.isfile(store.schedules_path())
 	seeded = _seed_settings_from_env()
 	host_id = _ensure_local_host()
 	_warn_deprecated_env(seeded)
 	_migrate_mute_file()
 	_migrate_schedules(host_id)
 	_discard_legacy_cache()
-	ask_for_language = seeded and not os.environ.get("LANGUAGE")
+	ask_for_language = seeded and not upgrading and not os.environ.get("LANGUAGE")
 	return MigrationResult(host_id=host_id, ask_for_language=ask_for_language)
 
 

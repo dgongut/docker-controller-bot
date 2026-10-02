@@ -95,6 +95,21 @@ def test_a_new_install_is_asked_for_a_language():
 	shutil.rmtree(root, ignore_errors=True)
 
 
+def test_an_upgrade_from_4_x_is_not_asked_for_a_language():
+	"""
+	4.x spoke Spanish by default and left schedules.json in its volume on every
+	start. Someone upgrading has no settings yet, which made them look new: the
+	first thing 5.0 did was put a picker with no way back in front of them.
+	"""
+	for legacy in (False, True):
+		store_, root = harness.temp_storage(legacy=legacy,
+											seed_files={"schedules.json": '{"schedules": []}'})
+		result = migration.run()
+		assert result.ask_for_language is False, legacy
+		assert store_.get("bot.language") == "ES"
+		shutil.rmtree(root, ignore_errors=True)
+
+
 def test_a_new_install_that_set_a_language_is_not_asked():
 	store_, root = harness.temp_storage(env={"LANGUAGE": "DE"})
 	result = migration.run()
