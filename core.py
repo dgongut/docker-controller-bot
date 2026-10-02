@@ -1148,6 +1148,11 @@ class RestartLoopTracker:
 	WINDOW_SECONDS = 300
 	STABLE_SECONDS = 300
 	GONE_SECONDS = 120
+	# How long after a kill a stop counts as asked for. Docker sends "kill"
+	# when something stops or restarts a container on purpose —`docker stop`,
+	# a restart from the bot, a scheduled one— and never when it falls over by
+	# itself, which is the only kind of stop a restart loop is made of.
+	KILL_SECONDS = 60
 
 	def __init__(self, notify, clock=time.time, schedule=None):
 		# notify(key, name) announces one of the tracker's own messages.
@@ -1157,6 +1162,7 @@ class RestartLoopTracker:
 		self._lock = threading.Lock()
 		self._stops = {}    # name -> recent stop times, oldest first
 		self._looping = {}  # name -> the timer waiting on it
+		self._killed = {}   # name -> when it was last killed on purpose
 
 	@staticmethod
 	def _start_timer(delay, fn):
@@ -1174,13 +1180,23 @@ class RestartLoopTracker:
 		"""
 		with self._lock:
 			now = self._clock()
+			if action == "kill":
+				self._killed[name] = now
+				return True
 			if action == "die":
-				stops = [t for t in self._stops.get(name, []) if t > now - self.WINDOW_SECONDS]
-				stops.append(now)
-				self._stops[name] = stops
 				if name in self._looping:
 					self._wait(name, self.GONE_SECONDS, self._gone)
 					return False
+				killed = self._killed.pop(name, None)
+				if killed is not None and now - killed <= self.KILL_SECONDS:
+					# Stopped or restarted on purpose. Three manual restarts in
+					# five minutes, or a task restarting it every minute, were
+					# reported as a loop and silenced its notices from then on.
+					return True
+				self._forget_quiet(now)
+				stops = [t for t in self._stops.get(name, []) if t > now - self.WINDOW_SECONDS]
+				stops.append(now)
+				self._stops[name] = stops
 				if len(stops) < self.THRESHOLD:
 					return True
 				self._wait(name, self.GONE_SECONDS, self._gone)
@@ -1191,6 +1207,19 @@ class RestartLoopTracker:
 				return True
 		self._notify("restart_loop", name)
 		return False
+
+	def _forget_quiet(self, now):
+		"""
+		Drops what is known about containers that have been quiet for a while.
+
+		Called with the lock held. Otherwise every name that ever stopped, or
+		was ever killed, stayed for the life of the process.
+		"""
+		for name in [n for n, stops in self._stops.items()
+						if not stops or stops[-1] <= now - self.WINDOW_SECONDS]:
+			del self._stops[name]
+		for name in [n for n, when in self._killed.items() if when <= now - self.KILL_SECONDS]:
+			del self._killed[name]
 
 	def _wait(self, name, delay, then):
 		"""Replaces whatever the loop was waiting on. Called with the lock held."""
@@ -1335,6 +1364,12 @@ class DockerEventMonitor:
 			message = get_text("stopped_container", container_name)
 		elif action == "create" and store.get("bot.extended_messages"):
 			message = get_text("created_container", container_name)
+
+		if action == "kill":
+			# Never announced, but it is what tells a stop that was asked for
+			# from one that was not.
+			self.restart_loops.should_announce(action, container_name)
+			return
 
 		if not message:
 			return

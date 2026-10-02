@@ -492,3 +492,52 @@ def test_the_supervisor_brings_back_a_dead_monitor_and_a_deaf_stream():
 		dcb.DockerEventMonitor.demonio_event, host_registry.status_snapshot = original
 		for monitor in supervisor._monitors.values():
 			monitor._stop.set()
+
+
+def test_restarts_that_were_asked_for_are_not_a_loop():
+	"""
+	Every stop counted, so three manual restarts in five minutes —or a task
+	restarting a container every minute— read as a restart loop, and its
+	notices were silenced from then on. Docker sends "kill" first when a stop
+	is asked for, and never when a container falls over by itself.
+	"""
+	tracker, clock, said = _tracker()
+	shown = []
+	for _ in range(10):
+		assert tracker.should_announce("kill", "app") is True
+		shown.append(tracker.should_announce("die", "app"))
+		clock.advance(1)
+		shown.append(tracker.should_announce("start", "app"))
+		clock.advance(30)
+	assert all(shown) and said == [], (shown, said)
+
+	# A kill long ago does not excuse a crash now.
+	tracker.should_announce("kill", "db")
+	clock.advance(dcb.RestartLoopTracker.KILL_SECONDS + 1)
+	shown = _crash(tracker, clock, name="db", times=3)
+	assert said == [("restart_loop", "db")], said
+
+
+def test_the_tracker_forgets_containers_that_went_quiet():
+	tracker, clock, said = _tracker()
+	for name in ("a", "b", "c"):
+		tracker.should_announce("die", name)
+		tracker.should_announce("kill", name + "-k")
+	clock.advance(dcb.RestartLoopTracker.WINDOW_SECONDS + 1)
+	tracker.should_announce("die", "nuevo")
+	assert set(tracker._stops) == {"nuevo"}, tracker._stops
+	assert tracker._killed == {}, tracker._killed
+
+
+def test_the_monitor_hands_kills_to_the_tracker_and_announces_nothing():
+	store.set("hosts", ONE_HOST)
+	monitor = dcb.DockerEventMonitor("h_local")
+	announced = []
+	monitor._announce = announced.append
+	event = {"Type": "container", "Actor": {"Attributes": {"name": "app"}}}
+	for _ in range(5):
+		monitor._handle_event(dict(event, Action="kill"))
+		monitor._handle_event(dict(event, Action="die"))
+		monitor._handle_event(dict(event, Action="start"))
+	assert len(announced) == 10, announced
+	assert not any("bucle" in m.lower() or "loop" in m.lower() for m in announced), announced
