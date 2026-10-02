@@ -55,6 +55,18 @@ def test_the_language_is_normalised():
 	shutil.rmtree(root, ignore_errors=True)
 
 
+def test_an_interval_from_the_compose_that_is_not_a_number_is_ignored():
+	for raw in ("nan", "inf", "0", "-1"):
+		store_, root = harness.temp_storage(env={"CHECK_UPDATE_EVERY_HOURS": raw})
+		migration.run()
+		assert store_.get("bot.check_update_every_hours") == 4.0, raw
+		shutil.rmtree(root, ignore_errors=True)
+	store_, root = harness.temp_storage(env={"CHECK_UPDATE_EVERY_HOURS": "0,5"})
+	migration.run()
+	assert store_.get("bot.check_update_every_hours") == 0.5
+	shutil.rmtree(root, ignore_errors=True)
+
+
 def test_the_environment_never_wins_after_the_first_run():
 	"""
 	Otherwise the user changes a setting from Telegram, restarts, and watches it

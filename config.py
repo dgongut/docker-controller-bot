@@ -1,3 +1,4 @@
+import math
 import os
 
 # DOCKER ENVIRONMENT VARIABLES
@@ -33,6 +34,19 @@ def _as_language(raw):
     code = str(raw).strip().upper()
     return code if code in SUPPORTED_LANGUAGES else "ES"
 
+def as_interval_hours(raw):
+    """
+    Reads an update-check interval in hours, raising ValueError when it is not one.
+
+    float() alone takes "nan" and "inf", and neither fails a "> 0" check:
+    "nan <= 0" is False. Stored, either one left the wait for the next check
+    never ending, and the menu that prints the interval raising on int().
+    """
+    hours = float(str(raw).strip().replace(",", "."))
+    if not math.isfinite(hours) or hours <= 0:
+        raise ValueError(f"not a positive number of hours: {raw!r}")
+    return hours
+
 SUPPORTED_LANGUAGES = ("ES", "EN", "NL", "DE", "RU", "GL", "IT", "CAT")
 
 # Variables that became settings in 5.0.0, mapped to their key in the settings
@@ -48,7 +62,7 @@ SETTINGS_FROM_ENV = {
     "MULTI_SELECTION": ("bot.multi_selection", _as_bool),
     "TELEGRAM_NOTIFICATION_CHANNEL": ("bot.notification_channel", str),
     "CHECK_UPDATES": ("bot.check_updates", _as_bool),
-    "CHECK_UPDATE_EVERY_HOURS": ("bot.check_update_every_hours", float),
+    "CHECK_UPDATE_EVERY_HOURS": ("bot.check_update_every_hours", as_interval_hours),
     "CHECK_UPDATE_STOPPED_CONTAINERS": ("bot.check_update_stopped_containers", _as_bool),
 }
 

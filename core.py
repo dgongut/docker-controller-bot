@@ -1367,6 +1367,16 @@ class EventMonitorSupervisor:
 		return thread
 
 
+def update_interval_hours():
+	"""
+	The interval between update checks, falling back to 4 h when what is stored
+	is not a usable number — a hand edit, or a "nan" typed before 5.0.0_RC7.
+	"""
+	try:
+		return as_interval_hours(store.get("bot.check_update_every_hours"))
+	except (TypeError, ValueError):
+		return 4.0
+
 def wait_for_next_update_check():
 	"""
 	Waits out the configured interval between update checks, in short steps.
@@ -1380,10 +1390,7 @@ def wait_for_next_update_check():
 	while True:
 		if not store.get("bot.check_updates"):
 			return
-		try:
-			interval_hours = float(store.get("bot.check_update_every_hours"))
-		except (TypeError, ValueError):
-			interval_hours = 4.0
+		interval_hours = update_interval_hours()
 		target = max(interval_hours * 3600, UPDATE_CHECK_POLL_SECONDS)
 		if interval_hours != logged_interval:
 			debug(f"Waiting {interval_hours} hours for the next update check...")
@@ -2677,10 +2684,7 @@ def collect_telemetry_metrics():
 	"""
 	configured = host_registry.hosts(include_paused=True)
 	schemes = [str(entry.get("url", "")).split("://", 1)[0].lower() for entry in configured]
-	try:
-		interval = float(store.get("bot.check_update_every_hours"))
-	except (TypeError, ValueError):
-		interval = None
+	interval = update_interval_hours()
 	metrics = {
 		"hosts": len(configured),
 		"hosts_paused": sum(1 for entry in configured if entry.get("paused")),
@@ -2700,8 +2704,7 @@ def collect_telemetry_metrics():
 		"notification_channel": notification_channel() is not None,
 		"legacy_volume": store.uses_legacy_root(),
 	}
-	if interval is not None:
-		metrics["check_update_every_hours"] = interval
+	metrics["check_update_every_hours"] = interval
 
 	try:
 		listed = hosts_with_containers()
@@ -2808,7 +2811,7 @@ def _selected_prefix(is_selected):
 def _format_interval(hours):
 	"""Shows 4.0 as 4 and leaves 0.5 alone, so the menu reads like a number."""
 	try:
-		hours = float(hours)
+		hours = as_interval_hours(hours)
 	except (TypeError, ValueError):
 		return "4"
 	return str(int(hours)) if hours == int(hours) else str(hours)
@@ -2849,7 +2852,7 @@ def build_settings():
 	"""
 	locale_code = language().upper()
 	channel = notification_channel()
-	interval = _format_interval(store.get("bot.check_update_every_hours"))
+	interval = _format_interval(update_interval_hours())
 
 	markup = InlineKeyboardMarkup(row_width=1)
 	markup.add(InlineKeyboardButton(
@@ -2902,7 +2905,7 @@ def build_settings_updates():
 	markup = InlineKeyboardMarkup(row_width=1)
 	markup.add(_toggle_button("check_updates"))
 	markup.add(InlineKeyboardButton(
-		get_text("settings_row_interval", _format_interval(store.get("bot.check_update_every_hours"))),
+		get_text("settings_row_interval", _format_interval(update_interval_hours())),
 		callback_data="settingsAskInterval"))
 	markup.add(_toggle_button("check_update_stopped_containers"))
 	_add_navigation(markup, "settings")
@@ -3195,10 +3198,8 @@ def apply_settings_text_value(field, raw):
 	"""
 	if field == "check_update_every_hours":
 		try:
-			hours = float(raw.replace(",", "."))
+			hours = as_interval_hours(raw)
 		except ValueError:
-			hours = 0
-		if hours <= 0:
 			send_message(message=get_text("settings_invalid_interval"))
 			return None
 		store.set("bot.check_update_every_hours", hours)
@@ -3353,7 +3354,7 @@ def build_starting_message():
 	# the bot does on its own while nobody is looking.
 	if store.get("bot.check_updates"):
 		lines.append(get_text("starting_updates_on",
-								_format_interval(store.get("bot.check_update_every_hours"))))
+								_format_interval(update_interval_hours())))
 	else:
 		lines.append(get_text("starting_updates_off"))
 	lines.append(get_text("channel"))

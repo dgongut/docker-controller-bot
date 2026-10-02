@@ -247,12 +247,30 @@ def test_the_interval_is_validated():
 	original = dcb.send_message
 	dcb.send_message = lambda *args, **kwargs: None
 	try:
-		for bad in ("0", "-3", "hola", ""):
+		for bad in ("0", "-3", "hola", "", "nan", "inf", "-inf", "1e400", "NaN"):
 			assert dcb.apply_settings_text_value("check_update_every_hours", bad) is None, bad
 		assert store.get("bot.check_update_every_hours") == 2.5, "un valor inválido no se guarda"
 	finally:
 		dcb.send_message = original
 	store.set("bot.check_update_every_hours", 4)
+
+
+def test_an_interval_that_is_not_a_number_falls_back_everywhere():
+	"""
+	"nan" passed the old "> 0" check, since nan <= 0 is False. Stored, it made
+	the menus and the start-up message raise on int() —so the bot crashed on
+	every start— and left the wait for the next check never ending.
+	"""
+	try:
+		for stored in (float("nan"), float("inf"), "basura", None, -2):
+			store.set("bot.check_update_every_hours", stored)
+			assert dcb.update_interval_hours() == 4.0, stored
+			assert dcb._format_interval(store.get("bot.check_update_every_hours")) == "4", stored
+			dcb.build_settings()
+			dcb.build_settings_updates()
+			dcb.build_starting_message()
+	finally:
+		store.set("bot.check_update_every_hours", 4)
 
 
 def test_the_channel_is_verified_before_being_saved():
