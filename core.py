@@ -3320,6 +3320,16 @@ def build_starting_message():
 		lines.append(get_text("starting_legacy_volume", store.LEGACY_ROOT, store.CONFIG_ROOT))
 		lines.append("")
 
+	# Said here because the bot has just come up with the user's hosts and
+	# choices missing, and the log is not where anyone looks for why.
+	unreadable = store.settings_unreadable()
+	if unreadable:
+		lines.append(get_text("starting_settings_unreadable", store.settings_path(), html.escape(unreadable)))
+		lines.append("")
+	if schedule_manager.set_aside:
+		lines.append(get_text("starting_schedules_unreadable", schedule_manager.set_aside))
+		lines.append("")
+
 	# The one setting that belongs here: it is the only one that changes what
 	# the bot does on its own while nobody is looking.
 	if store.get("bot.check_updates"):

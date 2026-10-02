@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any
 
 import store
+from logger import error
 
 class ScheduleManager:
     """Manages schedules stored in JSON format with caching and efficient lookups"""
@@ -27,6 +28,9 @@ class ScheduleManager:
         self._cache = None  # Cache for schedules
         self._cache_dirty = False  # Flag to track if cache needs refresh
         self._next_id = 1  # Track next available ID
+        # Where an unreadable schedules.json was set aside, for the start-up
+        # message to say so. None when the file was fine.
+        self.set_aside = None
         self._ensure_file_exists()
         self._load_cache()
 
@@ -47,9 +51,19 @@ class ScheduleManager:
             # Calculate next available ID (max existing ID + 1)
             self._next_id = max([s.get("id", 0) for s in self._cache], default=0) + 1
         except Exception as e:
-            print(f"Error loading cache: {e}")
+            # Starting empty is the only way to keep scheduling working, but the
+            # next write would replace every task the user had with nothing. So
+            # the file is moved aside first, where it can still be fixed.
             self._cache = []
             self._next_id = 1
+            if os.path.exists(self.full_path):
+                aside = f"{self.full_path}.corrupt-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+                try:
+                    os.replace(self.full_path, aside)
+                    self.set_aside = aside
+                    error(f"Cannot read {self.full_path} ({e}): moved to {aside}, starting with no schedules")
+                except OSError as move_error:
+                    error(f"Cannot read {self.full_path} ({e}) nor move it aside: {move_error}")
 
     def _read_schedules(self) -> List[Dict[str, Any]]:
         """Get schedules from cache (optimized)"""

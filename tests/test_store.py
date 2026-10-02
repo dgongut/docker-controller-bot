@@ -83,6 +83,58 @@ def test_a_corrupt_file_falls_back_to_defaults():
 	shutil.rmtree(root, ignore_errors=True)
 
 
+def test_an_unreadable_settings_file_is_never_written_over():
+	"""
+	A trailing comma in a hand edit —the README sends TLS users to this file—
+	made the bot start on defaults and then save them: the hosts, the language
+	and a telemetry the user had turned off, all replaced. The file stays as it
+	was until someone fixes it, and the bot says why.
+	"""
+	root = fresh_root()
+	broken = '{"bot": {"language": "IT",}, "hosts": [{"id": "h_aaaa", "local": true}]}'
+	with open(store.settings_path(), "w", encoding="utf-8") as handle:
+		handle.write(broken)
+
+	store.reload()
+	assert store.get("bot.language") == "ES"
+	assert store.settings_unreadable(), "no dice por qué no ha podido leerlo"
+	store.set("hosts", [{"id": "h_bbbb", "local": True}])
+	store.set("bot.language", "EN")
+	with open(store.settings_path(), encoding="utf-8") as handle:
+		assert handle.read() == broken, "ha escrito encima del fichero del usuario"
+	# Within this run the change still holds, so the bot keeps working.
+	assert store.get("bot.language") == "EN"
+
+	# Once fixed, a restart reads it and writes normally again.
+	with open(store.settings_path(), "w", encoding="utf-8") as handle:
+		handle.write(broken.replace(",}", "}"))
+	store.reload()
+	assert store.settings_unreadable() is None
+	assert store.get("bot.language") == "IT"
+	store.set("bot.language", "DE")
+	store.reload()
+	assert store.get("bot.language") == "DE"
+	shutil.rmtree(root, ignore_errors=True)
+
+
+def test_an_unreadable_schedules_file_is_set_aside_not_emptied():
+	"""Starting empty keeps scheduling usable; the first write must not erase the tasks."""
+	from schedule_manager import ScheduleManager
+	root = fresh_root()
+	path = os.path.join(store.CONFIG_ROOT, "schedules.json")
+	with open(path, "w", encoding="utf-8") as handle:
+		handle.write('{"schedules": [{"id": 1, "name": "copia",}]}')
+
+	manager = ScheduleManager(store.CONFIG_ROOT, "schedules.json")
+	assert manager.get_all_schedules() == []
+	assert manager.set_aside and os.path.exists(manager.set_aside), manager.set_aside
+	with open(manager.set_aside, encoding="utf-8") as handle:
+		assert '"copia"' in handle.read()
+	assert manager.add_schedule(name="nueva", cron="@daily", action="restart", container="nginx")
+	assert [s["name"] for s in ScheduleManager(store.CONFIG_ROOT, "schedules.json").get_all_schedules()] == ["nueva"]
+	shutil.rmtree(root, ignore_errors=True)
+
+
 def test_runtime_state():
 	root = fresh_root()
 	assert store.state_get("mute_until") == 0

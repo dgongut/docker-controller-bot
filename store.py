@@ -69,6 +69,10 @@ _persistent = False
 _settings = None
 _state = None
 _updates = None
+# Why settings.json could not be read, when it could not. While set, the file
+# is never written: it holds the user's hosts and choices, and a typo in a hand
+# edit must not end with all of it replaced by defaults.
+_settings_unreadable = None
 
 # Files whose writes are being coalesced by batch(), and whether each changed.
 #
@@ -205,13 +209,16 @@ def is_persistent():
 # Reading and writing documents
 # ---------------------------------------------------------------------------
 
-def _read_document(path, defaults):
+def _read_document(path, defaults, on_unreadable=None):
 	"""
 	Loads a JSON document, filling in anything missing from `defaults`.
 
 	Unknown keys are kept so a downgrade does not discard what a newer version
 	wrote, and a missing or unreadable file falls back to the defaults rather
 	than aborting: a corrupt cache must never stop the bot from starting.
+
+	`on_unreadable` is called with the reason when the file exists but cannot
+	be used, so a caller whose file is not regenerable can stop writing to it.
 	"""
 	document = json.loads(json.dumps(defaults))
 	try:
@@ -221,10 +228,14 @@ def _read_document(path, defaults):
 		return document
 	except Exception as e:
 		warning(f"Cannot read {path}, falling back to defaults: {e}")
+		if on_unreadable:
+			on_unreadable(str(e))
 		return document
 
 	if not isinstance(stored, dict):
 		warning(f"{path} does not contain an object, falling back to defaults")
+		if on_unreadable:
+			on_unreadable("not a JSON object")
 		return document
 	return _merge(document, stored)
 
@@ -273,6 +284,9 @@ def _flush(name):
 		_batch_dirty.add(name)
 		return
 	if name == "settings":
+		if _settings_unreadable is not None:
+			debug(f"Not writing {SETTINGS_FILE}: it could not be read, and writing would replace it")
+			return
 		write_document(os.path.join(root(), SETTINGS_FILE), _settings)
 	elif name == "state":
 		write_document(os.path.join(state_dir(), STATE_FILE), _state)
@@ -313,8 +327,24 @@ def _settings_document():
 	global _settings
 
 	if _settings is None:
-		_settings = _read_document(os.path.join(root(), SETTINGS_FILE), DEFAULTS)
+		_settings = _read_document(os.path.join(root(), SETTINGS_FILE), DEFAULTS,
+									on_unreadable=_mark_settings_unreadable)
 	return _settings
+
+
+def _mark_settings_unreadable(reason):
+	global _settings_unreadable
+
+	_settings_unreadable = reason
+	error(f"{settings_path()} cannot be read ({reason}). Running on defaults and "
+			f"leaving the file untouched: fix it and restart the container.")
+
+
+def settings_unreadable():
+	"""Why settings.json could not be read, or None when it was fine."""
+	with _lock:
+		_settings_document()
+		return _settings_unreadable
 
 
 def _walk(document, dotted_key, create=False):
@@ -509,9 +539,10 @@ def clear_update_cache():
 
 def reload():
 	"""Drops every in-memory document, forcing the next read to hit disk."""
-	global _settings, _state, _updates
+	global _settings, _settings_unreadable, _state, _updates
 
 	with _lock:
 		_settings = None
+		_settings_unreadable = None
 		_state = None
 		_updates = None

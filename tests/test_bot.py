@@ -1483,6 +1483,29 @@ def test_the_starting_message_says_nothing_about_hosts_with_one_host():
 		_restore_hosts()
 
 
+def test_the_starting_message_says_when_a_file_could_not_be_read():
+	"""The bot comes up with the user's hosts missing; the log is not where anyone looks."""
+	_with_hosts([HOST_FIXTURE[0]], unreachable=())
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": []
+	original_reason = store._settings_unreadable
+	original_aside = dcb.schedule_manager.set_aside
+	try:
+		store._settings_unreadable = "Expecting property name: line 1 column 27 <x>"
+		dcb.schedule_manager.set_aside = "/app/config/schedules.json.corrupt-20261002-093000"
+		message = dcb.build_starting_message()
+		assert "line 1 column 27 &lt;x&gt;" in message, message
+		assert dcb.schedule_manager.set_aside in message, message
+	finally:
+		store._settings_unreadable = original_reason
+		dcb.schedule_manager.set_aside = original_aside
+		dcb.DockerManager.list_containers = original
+		_restore_hosts()
+
+	message = dcb.build_starting_message()
+	assert "⚠️" not in message, message
+
+
 def test_a_dead_host_does_not_hold_the_starting_message():
 	"""
 	Reachability comes from the parallel snapshot with a deadline, not from

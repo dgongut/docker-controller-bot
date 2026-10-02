@@ -6,6 +6,8 @@
   "starting_host_down": "🔴 <b>$1</b> no responde",
   "starting_legacy_volume": "📁 Estás usando <code>$1</code>, la ruta antigua. Cambia esa línea de tu docker-compose por <code>$2</code> —misma parte izquierda— y recrea el contenedor. No se mueve ningún fichero.",
   "starting_no_docker": "🔴 No he podido hablar con Docker",
+  "starting_settings_unreadable": "⚠️ No he podido leer <code>$1</code>: $2. Funciono con los valores por defecto y no lo voy a sobrescribir. Corrígelo y reinicia el contenedor.",
+  "starting_schedules_unreadable": "⚠️ No he podido leer las programaciones. He apartado el fichero como <code>$1</code> y empiezo sin ninguna.",
   "starting_updates_on": "⏱️ Comprobando actualizaciones cada $1 h",
   "starting_updates_off": "⏸️ Comprobación de actualizaciones desactivada",
   "already_updated": "✅ El contenedor <b>$1</b> está actualizado",
