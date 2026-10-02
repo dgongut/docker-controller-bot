@@ -2090,6 +2090,34 @@ def test_a_typed_command_counts_only_names_the_bot_knows():
 		(_, dcb.count_usage, dcb.resolve_container_argument, dcb.delete_message, dcb._bot_identity) = original
 
 
+def test_someone_who_is_not_an_administrator_learns_nothing_from_a_name():
+	"""
+	The container was looked up before checking who was asking, so anyone in
+	the group typing a name two hosts share got the picker —hosts and all—
+	posted for them.
+	"""
+	sent, searched = [], []
+	original = (dcb.resolve_container_argument, dcb.send_container_disambiguation,
+				dcb.send_message, dcb.is_admin, dcb._bot_identity, dcb.is_allowed_origin)
+	dcb.resolve_container_argument = lambda argument: searched.append(argument) or (None, "plex", [1, 2])
+	dcb.send_container_disambiguation = lambda *a, **k: sent.append("picker")
+	dcb.send_message = lambda **kw: sent.append(kw.get("message"))
+	dcb.is_admin = lambda user_id: False
+	dcb.is_allowed_origin = lambda chat, user_id: True
+	dcb._bot_identity = MagicMock(username="ControllerBot", id=999)
+	try:
+		message = MagicMock()
+		message.text = "/stop plex"
+		message.chat.type = "private"
+		message.chat.is_forum = False
+		message.message_thread_id = None
+		dcb.command_controller(message)
+		assert searched == [] and "picker" not in sent, (searched, sent)
+	finally:
+		(dcb.resolve_container_argument, dcb.send_container_disambiguation, dcb.send_message,
+			dcb.is_admin, dcb._bot_identity, dcb.is_allowed_origin) = original
+
+
 def test_every_command_survives_the_host_being_down():
 	"""Same promise as the buttons: a machine that is gone degrades, not crashes."""
 	import docker

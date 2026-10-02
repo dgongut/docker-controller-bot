@@ -541,3 +541,59 @@ def test_the_monitor_hands_kills_to_the_tracker_and_announces_nothing():
 		monitor._handle_event(dict(event, Action="start"))
 	assert len(announced) == 10, announced
 	assert not any("bucle" in m.lower() or "loop" in m.lower() for m in announced), announced
+
+
+def test_live_events_slightly_out_of_order_are_all_reported():
+	"""
+	Every event was compared with the newest one seen, so one that arrived a
+	little late —a compose project starting services in parallel— was taken
+	for a replay and dropped. Only what a reconnection replays can repeat.
+	"""
+	store.set("hosts", ONE_HOST)
+	monitor = dcb.DockerEventMonitor("h_local")
+	announced = []
+	monitor._announce = announced.append
+	base = {"Type": "container", "Action": "start"}
+	for name, stamp in (("web", 1_000_000_002), ("db", 1_000_000_001), ("cache", 1_000_000_002)):
+		monitor._handle_event(dict(base, timeNano=stamp, Actor={"Attributes": {"name": name}}))
+	assert len(announced) == 3, announced
+	assert monitor._last_event_ns == 1_000_000_002
+
+
+def test_an_ssh_stream_is_closed_through_its_transport():
+	"""
+	docker-py cannot cancel a stream over ssh: close() fails looking for a
+	socket. The stream stayed open, with its ssh process, until the host sent
+	another event.
+	"""
+	from types import SimpleNamespace
+	from unittest.mock import MagicMock
+
+	channel = MagicMock()
+	reader = SimpleNamespace(channel=channel, raw=object())
+	stream = MagicMock()
+	stream.close.side_effect = UnboundLocalError("sock")
+	stream._response = SimpleNamespace(raw=SimpleNamespace(_fp=SimpleNamespace(fp=reader)))
+	store.set("hosts", ONE_HOST)
+	monitor = dcb.DockerEventMonitor("h_local")
+	monitor._stream = stream
+	monitor.reset_stream()
+	assert channel.close.called
+
+
+def test_a_tcp_event_stream_asks_for_keepalive():
+	"""A host that reboots between two supervisor passes left a dead stream that looked quiet."""
+	import socket
+	from types import SimpleNamespace
+	from unittest.mock import MagicMock
+
+	sock = MagicMock(family=socket.AF_INET)
+	stream = SimpleNamespace(_response=SimpleNamespace(raw=SimpleNamespace(
+		_fp=SimpleNamespace(fp=SimpleNamespace(raw=SimpleNamespace(_sock=sock))))))
+	dcb._keep_alive(stream)
+	options = [call.args[:2] for call in sock.setsockopt.call_args_list]
+	assert (socket.SOL_SOCKET, socket.SO_KEEPALIVE) in options, options
+	unix = MagicMock(family=socket.AF_UNIX)
+	stream._response.raw._fp.fp.raw._sock = unix
+	dcb._keep_alive(stream)
+	assert not unix.setsockopt.called

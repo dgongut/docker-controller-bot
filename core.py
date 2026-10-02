@@ -1254,6 +1254,42 @@ class RestartLoopTracker:
 		self._notify("stopped_container", name)
 
 
+def _stream_reader(stream):
+	"""The file object a docker-py stream reads from, or None."""
+	try:
+		return stream._response.raw._fp.fp
+	except AttributeError:
+		return None
+
+
+def _keep_alive(stream):
+	"""
+	Turns on TCP keepalive for an event stream's socket, when it has one.
+
+	An event stream only ever receives. A host that reboots in less time than
+	the supervisor takes to look again answers its next ping as if nothing had
+	happened, while the old connection is dead on its side with nothing ever
+	going to arrive on it. With keepalive the kernel asks, gets a reset, and
+	the read fails: the loop reconnects within a minute or so.
+
+	Best effort: a unix socket ignores it, ssh has its own (the image sets
+	ServerAliveInterval), and the per-probe timings only exist on Linux.
+	"""
+	import socket as _socket
+	reader = _stream_reader(stream)
+	raw = getattr(reader, "raw", None)
+	sock = getattr(raw, "_sock", None) or getattr(raw, "sock", None)
+	if sock is None or getattr(sock, "family", None) not in (_socket.AF_INET, _socket.AF_INET6):
+		return
+	try:
+		sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_KEEPALIVE, 1)
+		for option, value in (("TCP_KEEPIDLE", 30), ("TCP_KEEPINTVL", 10), ("TCP_KEEPCNT", 3)):
+			if hasattr(_socket, option):
+				sock.setsockopt(_socket.IPPROTO_TCP, getattr(_socket, option), value)
+	except OSError as e:
+		debug(f"Could not turn on keepalive for an event stream: {e}")
+
+
 class DockerEventMonitor:
 	"""
 	Watches one host's event stream and reports containers starting and
@@ -1281,6 +1317,9 @@ class DockerEventMonitor:
 		# The newest event seen, in nanoseconds, so a reconnection can ask
 		# for what came after it and skip what it had already reported.
 		self._last_event_ns = None
+		# The newest event the previous connection reported: what a replay
+		# up to it would repeat.
+		self._replay_until = None
 		self.thread = None
 		self.restart_loops = RestartLoopTracker(
 			lambda key, name: self._announce(get_text(key, name)))
@@ -1321,7 +1360,18 @@ class DockerEventMonitor:
 			try:
 				stream.close()
 			except Exception as e:
-				debug(f"Event monitor ({self.alias}): closing the stream: {e}")
+				# docker-py cannot cancel a stream over ssh: close() fails
+				# looking for a socket the ssh transport does not have. The
+				# transport leaves itself on the pipe it reads from, and
+				# closing it ends the ssh process, which ends the read.
+				channel = getattr(_stream_reader(stream), "channel", None)
+				if channel is None:
+					debug(f"Event monitor ({self.alias}): closing the stream: {e}")
+					return
+				try:
+					channel.close()
+				except Exception as ssh_error:
+					debug(f"Event monitor ({self.alias}): closing the ssh stream: {ssh_error}")
 
 	def detectar_eventos_contenedores(self):
 		client = host_registry.client(self.host_id)
@@ -1329,6 +1379,13 @@ class DockerEventMonitor:
 		if self._last_event_ns is not None:
 			since = max(self._last_event_ns // 1_000_000_000, int(time.time()) - self.MAX_REPLAY_SECONDS)
 		stream = client.events(decode=True, since=since) if since else client.events(decode=True)
+		# Only what is replayed can be a repeat: what the last connection had
+		# already reported. Comparing every live event against the newest one
+		# seen dropped real ones, since Docker does not deliver events strictly
+		# in time order —a compose project starting its services in parallel
+		# is enough— nor does a clock that NTP sets back.
+		self._replay_until = self._last_event_ns
+		_keep_alive(stream)
 		with self._stream_lock:
 			if self._stop.is_set():
 				stream.close()
@@ -1348,10 +1405,10 @@ class DockerEventMonitor:
 		"""Reports one event from the stream, when it is one worth reporting."""
 		stamp = event.get("timeNano") or (event.get("time") or 0) * 1_000_000_000
 		if stamp:
-			if self._last_event_ns is not None and stamp <= self._last_event_ns:
+			if self._replay_until is not None and stamp <= self._replay_until:
 				# Replayed after a reconnection, and already reported.
 				return
-			self._last_event_ns = stamp
+			self._last_event_ns = max(self._last_event_ns or 0, stamp)
 
 		# Only process container events
 		event_type = event.get('Type', '')
@@ -3715,22 +3772,6 @@ def command_controller(message):
 		return
 
 	messageId = message.id
-	container_id = None
-	container_name = None
-	# Only the commands that act on a container look one up: the argument is
-	# searched for on every host, which is wasted on /list or /prune.
-	if comando in COMMAND_PICKERS:
-		argument = " ".join(message.text.split()[1:])
-		if argument:
-			# Searched across every host. Names rarely repeat between machines,
-			# and when they do the user is asked rather than guessed at.
-			container_id, container_name, candidates = resolve_container_argument(argument)
-			if candidates:
-				send_container_disambiguation(COMMAND_PICKERS[comando], container_name, candidates)
-				return
-			if container_id:
-				debug(f"Argument {argument!r} resolved to {container_id}")
-
 	message_thread_id = message.message_thread_id
 	if not message_thread_id:
 		message_thread_id = 1
@@ -3745,6 +3786,24 @@ def command_controller(message):
 		warning(f"User {userId} ({message.from_user.username}) tried to use admin command without permission")
 		send_message(chat_id=userId, message=get_text("user_not_admin"))
 		return
+
+	container_id = None
+	container_name = None
+	# Only the commands that act on a container look one up: the argument is
+	# searched for on every host, which is wasted on /list or /prune. And only
+	# once the sender is known to be an administrator: before, anyone in the
+	# group typing a name two hosts share got the picker, hosts and all.
+	if comando in COMMAND_PICKERS:
+		argument = " ".join(message.text.split()[1:])
+		if argument:
+			# Searched across every host. Names rarely repeat between machines,
+			# and when they do the user is asked rather than guessed at.
+			container_id, container_name, candidates = resolve_container_argument(argument)
+			if candidates:
+				send_container_disambiguation(COMMAND_PICKERS[comando], container_name, candidates)
+				return
+			if container_id:
+				debug(f"Argument {argument!r} resolved to {container_id}")
 
 	# /start is the menu itself. Everything else goes through the table, so a
 	# typed command and its button in that menu run the same function.
