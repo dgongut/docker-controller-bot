@@ -945,11 +945,21 @@ def own_container():
 			return _own_container or None
 
 		local = host_registry.local_host_id()
+		unanswered = False
 		for candidate in own_container_ids():
 			try:
 				me = manager(local).client.containers.get(candidate)
-			except Exception:
+			except docker.errors.NotFound:
 				debug(f"Candidate {candidate[:12]} is not a container on this daemon")
+				continue
+			except Exception as e:
+				# Not an answer about the candidate: the daemon could not be
+				# asked. Remembering this as "not a container" would leave the
+				# bot unable to recognise itself for the life of the process —
+				# and free to update itself the ordinary way, deleting itself
+				# halfway through.
+				debug(f"Could not ask the local daemon about {candidate[:12]}: {e}")
+				unanswered = True
 				continue
 			identifier = getattr(me, "id", None)
 			name = getattr(me, "name", None)
@@ -968,8 +978,11 @@ def own_container():
 			debug(f"Identified myself as {name} ({identifier[:12]}) on the local host")
 			return _own_container
 
-		# Nothing resolved. Remember the failure so the /proc read and the
-		# daemon calls are not repeated on every button press.
+		if unanswered:
+			# Asked again next time, when the daemon may be back.
+			return None
+		# Nothing resolved, and the daemon said so. Remember the failure so the
+		# /proc read and the daemon calls are not repeated on every press.
 		_own_container = ()
 		return None
 

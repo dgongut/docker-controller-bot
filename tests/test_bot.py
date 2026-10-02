@@ -1710,6 +1710,42 @@ def test_without_an_id_it_falls_back_to_the_name_on_the_local_host_only():
 		_restore_hosts()
 
 
+def test_a_daemon_that_cannot_be_asked_is_not_remembered_as_an_answer():
+	"""
+	Any failure asking about the candidate was taken as "not a container" and
+	cached for the life of the process. A daemon restarting at the wrong
+	moment left the bot unable to recognise itself until it was recreated.
+	"""
+	import docker
+	_with_hosts([HOST_FIXTURE[0]], unreachable=())
+	me = _container("docker-controller-bot", "running")
+	me.id = "1" * 64
+	undo = _pretend_to_be(me)
+	answers = [Exception("Connection aborted"), me]
+
+	def get(_id):
+		answer = answers.pop(0)
+		if isinstance(answer, Exception):
+			raise answer
+		return answer
+
+	try:
+		dcb.manager("h_local").client.containers.get = get
+		assert dcb.own_container() is None
+		assert dcb.own_container() == ("h_local", me.id, me.name)
+
+		# A daemon that says "no such container" is an answer, and is kept.
+		dcb.forget_own_container()
+		calls = []
+		dcb.manager("h_local").client.containers.get = lambda _id: calls.append(1) or (_ for _ in ()).throw(
+			docker.errors.NotFound("no such container"))
+		assert dcb.own_container() is None
+		assert dcb.own_container() is None
+		assert len(calls) == 1, calls
+	finally:
+		undo(); _restore_hosts()
+
+
 def test_the_identity_is_resolved_once():
 	"""
 	A process cannot move to another container halfway through its life, and
