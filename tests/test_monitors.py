@@ -392,3 +392,103 @@ def test_the_monitor_sends_the_loop_messages_with_its_host():
 		dcb.host_registry.client = original_client
 		store.set("hosts", ONE_HOST)
 		dcb.host_registry.reset()
+
+
+def test_stopping_closes_the_stream_it_is_blocked_on():
+	"""
+	Closing the client only empties its pool of idle connections, and the one
+	the stream reads from is never idle: stop() left the thread, and over ssh
+	its process, alive until the next event arrived.
+	"""
+	import threading
+	from unittest.mock import MagicMock
+
+	store.set("hosts", ONE_HOST)
+	host_registry.reset()
+	closed = threading.Event()
+
+	class Stream:
+		def __iter__(self):
+			closed.wait(10)
+			return iter(())
+		def close(self):
+			closed.set()
+
+	client = MagicMock()
+	client.events.return_value = Stream()
+	original = host_registry.client
+	host_registry.client = lambda host_id: client
+	try:
+		monitor = dcb.DockerEventMonitor("h_local")
+		thread = threading.Thread(target=monitor.detectar_eventos_contenedores, daemon=True)
+		thread.start()
+		for _ in range(100):
+			if monitor.listening:
+				break
+			threading.Event().wait(0.02)
+		assert monitor.listening
+		monitor.stop()
+		thread.join(5)
+		assert closed.is_set() and not thread.is_alive()
+	finally:
+		host_registry.client = original
+
+
+def test_a_reconnection_asks_for_what_it_missed_and_skips_what_it_saw():
+	"""Events during a dropped connection were lost; replaying them must not repeat any."""
+	from unittest.mock import MagicMock
+	import time
+
+	store.set("hosts", ONE_HOST)
+	monitor = dcb.DockerEventMonitor("h_local")
+	announced = []
+	monitor._announce = announced.append
+	now = int(time.time())
+	seen = {"Type": "container", "Action": "start", "timeNano": now * 10**9,
+			"Actor": {"Attributes": {"name": "plex"}}}
+	monitor._handle_event(seen)
+	client = MagicMock()
+	later = dict(seen, Action="die", timeNano=(now + 5) * 10**9)
+	client.events.return_value = iter([seen, later])
+	original = host_registry.client
+	host_registry.client = lambda host_id: client
+	try:
+		monitor.detectar_eventos_contenedores()
+		assert client.events.call_args.kwargs.get("since") == now, client.events.call_args
+		assert len(announced) == 2, announced   # el start una vez, y el die
+	finally:
+		host_registry.client = original
+
+
+def test_the_supervisor_brings_back_a_dead_monitor_and_a_deaf_stream():
+	from unittest.mock import MagicMock
+
+	store.set("hosts", TWO_HOSTS)
+	started = []
+	original = (dcb.DockerEventMonitor.demonio_event, host_registry.status_snapshot)
+
+	def demonio(self):
+		started.append(self.host_id)
+		self.thread = MagicMock()
+		self.thread.is_alive.return_value = True
+
+	dcb.DockerEventMonitor.demonio_event = demonio
+	host_registry.status_snapshot = lambda entries=None, **kw: {
+		e["id"]: (e["id"] != "h_nas", "" if e["id"] != "h_nas" else "timed out") for e in entries}
+	try:
+		supervisor = dcb.EventMonitorSupervisor()
+		supervisor.reconcile()
+		assert sorted(started) == ["h_local", "h_nas"], started
+
+		supervisor._monitors["h_local"].thread.is_alive.return_value = False
+		resets = []
+		nas = supervisor._monitors["h_nas"]
+		nas._stream = MagicMock()
+		nas._stream.close.side_effect = lambda: resets.append("h_nas")
+		supervisor.reconcile()
+		assert started.count("h_local") == 2, started
+		assert resets == ["h_nas"], resets
+	finally:
+		dcb.DockerEventMonitor.demonio_event, host_registry.status_snapshot = original
+		for monitor in supervisor._monitors.values():
+			monitor._stop.set()

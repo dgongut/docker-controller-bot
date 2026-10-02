@@ -902,8 +902,9 @@ def disconnect_host(host_id):
 	Always both, and always only this host. The pair used to be written out at
 	every call site with the manager half clearing the whole fleet, so one
 	machine failing made every other one reconnect — and reconnecting to an ssh
-	host is neither instant nor free. Closing the client also unblocks anything
-	still waiting on its socket, which is what brings a hung listing back.
+	host is neither instant nor free. Closing the client empties its pool, so
+	nothing reuses a connection that went bad; a request already waiting on one
+	is bounded by its own timeout, and over ssh by ssh's keepalive.
 	"""
 	host_registry.drop(host_id)
 	forget_manager(host_id)
@@ -1231,9 +1232,20 @@ class DockerEventMonitor:
 	# mean its events stay silent until the bot is restarted.
 	MAX_BACKOFF_SECONDS = 300
 
+	# How far back a reconnection asks the daemon to replay what it missed.
+	# Enough for a dropped connection; a host that was gone for longer comes
+	# back with a burst of stale "started" and "stopped" nobody wants.
+	MAX_REPLAY_SECONDS = 600
+
 	def __init__(self, host_id):
 		self.host_id = host_id
 		self._stop = threading.Event()
+		self._stream = None
+		self._stream_lock = threading.Lock()
+		# The newest event seen, in nanoseconds, so a reconnection can ask
+		# for what came after it and skip what it had already reported.
+		self._last_event_ns = None
+		self.thread = None
 		self.restart_loops = RestartLoopTracker(
 			lambda key, name: self._announce(get_text(key, name)))
 
@@ -1241,51 +1253,101 @@ class DockerEventMonitor:
 	def alias(self):
 		return host_registry.alias(self.host_id)
 
+	@property
+	def listening(self):
+		"""Whether a stream is open right now."""
+		with self._stream_lock:
+			return self._stream is not None
+
 	def stop(self):
 		"""
-		Asks the monitor to finish.
-
-		The blocking events() call cannot be interrupted, so the client is
-		dropped as well: the stream then fails and the loop sees the flag.
+		Asks the monitor to finish, closing the stream it is blocked on, and
+		the host's client with it: a host that is paused or removed has no use
+		for a connection left open, and over ssh that is a process.
 		"""
 		self._stop.set()
+		self.reset_stream()
 		host_registry.drop(self.host_id)
+
+	def reset_stream(self):
+		"""
+		Closes the open stream, so the loop reconnects.
+
+		Closing the stream itself and not the client: closing a client only
+		empties its pool of idle connections, and the one the stream reads
+		from is never idle. A host that rebooted or lost power without closing
+		the connection left the monitor reading a socket nothing would ever
+		write to again, silent until the bot was restarted.
+		"""
+		with self._stream_lock:
+			stream, self._stream = self._stream, None
+		if stream is not None:
+			try:
+				stream.close()
+			except Exception as e:
+				debug(f"Event monitor ({self.alias}): closing the stream: {e}")
 
 	def detectar_eventos_contenedores(self):
 		client = host_registry.client(self.host_id)
-		for event in client.events(decode=True):
+		since = None
+		if self._last_event_ns is not None:
+			since = max(self._last_event_ns // 1_000_000_000, int(time.time()) - self.MAX_REPLAY_SECONDS)
+		stream = client.events(decode=True, since=since) if since else client.events(decode=True)
+		with self._stream_lock:
 			if self._stop.is_set():
+				stream.close()
 				return
+			self._stream = stream
+		try:
+			for event in stream:
+				if self._stop.is_set():
+					return
+				self._handle_event(event)
+		finally:
+			with self._stream_lock:
+				if self._stream is stream:
+					self._stream = None
 
-			# Only process container events
-			event_type = event.get('Type', '')
-			if event_type != 'container':
-				continue
+	def _handle_event(self, event):
+		"""Reports one event from the stream, when it is one worth reporting."""
+		stamp = event.get("timeNano") or (event.get("time") or 0) * 1_000_000_000
+		if stamp:
+			if self._last_event_ns is not None and stamp <= self._last_event_ns:
+				# Replayed after a reconnection, and already reported.
+				return
+			self._last_event_ns = stamp
 
-			# Support both 'Action' (Docker Desktop/newer) and 'status' (Docker Engine/older) formats
-			action = event.get('Action', '') or event.get('status', '')
-			actor = event.get('Actor', {})
-			attributes = actor.get('Attributes', {})
-			container_name = attributes.get('name', '')
+		# Only process container events
+		event_type = event.get('Type', '')
+		if event_type != 'container':
+			return
 
-			message = None
-			if action == "start":
-				message = get_text("started_container", container_name)
-			elif action == "die":
-				message = get_text("stopped_container", container_name)
-			elif action == "create" and store.get("bot.extended_messages"):
-				message = get_text("created_container", container_name)
+		# Support both 'Action' (Docker Desktop/newer) and 'status' (Docker Engine/older) formats
+		action = event.get('Action', '') or event.get('status', '')
+		actor = event.get('Actor', {})
+		attributes = actor.get('Attributes', {})
+		container_name = attributes.get('name', '')
 
-			if message and container_events_held(self.host_id, container_name):
-				debug(f"Message [{message}] omitted because an update batch will summarise it")
-				continue
+		message = None
+		if action == "start":
+			message = get_text("started_container", container_name)
+		elif action == "die":
+			message = get_text("stopped_container", container_name)
+		elif action == "create" and store.get("bot.extended_messages"):
+			message = get_text("created_container", container_name)
 
-			if message and action in ("start", "die") and not self.restart_loops.should_announce(action, container_name):
-				debug(f"Message [{message}] omitted because {container_name} is in a restart loop")
-				continue
+		if not message:
+			return
 
-			if message and not self._announce(message):
-				time.sleep(20) # Possible Telegram saturation causing send_message to raise an exception
+		if container_events_held(self.host_id, container_name):
+			debug(f"Message [{message}] omitted because an update batch will summarise it")
+			return
+
+		if action in ("start", "die") and not self.restart_loops.should_announce(action, container_name):
+			debug(f"Message [{message}] omitted because {container_name} is in a restart loop")
+			return
+
+		self._announce(message)
 
 	def _announce(self, message):
 		"""
@@ -1342,10 +1404,10 @@ class DockerEventMonitor:
 
 	def demonio_event(self):
 		"""Start event daemon in a background thread."""
-		thread = threading.Thread(target=self._event_loop_with_retry, daemon=True)
-		thread.start()
+		self.thread = threading.Thread(target=self._event_loop_with_retry, daemon=True)
+		self.thread.start()
 		debug(f"Event monitor daemon started for {self.alias}")
-		return thread
+		return self.thread
 
 
 class EventMonitorSupervisor:
@@ -1365,7 +1427,10 @@ class EventMonitorSupervisor:
 		self._lock = threading.Lock()
 
 	def reconcile(self):
-		"""Starts monitors for new hosts and stops them for removed ones."""
+		"""
+		Starts monitors for new hosts, stops them for removed ones, and brings
+		back any that died or went deaf.
+		"""
 		configured = {entry["id"] for entry in host_registry.hosts()}
 		with self._lock:
 			for host_id in configured - set(self._monitors):
@@ -1375,6 +1440,36 @@ class EventMonitorSupervisor:
 			for host_id in set(self._monitors) - configured:
 				debug(f"Host {host_id} is gone: stopping its event monitor")
 				self._monitors.pop(host_id).stop()
+			for host_id, monitor in list(self._monitors.items()):
+				if monitor.thread is not None and not monitor.thread.is_alive():
+					# Its loop never gives up, so a dead thread means something
+					# escaped it; a new monitor carries on where it left off.
+					warning(f"Event monitor ({monitor.alias}) had stopped: starting it again")
+					replacement = DockerEventMonitor(host_id)
+					replacement._last_event_ns = monitor._last_event_ns
+					self._monitors[host_id] = replacement
+					replacement.demonio_event()
+			listening = [m for m in self._monitors.values() if m.listening]
+		self._check_streams(listening)
+
+	def _check_streams(self, monitors):
+		"""
+		Reconnects every stream whose host no longer answers.
+
+		A stream over tcp that the other end dropped without closing —a reboot,
+		a power cut— looks exactly like a quiet one: nothing arrives either
+		way. Asking the daemon tells them apart. ssh needs this less, its own
+		keepalive ends the connection, but asking costs the same.
+		"""
+		if not monitors:
+			return
+		entries = [host_registry.host(m.host_id) for m in monitors]
+		statuses = host_registry.status_snapshot(entries=[e for e in entries if e])
+		for monitor in monitors:
+			ok, reason = statuses.get(monitor.host_id, (True, ""))
+			if not ok:
+				debug(f"Event monitor ({monitor.alias}): host not answering ({reason}), reconnecting")
+				monitor.reset_stream()
 
 	def _supervise(self):
 		while True:
