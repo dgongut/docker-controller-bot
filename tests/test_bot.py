@@ -789,6 +789,44 @@ def test_the_update_daemon_checks_the_fleet_and_then_waits():
 		store.set("bot.check_updates", was_checking)
 
 
+def test_a_pass_that_fails_does_not_end_the_update_checks():
+	"""
+	Only each host was guarded. Anything else that raised —listing the hosts,
+	the message, saving its state on a full disk— killed the thread, and the
+	bot never checked for updates again until it was restarted.
+	"""
+
+	class Waited(Exception):
+		pass
+
+	passes = []
+	waits = []
+	original = (dcb.DockerUpdateMonitor._check_fleet, dcb.wait_for_next_update_check)
+	was_checking = store.get("bot.check_updates")
+
+	def failing_pass(self, cold_cache):
+		passes.append(cold_cache)
+		raise OSError("No space left on device")
+
+	def wait():
+		waits.append(1)
+		if len(waits) >= 2:
+			raise Waited()
+
+	dcb.DockerUpdateMonitor._check_fleet = failing_pass
+	dcb.wait_for_next_update_check = wait
+	store.set("bot.check_updates", True)
+	try:
+		try:
+			dcb.DockerUpdateMonitor().detectar_actualizaciones()
+		except Waited:
+			pass
+		assert len(passes) == 2, f"dejó de comprobar tras {len(passes)} pasada(s)"
+	finally:
+		dcb.DockerUpdateMonitor._check_fleet, dcb.wait_for_next_update_check = original
+		store.set("bot.check_updates", was_checking)
+
+
 def test_one_pass_reports_the_whole_fleet_in_one_message():
 	"""
 	One message for the fleet rather than one per host: with four machines

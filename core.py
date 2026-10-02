@@ -1403,9 +1403,6 @@ def wait_for_next_update_check():
 
 
 class DockerUpdateMonitor:
-	def __init__(self):
-		self.client = docker.from_env()
-
 	def detectar_actualizaciones(self):
 		while True:
 			if not store.get("bot.check_updates"):
@@ -1418,11 +1415,18 @@ class DockerUpdateMonitor:
 			# anything found is pre-existing rather than new. Filling it quietly
 			# avoids announcing every pending update at once, which is what used
 			# to happen after every container recreation.
-			cold_cache = not store.has_update_cache()
-			if cold_cache:
-				debug("Update cache is empty: this pass will fill it without notifying")
-
-			self._check_fleet(cold_cache)
+			# One bad pass must not end the checks for the life of the process:
+			# anything that raises outside the per-host guard —listing the
+			# hosts, sending the message, saving its state on a full disk—
+			# used to kill this thread with nothing said, and updates were
+			# never checked again until a restart.
+			try:
+				cold_cache = not store.has_update_cache()
+				if cold_cache:
+					debug("Update cache is empty: this pass will fill it without notifying")
+				self._check_fleet(cold_cache)
+			except Exception as e:
+				error(f"Update check pass failed, retrying at the next interval: [{e}]")
 			wait_for_next_update_check()
 
 	def _check_fleet(self, cold_cache):
