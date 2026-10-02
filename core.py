@@ -3460,11 +3460,42 @@ def register_command(name, action):
 	COMMAND_ACTIONS[name] = action
 
 
+def bot_identity():
+	"""
+	The bot's own Telegram user, asked once.
+
+	Every command compared against it, several times each, and every
+	get_me() is a round trip to Telegram that cannot change the answer.
+	"""
+	global _bot_identity
+	if _bot_identity is None:
+		_bot_identity = bot.get_me()
+	return _bot_identity
+
+_bot_identity = None
+
+def parse_command(text):
+	"""
+	Splits a command message into (command, addressee).
+
+	By any whitespace, as telebot does when it matches the handler: split on
+	spaces alone, "/logs" followed by a newline and a name came out as one
+	word, which matched no command and was counted with the name inside.
+	"""
+	first = text.split(maxsplit=1)[0] if text and text.strip() else ""
+	command, _, addressee = first.partition("@")
+	return command, addressee
+
 @bot.message_handler(commands=["start", "list", "run", "stop", "restart", "delete", "exec", "checkupdate", "updateall", "changetag", "logs", "logfile", "compose", "mute", "schedule", "settings", "info", "version", "donate", "donors", "prune", "ports"])
 @with_reply_context
 def command_controller(message):
 	userId = message.from_user.id
-	comando = message.text.split(' ', 1)[0]
+	comando, addressee = parse_command(message.text)
+	# Telebot matches "/stop@AnotherBot" too, since it drops the suffix. In a
+	# group with several bots that one is for someone else, and 4.x ignored it.
+	if addressee and addressee.lower() != (bot_identity().username or "").lower():
+		debug(f"Command {comando}@{addressee} ignored: it is for another bot")
+		return
 	if not is_allowed_origin(message.chat, userId):
 		debug(f"Command {comando} ignored: chat {message.chat.id} is neither an administrator private chat nor TELEGRAM_GROUP")
 		return
@@ -3472,23 +3503,17 @@ def command_controller(message):
 	messageId = message.id
 	container_id = None
 	container_name = None
-	if not comando in ('/mute', f'/mute@{bot.get_me().username}'
-					,'/schedule', f'/schedule@{bot.get_me().username}'
-					,'/settings', f'/settings@{bot.get_me().username}'):
+	# Only the commands that act on a container look one up: the argument is
+	# searched for on every host, which is wasted on /list or /prune.
+	if comando in COMMAND_PICKERS:
 		argument = " ".join(message.text.split()[1:])
 		if argument:
 			# Searched across every host. Names rarely repeat between machines,
 			# and when they do the user is asked rather than guessed at.
 			container_id, container_name, candidates = resolve_container_argument(argument)
 			if candidates:
-				action_type = COMMAND_PICKERS.get(comando.split("@", 1)[0])
-				if action_type:
-					send_container_disambiguation(action_type, container_name, candidates)
-					return
-				# No picker for this command: fall back to the first match
-				# rather than refusing, which is what it did before hosts.
-				entry, container = candidates[0]
-				container_id = container_ref(entry["id"], container)
+				send_container_disambiguation(COMMAND_PICKERS[comando], container_name, candidates)
+				return
 			if container_id:
 				debug(f"Argument {argument!r} resolved to {container_id}")
 
@@ -3499,7 +3524,7 @@ def command_controller(message):
 
 	# The topic filter only applies to groups: a private chat with the bot has no
 	# topics, so commands sent there must always be accepted
-	if message.chat.type != "private" and message_thread_id != TELEGRAM_THREAD and (not message.reply_to_message or message.reply_to_message.from_user.id != bot.get_me().id):
+	if message.chat.type != "private" and message_thread_id != TELEGRAM_THREAD and (not message.reply_to_message or message.reply_to_message.from_user.id != bot_identity().id):
 		return
 
 	if not is_admin(userId):
@@ -3507,23 +3532,21 @@ def command_controller(message):
 		send_message(chat_id=userId, message=get_text("user_not_admin"))
 		return
 
-	# One of the commands the handler is registered for, so never free text.
-	count_usage(f"cmd_{comando.split('@', 1)[0].lstrip('/')}")
-
-	if comando not in ('/start', f'/start@{bot.get_me().username}'):
-		delete_message(messageId)
-
-	# List containers
 	# /start is the menu itself. Everything else goes through the table, so a
 	# typed command and its button in that menu run the same function.
-	if comando in ('/start', f'/start@{bot.get_me().username}'):
+	if comando == "/start":
+		count_usage("cmd_start")
 		send_start_menu()
 		return
 
-	action = COMMAND_ACTIONS.get(comando.split('@', 1)[0])
+	action = COMMAND_ACTIONS.get(comando)
 	if action is None:
 		debug(f"No action registered for {comando}")
 		return
+	# Counted by the table entry and never by what was typed: only a name the
+	# table knows can reach the statistics.
+	count_usage(f"cmd_{comando.lstrip('/')}")
+	delete_message(messageId)
 
 	argument = None
 	parts = message.text.split(maxsplit=1)
@@ -3532,6 +3555,7 @@ def command_controller(message):
 
 	action(user_id=userId, chat_id=message.chat.id, container_id=container_id,
 			container_name=container_name, argument=argument)
+
 def answer_callback_quietly(callback_id, text=None, show_alert=False):
 	"""
 	Stops Telegram's spinner on a button, tolerating a failure to do so.
@@ -3680,7 +3704,7 @@ def handle_text(message):
 
 	# The topic filter only applies to groups: a private chat with the bot has no
 	# topics, so messages sent there must always be accepted
-	if message.chat.type != "private" and message_thread_id != TELEGRAM_THREAD and (not message.reply_to_message or message.reply_to_message.from_user.id != bot.get_me().id):
+	if message.chat.type != "private" and message_thread_id != TELEGRAM_THREAD and (not message.reply_to_message or message.reply_to_message.from_user.id != bot_identity().id):
 		return
 
 	if not is_admin(userId):

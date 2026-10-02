@@ -1822,6 +1822,62 @@ def test_every_command_runs_in_its_three_shapes():
 	assert not problems, "comandos que revientan:\n" + "\n".join(problems)
 
 
+def _type_command(text, ran, counted, searched):
+	"""Delivers a typed command to command_controller, as the administrator."""
+	admin = int(str(dcb.TELEGRAM_ADMIN).split(",")[0])
+	message = MagicMock()
+	message.text = text
+	message.from_user.id = admin
+	message.chat.id = admin
+	message.chat.type = "private"
+	message.chat.is_forum = False
+	message.message_thread_id = None
+	dcb.command_controller(message)
+
+
+def test_a_typed_command_counts_only_names_the_bot_knows():
+	"""
+	The command was cut at the first space only, while telebot matches by any
+	whitespace: "/logs", a newline and a container name reached the statistics
+	as "cmd_logs\nnginx", name included, and matched no command so it did
+	nothing either.
+	"""
+	ran, counted, searched = [], [], []
+	original = (dict(dcb.COMMAND_ACTIONS), dcb.count_usage, dcb.resolve_container_argument,
+				dcb.delete_message, dcb._bot_identity)
+	for name in list(dcb.COMMAND_ACTIONS):
+		dcb.COMMAND_ACTIONS[name] = (lambda n: lambda **kw: ran.append((n, kw.get("container_id"), kw.get("argument"))))(name)
+	dcb.count_usage = counted.append
+	dcb.resolve_container_argument = lambda argument: searched.append(argument) or ("h_local:abc12", "nginx", [])
+	dcb.delete_message = lambda *a, **k: None
+	dcb._bot_identity = MagicMock(username="ControllerBot", id=999)
+	try:
+		for text in ("/logs\nnginx", "/logs\tnginx", "/logs\u00a0nginx", "/logs nginx"):
+			ran.clear(); counted.clear()
+			_type_command(text, ran, counted, searched)
+			assert counted == ["cmd_logs"], (text, counted)
+			assert ran and ran[0][:2] == ("/logs", "h_local:abc12"), (text, ran)
+
+		# Addressed to this bot, in any case: runs.
+		ran.clear(); counted.clear()
+		_type_command("/list@controllerbot", ran, counted, searched)
+		assert [r[0] for r in ran] == ["/list"] and counted == ["cmd_list"], (ran, counted)
+
+		# Addressed to another bot in the same group: not ours.
+		ran.clear(); counted.clear()
+		_type_command("/stop@OtroBot nginx", ran, counted, searched)
+		assert ran == [] and counted == [], (ran, counted)
+
+		# A command that takes no container does not search every host for one.
+		searched.clear()
+		for text in ("/list nginx", "/prune algo", "/updateall x", "/mute 10"):
+			_type_command(text, ran, counted, searched)
+		assert searched == [], searched
+	finally:
+		dcb.COMMAND_ACTIONS.clear(); dcb.COMMAND_ACTIONS.update(original[0])
+		(_, dcb.count_usage, dcb.resolve_container_argument, dcb.delete_message, dcb._bot_identity) = original
+
+
 def test_every_command_survives_the_host_being_down():
 	"""Same promise as the buttons: a machine that is gone degrades, not crashes."""
 	import docker
