@@ -910,12 +910,19 @@ def disconnect_host(host_id):
 	forget_manager(host_id)
 
 
-# The local host's manager. Most of the bot still goes through this one, and
-# with a single host configured it is the only one there is.
-docker_manager = DockerManager()
+def local_manager():
+	"""
+	The local host's manager, asked for each time.
+
+	A manager built once at import kept the client it started with. Once that
+	client was dropped —the local daemon restarting is enough— it went on
+	using a closed one, and finding the bot's updater or the architecture
+	failed until the bot was recreated.
+	"""
+	return manager(host_registry.local_host_id())
 
 # Instantiate the PortManager
-port_manager = PortManager(docker_manager)
+port_manager = PortManager(local_manager)
 
 _own_container = None
 _own_container_lock = threading.Lock()
@@ -4384,7 +4391,7 @@ def perform_container_update(container_id, container_name, tag=None, send_fn=Non
 	Single entry point for container updates. Wraps the full flow:
 	  1. Capture Compose project/service info BEFORE the update (container is recreated).
 	  2. Send the "updating" progress message via send_fn.
-	  3. Delegate the actual update to docker_manager.update().
+	  3. Delegate the actual update to the container's own manager.
 	  4. Send the final result message via send_fn.
 	  5. If the container belongs to a Compose project, restart only the services
 	     that depend on it (directly or transitively).
@@ -7066,7 +7073,7 @@ def get_container_id_by_name(container_name, debugging=False):
 	"""
 	if debugging:
 		debug(f"Finding container {container_name}")
-	containers = docker_manager.list_containers()
+	containers = local_manager().list_containers()
 	for container in containers:
 		if container.name == container_name:
 			if debugging:
@@ -7828,12 +7835,12 @@ def edit_message_reply_markup_sync(chat_id, message_id, reply_markup):
 def delete_updater():
 	container_id = get_container_id_by_name(UPDATER_CONTAINER_NAME)
 	if container_id:
-		container = docker_manager.client.containers.get(container_id)
+		container = local_manager().client.containers.get(container_id)
 		try:
 			updater_image = container.image.id
 			stop_container(container)
 			container.remove()
-			docker_manager.client.images.remove(updater_image)
+			local_manager().client.images.remove(updater_image)
 			send_message(message=f'{get_text("updated_container", own_container_name())}'
 								f'{host_suffix(host_registry.local_host_id())}')
 		except Exception as e:
@@ -8013,7 +8020,7 @@ def is_valid_cron(cron_expression):
 
 def get_my_architecture():
 	try:
-		info = docker_manager.client.info()
+		info = local_manager().client.info()
 		architecture_docker = info['Architecture']
 		return docker_architectures.get(architecture_docker, architecture_docker)
 	except Exception as e:

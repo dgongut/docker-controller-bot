@@ -14,14 +14,16 @@ from typing import Tuple, List, Dict, Set, Optional
 class PortManager:
     """Manages port operations for Docker containers"""
     
-    def __init__(self, docker_manager):
+    def __init__(self, default_manager):
         """
         Initialize PortManager
-        
+
         Args:
-            docker_manager: Instance of DockerManager to interact with containers
+            default_manager: Returns the DockerManager to use when a call names
+                none. A function and not a manager, so it is the live one each
+                time rather than whichever existed when the bot started.
         """
-        self.docker_manager = docker_manager
+        self.default_manager = default_manager
     
     def _is_port_available(self, port: int) -> bool:
         """
@@ -115,7 +117,7 @@ class PortManager:
         host while the user is looking at a remote one is simply a wrong
         answer. Defaults to the host the bot runs on.
         """
-        containers = (manager or self.docker_manager).list_containers()
+        containers = (manager or self.default_manager()).list_containers()
 
         for container in containers:
             try:
@@ -170,7 +172,7 @@ class PortManager:
         """
         # Get all ports used by containers, on the host being asked about:
         # a port free here says nothing about any other machine.
-        containers = (manager or self.docker_manager).list_containers()
+        containers = (manager or self.default_manager()).list_containers()
         used_ports = set()
 
         for container in containers:

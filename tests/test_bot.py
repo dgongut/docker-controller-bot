@@ -498,14 +498,26 @@ def test_every_menu_label_exists():
 
 
 def test_the_menu_survives_docker_being_unreachable():
-	original = dcb.docker_manager.list_containers
-	dcb.docker_manager.list_containers = lambda *a, **kw: (_ for _ in ()).throw(Exception("down"))
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda *a, **kw: (_ for _ in ()).throw(Exception("down"))
 	try:
 		assert dcb._start_summary() is None
 		text, _ = dcb.build_start_menu()
 		assert "Docker Controller Bot" in text
 	finally:
-		dcb.docker_manager.list_containers = original
+		dcb.DockerManager.list_containers = original
+
+
+def test_the_local_manager_follows_a_reconnection():
+	"""A manager kept from start-up went on using a client that had been closed."""
+	_with_hosts([HOST_FIXTURE[0]], unreachable=())
+	try:
+		before = dcb.local_manager().client
+		dcb.disconnect_host("h_local")
+		assert dcb.local_manager().client is not before
+		assert dcb.port_manager.default_manager().client is dcb.local_manager().client
+	finally:
+		_restore_hosts()
 
 
 def test_every_submenu_has_a_way_back():
