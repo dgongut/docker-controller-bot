@@ -4904,6 +4904,37 @@ class _telemetry_state:
 		dcb.telemetry_client.forget()
 
 
+def test_a_ping_answered_with_something_other_than_an_object_counts_as_sent():
+	"""
+	A 200 with a list or a proxy's page raised on answer.get() after the POST
+	had gone through, so the counters stayed pending and went out again.
+	"""
+	import tempfile
+	import telemetry
+	import urllib.request
+
+	class Answer:
+		def __init__(self, body):
+			self.body = body
+		def __enter__(self):
+			return self
+		def __exit__(self, *exc):
+			return False
+		def read(self):
+			return self.body
+
+	original = urllib.request.urlopen
+	try:
+		for body in (b"[]", b'"ok"', b"42"):
+			client = telemetry.Telemetry("p", "1", os.path.join(tempfile.mkdtemp(), "t.json"))
+			client.count("cmd_list")
+			urllib.request.urlopen = lambda request, timeout=None, _b=body: Answer(_b)
+			assert client._send(1000) is True, body
+			assert client.preview()["usage"] == {}, (body, client.preview())
+	finally:
+		urllib.request.urlopen = original
+
+
 def test_telemetry_needs_a_volume_and_the_setting():
 	assert SEEDED["telemetry"] is True, "activadas por defecto"
 	with _telemetry_state(persistent=True, on=True):

@@ -220,6 +220,12 @@ class Telemetry:
 		try:
 			with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
 				answer = json.loads(response.read() or b"{}")
+			# Anything but an object is a server answering something else —a
+			# proxy page, a bare list—. The ping got there all the same, so it
+			# is taken as delivered: failing on answer.get() after the POST left
+			# the counters pending, and they went out again on the next ping.
+			if not isinstance(answer, dict):
+				answer = {}
 		except urllib.error.HTTPError as e:
 			self._log(f"Telemetry rejected: HTTP {e.code}")
 			return False
