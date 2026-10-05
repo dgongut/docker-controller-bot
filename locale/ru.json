@@ -316,6 +316,8 @@
   "update_more_info_registry": "Дополнительная информация на $1",
   "update_date_unknown": "Неизвестно",
   "update_no_size_change": "Без изменений",
+  "update_information": "Информация",
+  "update_same_image": "⚠️ Оба тега указывают на один и тот же образ (тот же digest).",
   "update_version": "Версия",
   "update_major_warning": "⚠️ <b>Смена основной версии</b>: возможны несовместимые изменения. Посмотрите, что нового, перед обновлением",
   "update_release_notes": "Что нового в $1",

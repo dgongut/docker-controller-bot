@@ -32,6 +32,13 @@ necesitan un demonio en `/var/run/docker.sock`, levantan un registro en
 minutos. Solo tocan lo que crean: todo se llama `dcbtest-…` y lleva la etiqueta
 `dcbtest=1`, y la limpieza exige las dos cosas.
 
+**Al subir la versión de `docker` en `requirements.txt`, pásalos antes de
+publicar.** `docker_update.py` usa dos piezas internas de docker-py
+(`_create_container_args` y `api._post_json`) para lo que su API pública no
+deja pasar: el `stop_grace_period`, los puertos solo expuestos, las GPU, las
+anotaciones y la prioridad de pasarela. Una versión nueva puede cambiarlas sin
+avisar, y solo estos tests lo verían.
+
 ## Cómo funcionan
 
 El bot es un único módulo que hace todo su arranque al importarse. `harness.py`

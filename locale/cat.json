@@ -316,6 +316,8 @@
   "update_more_info_registry": "Més informació a $1",
   "update_date_unknown": "Desconeguda",
   "update_no_size_change": "Sense canvis",
+  "update_information": "Informació",
+  "update_same_image": "⚠️ Tots dos tags apunten a la mateixa imatge (mateix digest).",
   "update_version": "Versió",
   "update_major_warning": "⚠️ <b>Canvi de versió major</b>: pot portar canvis incompatibles. Revisa les novetats abans d'actualitzar",
   "update_release_notes": "Novetats de la versió $1",

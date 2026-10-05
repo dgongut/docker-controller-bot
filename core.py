@@ -18,11 +18,16 @@ import store
 import telemetry
 from config import *
 from croniter import croniter
+from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Any, Optional
 from telebot.types import InlineKeyboardButton
 from telebot.types import InlineKeyboardMarkup
 from compose_generator import ComposeGenerator
-from docker_update import container_platform, extract_container_config, image_repository, image_version, is_major_upgrade, perform_update, stop_container
+from formatting import (
+	EVENT_LOG_LINES, by_host, comparison_version_line, comparison_version_notes, container_line, describe_exit_code, format_versions, log_excerpt, release_notes_url, version_lines,
+)
+from docker_update import container_platform, extract_container_config, image_repository, image_version, perform_update, stop_container
 from docker_compose_manager import (
     ComposeDetector,
     ComposeProjectManager
@@ -54,7 +59,6 @@ def sizeof_fmt(num, suffix="B"):
 			return f"{num:3.1f}{unit}{suffix}"
 		num /= 1024.0
 	return f"{num:.1f}Yi{suffix}"
-
 
 
 # Initial variable validation
@@ -1290,48 +1294,6 @@ class RestartLoopTracker:
 
 	def _gone(self, name):
 		self._notify("stopped_container", name)
-
-
-# The last lines of a container that failed, shown under the notice: enough
-# to read the error, short enough not to bury the chat.
-EVENT_LOG_LINES = 10
-EVENT_LOG_MAX_CHARS = 1500
-
-_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
-
-
-def log_excerpt(text):
-	"""
-	A block of log lines for a message: colours stripped, long lines cut, the
-	whole kept to the end that matters — the error is last — and escaped.
-	None when nothing is left.
-	"""
-	lines = [_ANSI_ESCAPE.sub("", line).rstrip() for line in str(text or "").splitlines()]
-	lines = [line if len(line) <= 300 else line[:300] + "…" for line in lines if line.strip()]
-	if not lines:
-		return None
-	excerpt = "\n".join(lines[-EVENT_LOG_LINES:])
-	if len(excerpt) > EVENT_LOG_MAX_CHARS:
-		excerpt = "…" + excerpt[-EVENT_LOG_MAX_CHARS:]
-	return f"<pre>{html.escape(excerpt)}</pre>"
-
-
-def describe_exit_code(code):
-	"""
-	An exit code, with the signal it means when it means one: 137 is SIGKILL,
-	139 a segmentation fault — the number alone tells most people nothing.
-	"""
-	import signal as _signal
-	try:
-		number = int(code)
-	except (TypeError, ValueError):
-		return html.escape(str(code))
-	if 128 < number < 160:
-		try:
-			return f"{number} ({_signal.Signals(number - 128).name})"
-		except ValueError:
-			pass
-	return str(number)
 
 
 def _stream_reader(stream):
@@ -4733,7 +4695,8 @@ def perform_container_update(container_id, container_name, tag=None, send_fn=Non
 			outcome in one summary instead.
 
 	Returns:
-		(ok, result): whether the update succeeded, and the message saying so.
+		UpdateOutcome: whether it worked, what it said, and the versions it
+		went from and to. Unpacks as (ok, result).
 	"""
 	if send_fn is None:
 		send_fn = lambda msg: send_message(message=msg)
@@ -4782,34 +4745,64 @@ def perform_container_update(container_id, container_name, tag=None, send_fn=Non
 		warning(f"Not updating {container_name}: the bot shares its namespace")
 		result = get_text("error_update_bot_shares_namespace", container_name)
 		send_fn(f"{host_label(host_id)}{result}")
-		return False, result
+		return UpdateOutcome(False, result)
 
+	plan = _UpdatePlan(owner=owner, host_id=host_id, reference=container_id, name=container_name, tag=tag,
+						project=project_name, service=updated_service_name, old_id=old_parent_id,
+						running_before=running_before, old_version=old_version)
 	if not hold_events:
-		return _perform_container_update(owner, host_id, container_id, container_name, tag, send_fn,
-										project_name, updated_service_name, old_parent_id, False, running_before,
-										old_version)
+		return _perform_container_update(plan, send_fn, False)
 	# The old container is renamed before the new one exists, and a rollback
 	# can start it again under that name, so both are held.
 	names = [container_name, f"{container_name}_old"]
 	hold_container_events(host_id, names)
 	try:
-		return _perform_container_update(owner, host_id, container_id, container_name, tag, send_fn,
-										project_name, updated_service_name, old_parent_id, True, running_before,
-										old_version)
+		return _perform_container_update(plan, send_fn, True)
 	finally:
 		release_container_events(host_id, names)
 
 
-# What the last update of each container went from and to, for the batch
-# summary to list: perform_container_update answers (ok, result) to callers
-# that only want that, and the summary is the one that wants more.
-_last_update_versions = {}
+@dataclass
+class UpdateOutcome:
+	"""
+	What an update did: whether it worked, the message saying so, and the
+	versions it went from and to, None when the image does not say.
+
+	Unpacks as (ok, result), the pair perform_container_update always
+	returned, so callers that want only that keep reading it that way. A
+	batch summary wants the versions too, and reads them off here.
+	"""
+	ok: bool
+	result: str
+	old_version: Optional[str] = None
+	new_version: Optional[str] = None
+
+	def __iter__(self):
+		return iter((self.ok, self.result))
 
 
-def _perform_container_update(owner, host_id, container_id, container_name, tag, send_fn,
-							project_name, updated_service_name, old_parent_id, hold_events, running_before=None,
-							old_version=None):
-	"""The body of perform_container_update, once the Compose info is captured."""
+@dataclass
+class _UpdatePlan:
+	"""
+	What is known about a container before its update touches it: where it
+	lives, its Compose project and service, its id — the update replaces
+	it —, what was running on its host, and the version it runs.
+	"""
+	owner: Any
+	host_id: str
+	reference: str
+	name: str
+	tag: Optional[str]
+	project: Optional[str]
+	service: Optional[str]
+	old_id: Optional[str]
+	running_before: Optional[set]
+	old_version: Optional[str]
+
+
+def _perform_container_update(plan, send_fn, hold_events):
+	"""The body of perform_container_update, once the plan is drawn up."""
+	owner, host_id, container_name = plan.owner, plan.host_id, plan.name
 	# Send the initial "updating" progress message
 	# Both the progress line and the result say which machine, the same as the
 	# start/stop notifications do. Without it an update report on a multi-host
@@ -4818,7 +4811,7 @@ def _perform_container_update(owner, host_id, container_id, container_name, tag,
 	x = send_fn(f'{label}{get_text("updating", container_name)}')
 
 	# Perform the actual update
-	result = owner.update(container_id=ref_id(container_id), container_name=container_name, message=x, bot=bot, tag=tag)
+	result = owner.update(container_id=ref_id(plan.reference), container_name=container_name, message=x, bot=bot, tag=plan.tag)
 
 	# Remove the progress message and send the final result. The chat is taken
 	# from the sent message itself: send_fn may target the notification channel
@@ -4841,32 +4834,31 @@ def _perform_container_update(owner, host_id, container_id, container_name, tag,
 	except Exception as e:
 		debug(f"Could not fetch new container after update for {container_name}: {e}")
 
+	outcome = UpdateOutcome(ok, result)
 	if ok:
-		new_version = running_version(host_id, new_parent_container) if new_parent_container is not None else None
-		if hold_events:
-			# Only a batch reads it back, and pops what it reads.
-			_last_update_versions[(host_id, container_name)] = (old_version, new_version)
-		versions = format_versions(old_version, new_version)
+		outcome.old_version = plan.old_version
+		outcome.new_version = running_version(host_id, new_parent_container) if new_parent_container is not None else None
+		versions = format_versions(outcome.old_version, outcome.new_version)
 		shown = get_text("updated_container_versions", container_name, versions) if versions else result
 		send_fn(f"{shown}{host_suffix(host_id)}")
 	else:
 		send_fn(f"{label}{result}")
 
 	# Restart dependents if applicable.
-	if project_name and updated_service_name:
+	if plan.project and plan.service:
 		restart_dependents_after_update(
-			project_name,
-			updated_service_name,
+			plan.project,
+			plan.service,
 			new_parent_container=new_parent_container,
-			old_parent_id=old_parent_id,
+			old_parent_id=plan.old_id,
 			send_fn=send_fn,
 			host_id=host_id,
 			hold_events=hold_events,
-			running_before=running_before,
+			running_before=plan.running_before,
 		)
 	if ok:
-		_recreate_namespace_sharers(owner, old_parent_id, new_parent_container, send_fn, hold_events, running_before)
-	return ok, result
+		_recreate_namespace_sharers(owner, plan.old_id, new_parent_container, send_fn, hold_events, plan.running_before)
+	return outcome
 
 
 def _recreate_namespace_sharers(owner, old_parent_id, new_parent_container, send_fn, hold_events, running_before=None):
@@ -5001,12 +4993,14 @@ def _update_containers_quietly(targets, tag=None, send=None):
 		else:
 			progress = send(text)
 		try:
-			ok, _ = perform_container_update(ref, name, tag=tag, send_fn=lambda msg: None, hold_events=True)
+			outcome = perform_container_update(ref, name, tag=tag, send_fn=lambda msg: None, hold_events=True)
 		except Exception as e:
 			error(f"Could not update container {name}. Error: [{e}]")
-			ok = False
-		versions = _last_update_versions.pop((host_id, name), (None, None)) if ok else (None, None)
-		(updated if ok else failed).append((host_id, name, versions))
+			outcome = UpdateOutcome(False, "")
+		if outcome.ok:
+			updated.append((host_id, name, (outcome.old_version, outcome.new_version)))
+		else:
+			failed.append((host_id, name, (None, None)))
 
 	# Deleted and sent anew rather than edited into the summary: an edit makes
 	# no sound, and the summary is the one message of the batch worth hearing.
@@ -5288,6 +5282,56 @@ def execute_command(containerId, containerName, command, sendMessage=True):
 				part = result[i:i + max_length]
 				send_message(message=f"<pre><code>{html.escape(part)}</code></pre>")
 
+def comparison_message(containerId, containerName, comparison):
+	"""
+	The comparison shown before an update or a tag change is confirmed: the
+	image running and the one it would become, what changes between them,
+	and where to read more.
+
+	One builder for both: they used to be two copies of the same text, and a
+	change had to be made twice — the versions were. When both are the same
+	image, which only a tag change can find, it says that instead.
+	"""
+	message = f"{host_label(ref_host(containerId))}📦 <b>{containerName}</b>\n\n"
+	if comparison['current_digest'] == comparison['new_digest']:
+		message += (f"ℹ️ <b>{get_text('update_information')}:</b>\n"
+					f"   {get_text('update_tag')}: <code>{comparison['current_tag']}</code> → <code>{comparison['new_tag']}</code>"
+					f"{comparison_version_line(comparison['current_version'])}\n"
+					f"   {get_text('update_created')}: {comparison['current_date']}\n"
+					f"   {get_text('update_size')}: {comparison['current_size']}\n"
+					f"   {get_text('update_digest')}: <code>{comparison['current_digest']}</code>\n\n"
+					f"{get_text('update_same_image')}")
+	else:
+		changes = [f"{get_text('update_size_change')}: {comparison['size_diff']}"]
+		if comparison['days_diff'] > 0:
+			changes.append(f"{comparison['days_diff']} {get_text('update_days_newer')}")
+		elif comparison['days_diff'] < 0:
+			changes.append(f"{abs(comparison['days_diff'])} {get_text('update_days_older')}")
+		# Bullets only when there is more than one change.
+		changes_text = ("\n   • " + "\n   • ".join(changes)) if len(changes) > 1 else f"\n   {changes[0]}"
+		for side, emoji, title in (("current", "📌", "update_current_image"), ("new", "🆕", "update_new_image")):
+			message += (f"{emoji} <b>{get_text(title)}:</b>\n"
+						f"   {get_text('update_tag')}: <code>{comparison[side + '_tag']}</code>"
+						f"{comparison_version_line(comparison[side + '_version'])}\n"
+						f"   {get_text('update_created')}: {comparison[side + '_date']}\n"
+						f"   {get_text('update_size')}: {comparison[side + '_size']}\n"
+						f"   {get_text('update_digest')}: <code>{comparison[side + '_digest']}</code>\n\n")
+		message += f"📊 <b>{get_text('update_changes')}:</b>{changes_text}"
+
+	message += comparison_version_notes(comparison)
+
+	if comparison['description']:
+		message += f"\n\n📝 <b>{get_text('update_description')}:</b>\n{comparison['description']}"
+
+	if comparison['registry_url']:
+		if comparison['registry_name']:
+			link_text = get_text('update_more_info_registry', comparison['registry_name'])
+		else:
+			link_text = get_text('update_more_info')
+		message += f"\n\n🔗 <a href=\"{comparison['registry_url']}\">{link_text}</a>"
+	return message
+
+
 def confirm_change_tag(containerId, containerName, tag):
 	debug(f"Running command: confirm_change_tag for container {containerName} to tag {tag}")
 
@@ -5308,62 +5352,7 @@ def confirm_change_tag(containerId, containerName, tag):
 					reply_markup=markup)
 		return
 
-	# Check if images are identical
-	if comparison['current_digest'] == comparison['new_digest']:
-		# Same image, just show info
-		message = f"""{host_label(ref_host(containerId))}📦 <b>{containerName}</b>
-
-ℹ️ <b>Información:</b>
-   {get_text('update_tag')}: <code>{comparison['current_tag']}</code> → <code>{comparison['new_tag']}</code>{comparison_version_line(comparison['current_version'])}
-   {get_text('update_created')}: {comparison['current_date']}
-   {get_text('update_size')}: {comparison['current_size']}
-   {get_text('update_digest')}: <code>{comparison['current_digest']}</code>
-
-⚠️ Ambos tags apuntan a la misma imagen (mismo digest)."""
-	else:
-		# Different images, show full comparison
-		# Build changes list
-		changes = []
-		changes.append(f"{get_text('update_size_change')}: {comparison['size_diff']}")
-		if comparison['days_diff'] > 0:
-			changes.append(f"{comparison['days_diff']} {get_text('update_days_newer')}")
-		elif comparison['days_diff'] < 0:
-			changes.append(f"{abs(comparison['days_diff'])} {get_text('update_days_older')}")
-
-		# Format changes (use bullet points only if multiple items)
-		if len(changes) > 1:
-			changes_text = "\n   • " + "\n   • ".join(changes)
-		else:
-			changes_text = "\n   " + changes[0]
-
-		message = f"""{host_label(ref_host(containerId))}📦 <b>{containerName}</b>
-
-📌 <b>{get_text('update_current_image')}:</b>
-   {get_text('update_tag')}: <code>{comparison['current_tag']}</code>{comparison_version_line(comparison['current_version'])}
-   {get_text('update_created')}: {comparison['current_date']}
-   {get_text('update_size')}: {comparison['current_size']}
-   {get_text('update_digest')}: <code>{comparison['current_digest']}</code>
-
-🆕 <b>{get_text('update_new_image')}:</b>
-   {get_text('update_tag')}: <code>{comparison['new_tag']}</code>{comparison_version_line(comparison['new_version'])}
-   {get_text('update_created')}: {comparison['new_date']}
-   {get_text('update_size')}: {comparison['new_size']}
-   {get_text('update_digest')}: <code>{comparison['new_digest']}</code>
-
-📊 <b>{get_text('update_changes')}:</b>{changes_text}"""
-
-	message += comparison_version_notes(comparison)
-
-	if comparison['description']:
-		message += f"\n\n📝 <b>{get_text('update_description')}:</b>\n{comparison['description']}"
-
-	if comparison['registry_url']:
-		# Use dynamic text based on registry
-		if comparison['registry_name']:
-			link_text = f"{get_text('update_more_info_registry', comparison['registry_name'])}"
-		else:
-			link_text = get_text('update_more_info')
-		message += f"\n\n🔗 <a href=\"{comparison['registry_url']}\">{link_text}</a>"
+	message = comparison_message(containerId, containerName, comparison)
 
 	# Create keyboard with tag parameter in button text
 	markup = InlineKeyboardMarkup(row_width=1)
@@ -5519,60 +5508,6 @@ def get_image_comparison(containerId, containerName, new_tag=None):
 	except Exception as e:
 		error(f"Error getting update comparison for {containerName}: {e}")
 		return None
-
-def comparison_version_line(version):
-	"""The version line under a tag in the comparison, or nothing."""
-	if not version:
-		return ""
-	return f"\n   {get_text('update_version')}: <code>{html.escape(version)}</code>"
-
-
-def comparison_version_notes(comparison):
-	"""
-	What the comparison says about the versions, under its changes: the step
-	itself, a warning when the major version goes up — where the breaking
-	changes are — and where to read what is new.
-	"""
-	old, new = comparison.get('current_version'), comparison.get('new_version')
-	notes = ""
-	if old and new and old != new:
-		notes += f"\n   {get_text('update_version')}: {format_versions(old, new)}"
-		if is_major_upgrade(old, new):
-			notes += f"\n\n{get_text('update_major_warning')}"
-	if comparison.get('release_notes_url'):
-		notes += (f"\n\n📋 <a href=\"{html.escape(comparison['release_notes_url'], quote=True)}\">"
-				f"{get_text('update_release_notes', html.escape(new or ''))}</a>")
-	return notes
-
-
-def release_notes_url(source, version):
-	"""
-	The page of a release on GitHub, from the repository an image names as its
-	source; or its list of releases when the version has no page of its own;
-	or None when the source is not on GitHub.
-
-	Checked, because the tag is not always the version as the image writes
-	it: `3.2.4` may be released as `v3.2.4`, and a link that 404s is worse
-	than the list.
-	"""
-	match = re.match(r"https?://github\.com/([^/\s]+)/([^/\s#?]+)", str(source or ""))
-	if not match:
-		return None
-	owner, repository = match.group(1), match.group(2)
-	if repository.endswith(".git"):
-		repository = repository[:-len(".git")]
-	base = f"https://github.com/{owner}/{repository}"
-	if version:
-		candidates = [version] + ([version[1:]] if version.startswith("v") else [f"v{version}"])
-		for tag in candidates:
-			url = f"{base}/releases/tag/{tag}"
-			try:
-				if requests.head(url, timeout=5, allow_redirects=True).status_code == 200:
-					return url
-			except Exception as e:
-				debug(f"Could not check {url}: {e}")
-				break
-	return f"{base}/releases"
 
 
 def sanitize_dockerhub_description(text):
@@ -5754,49 +5689,7 @@ def confirm_update(containerId, containerName):
 		send_message(message=f'{get_text("already_updated", containerName)}{host_suffix(ref_host(containerId))}')
 		return
 
-	# Build changes list
-	changes = []
-	changes.append(f"{get_text('update_size_change')}: {comparison['size_diff']}")
-	if comparison['days_diff'] > 0:
-		changes.append(f"{comparison['days_diff']} {get_text('update_days_newer')}")
-	elif comparison['days_diff'] < 0:
-		changes.append(f"{abs(comparison['days_diff'])} {get_text('update_days_older')}")
-
-	# Format changes (use bullet points only if multiple items)
-	if len(changes) > 1:
-		changes_text = "\n   • " + "\n   • ".join(changes)
-	else:
-		changes_text = "\n   " + changes[0]
-
-	# Build detailed message
-	message = f"""{host_label(ref_host(containerId))}📦 <b>{containerName}</b>
-
-📌 <b>{get_text('update_current_image')}:</b>
-   {get_text('update_tag')}: <code>{comparison['current_tag']}</code>{comparison_version_line(comparison['current_version'])}
-   {get_text('update_created')}: {comparison['current_date']}
-   {get_text('update_size')}: {comparison['current_size']}
-   {get_text('update_digest')}: <code>{comparison['current_digest']}</code>
-
-🆕 <b>{get_text('update_new_image')}:</b>
-   {get_text('update_tag')}: <code>{comparison['new_tag']}</code>{comparison_version_line(comparison['new_version'])}
-   {get_text('update_created')}: {comparison['new_date']}
-   {get_text('update_size')}: {comparison['new_size']}
-   {get_text('update_digest')}: <code>{comparison['new_digest']}</code>
-
-📊 <b>{get_text('update_changes')}:</b>{changes_text}"""
-
-	message += comparison_version_notes(comparison)
-
-	if comparison['description']:
-		message += f"\n\n📝 <b>{get_text('update_description')}:</b>\n{comparison['description']}"
-
-	if comparison['registry_url']:
-		# Use dynamic text based on registry
-		if comparison['registry_name']:
-			link_text = f"{get_text('update_more_info_registry', comparison['registry_name'])}"
-		else:
-			link_text = get_text('update_more_info')
-		message += f"\n\n🔗 <a href=\"{comparison['registry_url']}\">{link_text}</a>"
+	message = comparison_message(containerId, containerName, comparison)
 
 	markup = create_confirm_cancel_keyboard(f"update|{containerId}", "button_confirm_update")
 	send_message(message=message, reply_markup=markup)
@@ -7859,63 +7752,6 @@ def available_version(image, reference):
 	except Exception:
 		return None
 	return image_version(config, image_repository(reference))
-
-
-def format_versions(old, new):
-	"""
-	`old → new` for a message, or as much of it as is known; "" for nothing.
-
-	The same version on both sides is a rebuild of it — nginx:latest again
-	with a patched base — and reads as just that version.
-	"""
-	old, new = (html.escape(v) if v else None for v in (old, new))
-	if old and new and old != new:
-		return f"<code>{old}</code> → <b><code>{new}</code></b>"
-	if old or new:
-		return f"<code>{old or new}</code>"
-	return ""
-
-
-# Two versions longer than this together go one under the other: side by
-# side, linuxserver's `1.43.4.10903-e5521bd8c-ls326 → …-ls327` wrapped into a
-# line nobody could read on a phone.
-VERSION_STACK_THRESHOLD = 24
-
-
-def version_lines(old, new):
-	"""
-	The versions under a container's line: `old → new` on one line when they
-	are short, the old one, an arrow and the new one on three when they are
-	not; "" when the image says nothing.
-	"""
-	if old and new and old != new and len(old) + len(new) > VERSION_STACK_THRESHOLD:
-		return (f"\n   <code>{html.escape(old)}</code>\n    ↓"
-				f"\n   <b><code>{html.escape(new)}</code></b>")
-	text = format_versions(old, new)
-	return f"\n   {text}" if text else ""
-
-
-def container_line(name, old=None, new=None):
-	"""
-	One container in a list of updates: the whale, its name, and its
-	versions below. The host is the heading it goes under; see by_host.
-	"""
-	return f"🐳 <b>{html.escape(str(name))}</b>{version_lines(old, new)}"
-
-
-def by_host(entries):
-	"""
-	(host_id, line) pairs as one text, under a heading per host — or just
-	the lines with a single host, where there is no host to speak of. In the
-	order given: the lists are already walked host by host.
-	"""
-	if host_registry.is_single_host():
-		return "\n".join(line for _, line in entries)
-	groups = {}
-	for host_id, line in entries:
-		groups.setdefault(host_id, []).append(line)
-	return "\n\n".join(f"🖥️ <b>{host_alias(host_id)}</b>\n" + "\n".join(lines)
-						for host_id, lines in groups.items())
 
 
 def update_status_text(has_update):

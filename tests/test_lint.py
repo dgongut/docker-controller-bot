@@ -21,7 +21,7 @@ import harness
 # Every module of the bot, and what each may legitimately read from elsewhere.
 SOURCES = ("core.py", "commands.py", "callbacks.py", "i18n.py",
 			"store.py", "migration.py", "callback_registry.py",
-			"host_registry.py", "docker-controller-bot.py")
+			"host_registry.py", "formatting.py", "docker-controller-bot.py")
 
 
 def _module_globals(tree, extra):
@@ -702,12 +702,21 @@ def test_every_image_logs_as_it_goes():
 
 
 def test_the_image_ships_every_module():
-	"""The release Dockerfile copies the modules one by one; a new one is easy to forget."""
+	"""
+	All three Dockerfiles name the modules one by one, and a new one is easy
+	to forget. Only the release one was checked, and formatting.py was left
+	out of the local and debug images: they would have started and crashed.
+	"""
+	modules = [n for n in os.listdir(harness.REPO) if n.endswith(".py")]
 	with open(os.path.join(harness.REPO, "Dockerfile"), encoding="utf-8") as f:
 		dockerfile = f.read()
-	modules = [n for n in os.listdir(harness.REPO) if n.endswith(".py")]
 	missing = [n for n in modules if f"/{n} /app" not in dockerfile]
 	assert not missing, f"el Dockerfile no copia: {missing}"
+	for name in ("Dockerfile_local", "Dockerfile_debug"):
+		with open(os.path.join(harness.REPO, name), encoding="utf-8") as f:
+			copied = " ".join(line for line in f if line.startswith("COPY")).split()
+		missing = [n for n in modules if n not in copied]
+		assert not missing, f"{name} no copia: {missing}"
 
 
 def test_no_text_is_handed_more_values_than_it_shows():

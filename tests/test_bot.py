@@ -4967,7 +4967,7 @@ def _batch_stubs(results, extended=False, own=()):
 
 	def perform(ref, name, tag=None, send_fn=None, hold_events=False):
 		calls.append((name, hold_events, send_fn is None))
-		return results.get(name, True), ""
+		return dcb.UpdateOutcome(results.get(name, True), "")
 
 	def send(message=None, **kw):
 		sent.append(message)

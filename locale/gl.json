@@ -316,6 +316,8 @@
   "update_more_info_registry": "Máis información en $1",
   "update_date_unknown": "Descoñecida",
   "update_no_size_change": "Sen cambios",
+  "update_information": "Información",
+  "update_same_image": "⚠️ Os dous tags apuntan á mesma imaxe (mesmo digest).",
   "update_version": "Versión",
   "update_major_warning": "⚠️ <b>Cambio de versión maior</b>: pode traer cambios incompatibles. Revisa as novidades antes de actualizar",
   "update_release_notes": "Novidades da versión $1",

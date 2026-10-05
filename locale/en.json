@@ -316,6 +316,8 @@
   "update_more_info_registry": "More information on $1",
   "update_date_unknown": "Unknown",
   "update_no_size_change": "No changes",
+  "update_information": "Information",
+  "update_same_image": "⚠️ Both tags point to the same image (same digest).",
   "update_version": "Version",
   "update_major_warning": "⚠️ <b>Major version change</b>: it may bring breaking changes. Check what is new before updating",
   "update_release_notes": "What's new in $1",

@@ -316,6 +316,8 @@
   "update_more_info_registry": "Meer informatie op $1",
   "update_date_unknown": "Onbekend",
   "update_no_size_change": "Geen wijzigingen",
+  "update_information": "Informatie",
+  "update_same_image": "⚠️ Beide tags wijzen naar dezelfde image (zelfde digest).",
   "update_version": "Versie",
   "update_major_warning": "⚠️ <b>Nieuwe hoofdversie</b>: kan incompatibele wijzigingen bevatten. Bekijk wat er nieuw is voordat je bijwerkt",
   "update_release_notes": "Wat is er nieuw in $1",
