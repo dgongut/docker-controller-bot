@@ -1243,6 +1243,16 @@ class RestartLoopTracker:
 		self._notify("restart_loop", name)
 		return False
 
+	def stopped_on_purpose(self, name):
+		"""
+		Whether a stop of this container was asked for: it was killed — by
+		`docker stop`, the bot, a task — moments ago. Looked at, not consumed:
+		should_announce still needs it.
+		"""
+		with self._lock:
+			killed = self._killed.get(name)
+			return killed is not None and self._clock() - killed <= self.KILL_SECONDS
+
 	def _forget_quiet(self, now):
 		"""
 		Drops what is known about containers that have been quiet for a while.
@@ -1280,6 +1290,48 @@ class RestartLoopTracker:
 
 	def _gone(self, name):
 		self._notify("stopped_container", name)
+
+
+# The last lines of a container that failed, shown under the notice: enough
+# to read the error, short enough not to bury the chat.
+EVENT_LOG_LINES = 10
+EVENT_LOG_MAX_CHARS = 1500
+
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+def log_excerpt(text):
+	"""
+	A block of log lines for a message: colours stripped, long lines cut, the
+	whole kept to the end that matters — the error is last — and escaped.
+	None when nothing is left.
+	"""
+	lines = [_ANSI_ESCAPE.sub("", line).rstrip() for line in str(text or "").splitlines()]
+	lines = [line if len(line) <= 300 else line[:300] + "…" for line in lines if line.strip()]
+	if not lines:
+		return None
+	excerpt = "\n".join(lines[-EVENT_LOG_LINES:])
+	if len(excerpt) > EVENT_LOG_MAX_CHARS:
+		excerpt = "…" + excerpt[-EVENT_LOG_MAX_CHARS:]
+	return f"<pre>{html.escape(excerpt)}</pre>"
+
+
+def describe_exit_code(code):
+	"""
+	An exit code, with the signal it means when it means one: 137 is SIGKILL,
+	139 a segmentation fault — the number alone tells most people nothing.
+	"""
+	import signal as _signal
+	try:
+		number = int(code)
+	except (TypeError, ValueError):
+		return html.escape(str(code))
+	if 128 < number < 160:
+		try:
+			return f"{number} ({_signal.Signals(number - 128).name})"
+		except ValueError:
+			pass
+	return str(number)
 
 
 def _stream_reader(stream):
@@ -1351,6 +1403,13 @@ class DockerEventMonitor:
 		self.thread = None
 		self.restart_loops = RestartLoopTracker(
 			lambda key, name: self._announce(get_text(key, name)))
+		# Names whose healthcheck is failing, announced once each: the next
+		# news about them is that they are healthy again. And when each was
+		# last killed for running out of memory, which arrives as an event of
+		# its own just before the stop it causes. Both forgotten when the
+		# container is removed.
+		self._unhealthy = set()
+		self._oom = {}
 
 	@property
 	def alias(self):
@@ -1449,19 +1508,32 @@ class DockerEventMonitor:
 		attributes = actor.get('Attributes', {})
 		container_name = attributes.get('name', '')
 
-		message = None
-		if action == "start":
-			message = get_text("started_container", container_name)
-		elif action == "die":
-			message = get_text("stopped_container", container_name)
-		elif action == "create" and store.get("bot.extended_messages"):
-			message = get_text("created_container", container_name)
+		container_id = actor.get('ID') or event.get('id')
 
 		if action == "kill":
 			# Never announced, but it is what tells a stop that was asked for
 			# from one that was not.
 			self.restart_loops.should_announce(action, container_name)
 			return
+		if action == "oom":
+			self._oom[container_name] = time.time()
+			return
+		if action == "destroy":
+			self._unhealthy.discard(container_name)
+			self._oom.pop(container_name, None)
+			return
+
+		message = None
+		detail = None
+		if action == "start":
+			message = get_text("started_container", container_name)
+		elif action == "die":
+			message, detail = self._death_message(container_name, attributes, container_id)
+		elif action == "create" and store.get("bot.extended_messages"):
+			message = get_text("created_container", container_name)
+		elif action.startswith("health_status"):
+			status = action.split(":", 1)[1].strip() if ":" in action else attributes.get("health_status", "")
+			message, detail = self._health_message(container_name, status, container_id)
 
 		if not message:
 			return
@@ -1474,19 +1546,93 @@ class DockerEventMonitor:
 			debug(f"Message [{message}] omitted because {container_name} is in a restart loop")
 			return
 
-		self._announce(message)
+		if detail:
+			self._announce(message, detail)
+		else:
+			self._announce(message)
 
-	def _announce(self, message):
+	# How long after an "oom" event the stop that follows is put down to it.
+	OOM_SECONDS = 30
+
+	def _death_message(self, name, attributes, container_id):
+		"""
+		What to say about a container that stopped, and the log lines to show.
+
+		"Stopped" said nothing about why. Asked for —`docker stop`, the bot, a
+		task— is still that. Otherwise the exit code says it: 0 is a process
+		that finished, anything else one that failed, shown with what it last
+		wrote. Out of memory is told apart, because the fix is a different one.
+		"""
+		oom = self._oom.pop(name, None)
+		if oom is not None and time.time() - oom <= self.OOM_SECONDS:
+			return get_text("container_oom", name), None
+		if self.restart_loops.stopped_on_purpose(name):
+			return get_text("stopped_container", name), None
+		code = str(attributes.get('exitCode', '')).strip()
+		if code in ("", "0"):
+			return get_text("container_finished" if code == "0" else "stopped_container", name), None
+		return get_text("container_failed", name, describe_exit_code(code)), self._last_logs(container_id)
+
+	def _health_message(self, name, status, container_id):
+		"""
+		What to say when a healthcheck changes, or (None, None).
+
+		Docker reports every change, and only changes: "healthy" on every
+		start is not news, and is announced only when it ends a failure that
+		was. A failure is announced once, with what the check last said.
+		"""
+		if status == "unhealthy":
+			if name in self._unhealthy:
+				return None, None
+			self._unhealthy.add(name)
+			return get_text("container_unhealthy", name), self._last_health_output(container_id)
+		if status == "healthy" and name in self._unhealthy:
+			self._unhealthy.discard(name)
+			return get_text("container_healthy_again", name), None
+		return None, None
+
+	def _inspect(self, container_id):
+		try:
+			return host_registry.client(self.host_id).containers.get(container_id)
+		except Exception as e:
+			debug(f"Event monitor ({self.alias}): could not read {container_id}: {e}")
+			return None
+
+	def _last_logs(self, container_id):
+		"""The last lines a container wrote, ready for the message, or None."""
+		container = self._inspect(container_id) if container_id else None
+		if container is None:
+			return None
+		try:
+			raw = container.logs(tail=EVENT_LOG_LINES, stdout=True, stderr=True)
+		except Exception as e:
+			debug(f"Event monitor ({self.alias}): could not read the logs of {container_id}: {e}")
+			return None
+		return log_excerpt(raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw))
+
+	def _last_health_output(self, container_id):
+		"""What the failing healthcheck last printed, when it printed anything."""
+		container = self._inspect(container_id) if container_id else None
+		if container is None:
+			return None
+		entries = ((container.attrs.get('State') or {}).get('Health') or {}).get('Log') or []
+		output = entries[-1].get('Output') if entries and isinstance(entries[-1], dict) else None
+		return log_excerpt(output) if output and output.strip() else None
+
+	def _announce(self, message, detail=None):
 		"""
 		Sends one of this host's container notifications. False when it failed.
 
 		Every key that reaches here is a single statement, so the host goes at
-		the end. And this is where most of these arrive from, which is what
-		stays in the chat.
+		the end of it — before the detail, a block of log lines, when there is
+		one. And this is where most of these arrive from, which is what stays
+		in the chat.
 		"""
 		if self._stop.is_set():
 			return True
 		message = f"{message}{host_suffix(self.host_id)}"
+		if detail:
+			message = f"{message}\n\n{detail}"
 		try:
 			if is_muted():
 				debug(f"Message [{message}] omitted because muted")

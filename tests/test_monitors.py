@@ -597,3 +597,92 @@ def test_a_tcp_event_stream_asks_for_keepalive():
 	stream._response.raw._fp.fp.raw._sock = unix
 	dcb._keep_alive(stream)
 	assert not unix.setsockopt.called
+
+
+# --- Why a container stopped, and whether it is healthy ---------------------
+#
+# The sequences below are the ones Docker 29 sends, captured with a stream
+# open while each thing was done to a real container.
+
+def _monitor_with_logs(logs="", health_output=""):
+	store.set("hosts", ONE_HOST)
+	monitor = dcb.DockerEventMonitor("h_local")
+	announced = []
+	monitor._announce = lambda message, detail=None: announced.append((message, detail))
+	monitor._last_logs = lambda container_id: dcb.log_excerpt(logs)
+	monitor._last_health_output = lambda container_id: dcb.log_excerpt(health_output)
+	return monitor, announced
+
+
+def _event(action, name="app", **attributes):
+	return {"Type": "container", "Action": action, "id": "f" * 64,
+			"Actor": {"ID": "f" * 64, "Attributes": dict(attributes, name=name)}}
+
+
+def test_a_container_that_finishes_on_its_own_says_it_finished():
+	monitor, announced = _monitor_with_logs()
+	monitor._handle_event(_event("die", exitCode="0"))
+	assert announced == [(dcb.get_text("container_finished", "app"), None)], announced
+
+
+def test_a_container_that_fails_says_its_code_and_what_it_last_wrote():
+	monitor, announced = _monitor_with_logs("conectando…\n\x1b[31mERROR: <sin conexión>\x1b[0m\n")
+	monitor._handle_event(_event("die", exitCode="3"))
+	message, detail = announced[-1]
+	assert message == dcb.get_text("container_failed", "app", "3"), message
+	assert detail == "<pre>conectando…\nERROR: &lt;sin conexión&gt;</pre>", detail
+
+
+def test_a_signal_exit_code_is_named():
+	monitor, announced = _monitor_with_logs()
+	monitor._handle_event(_event("die", exitCode="139"))
+	assert "139 (SIGSEGV)" in announced[-1][0], announced
+
+
+def test_running_out_of_memory_is_told_apart():
+	"""`oom` arrives just before the stop it causes, which reads 137 like any kill."""
+	monitor, announced = _monitor_with_logs()
+	monitor._handle_event(_event("oom"))
+	monitor._handle_event(_event("die", exitCode="137"))
+	assert announced == [(dcb.get_text("container_oom", "app"), None)], announced
+
+
+def test_a_stop_that_was_asked_for_is_still_just_a_stop():
+	"""`docker stop`: kill with SIGTERM, kill with SIGKILL, stop, then die 137."""
+	monitor, announced = _monitor_with_logs("nada que ver")
+	for event in (_event("kill", signal="15"), _event("kill", signal="9"), _event("stop"),
+					_event("die", exitCode="137")):
+		monitor._handle_event(event)
+	assert announced == [(dcb.get_text("stopped_container", "app"), None)], announced
+
+
+def test_a_failing_healthcheck_is_announced_once_and_its_recovery_too():
+	"""
+	Docker sends health_status on changes only: healthy right after starting —
+	not news —, unhealthy, and healthy again, which is.
+	"""
+	monitor, announced = _monitor_with_logs(health_output="curl: (7) Failed to connect\n")
+	for action in ("health_status: healthy", "health_status: unhealthy",
+					"health_status: unhealthy", "health_status: healthy", "health_status: healthy"):
+		monitor._handle_event(_event(action))
+	assert announced == [
+		(dcb.get_text("container_unhealthy", "app"), "<pre>curl: (7) Failed to connect</pre>"),
+		(dcb.get_text("container_healthy_again", "app"), None),
+	], announced
+
+
+def test_what_is_remembered_about_a_container_goes_with_it():
+	monitor, announced = _monitor_with_logs()
+	monitor._handle_event(_event("health_status: unhealthy"))
+	monitor._handle_event(_event("oom"))
+	monitor._handle_event(_event("destroy"))
+	assert monitor._unhealthy == set() and monitor._oom == {}
+
+
+def test_a_log_excerpt_keeps_the_end_and_fits_in_a_message():
+	text = "\n".join(f"línea {i} " + "x" * 400 for i in range(50))
+	excerpt = dcb.log_excerpt(text)
+	assert excerpt.startswith("<pre>") and excerpt.endswith("</pre>")
+	assert "línea 49" in excerpt and "línea 30" not in excerpt
+	assert len(excerpt) < 1600, len(excerpt)
+	assert dcb.log_excerpt("\n  \n") is None and dcb.log_excerpt(None) is None

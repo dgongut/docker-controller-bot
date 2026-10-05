@@ -32,6 +32,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -1161,6 +1162,57 @@ def test_with_extended_messages_the_result_says_the_versions_too():
 		assert expected in sent, sent
 	finally:
 		core.store.set("bot.extended_messages", False)
+		cleanup()
+
+
+def test_the_event_monitor_says_why_a_container_stopped_and_when_it_is_unhealthy():
+	"""
+	The monitor on the daemon's real event stream, while containers finish,
+	fail, run out of memory, are stopped, and fail their healthcheck and
+	recover. What it announces is what the user would read.
+	"""
+	_setup()
+	core, _ = _load()
+	monitor = core.DockerEventMonitor(core.host_registry.local_host_id())
+	announced = []
+	monitor._announce = lambda message, detail=None: announced.append((message, detail))
+	reader = threading.Thread(target=monitor.detectar_eventos_contenedores, daemon=True)
+	try:
+		reader.start()
+		deadline = time.time() + 10
+		while not monitor.listening and time.time() < deadline:
+			time.sleep(0.1)
+		def go(name, command, **kwargs):
+			return client.containers.run(BASE, command, name=PREFIX + name, detach=True, labels=LABEL, **kwargs)
+		go("finishes", ["sh", "-c", "sleep 1; exit 0"])
+		go("fails", ["sh", "-c", "echo 'ERROR: <sin base de datos>' >&2; sleep 1; exit 3"])
+		go("oom", ["sh", "-c", "sleep 1; tail /dev/zero"], mem_limit="8m", memswap_limit="8m")
+		stopped = go("stopped", ["sleep", "300"])
+		sick = go("sick", ["sh", "-c", "touch /ok; sleep 300"],
+					healthcheck={"test": ["CMD", "test", "-f", "/ok"], "interval": 1_000_000_000, "retries": 2})
+		time.sleep(4)
+		stopped.stop(timeout=1)
+		sick.exec_run(["rm", "/ok"])
+		time.sleep(6)
+		sick.exec_run(["touch", "/ok"])
+		time.sleep(4)
+
+		said = {}
+		for message, detail in announced:
+			for name in ("finishes", "fails", "oom", "stopped", "sick"):
+				if f"<b>{PREFIX}{name}</b>" in message:
+					said.setdefault(name, []).append((message, detail))
+		name = lambda n: PREFIX + n
+		assert (core.get_text("container_finished", name("finishes")), None) in said["finishes"], said
+		failed = [m for m in said["fails"] if m[0] == core.get_text("container_failed", name("fails"), "3")]
+		assert failed and "ERROR: &lt;sin base de datos&gt;" in failed[0][1], said["fails"]
+		assert (core.get_text("container_oom", name("oom")), None) in said["oom"], said["oom"]
+		assert (core.get_text("stopped_container", name("stopped")), None) in said["stopped"], said["stopped"]
+		health = [m for m, _ in said["sick"] if "sick" in m and "🟢" not in m]
+		assert health == [core.get_text("container_unhealthy", name("sick")),
+							core.get_text("container_healthy_again", name("sick"))], said["sick"]
+	finally:
+		monitor.stop()
 		cleanup()
 
 
