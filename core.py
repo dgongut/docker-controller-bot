@@ -25,7 +25,7 @@ from telebot.types import InlineKeyboardButton
 from telebot.types import InlineKeyboardMarkup
 from compose_generator import ComposeGenerator
 from formatting import (
-	EVENT_LOG_LINES, by_host, comparison_version_line, comparison_version_notes, container_line, describe_exit_code, format_versions, log_excerpt, release_notes_url, version_lines,
+	EVENT_LOG_LINES, by_host, comparison_version_change, comparison_version_line, comparison_version_notes, container_line, describe_exit_code, format_versions, log_excerpt, release_notes_url, version_lines,
 )
 from docker_update import container_platform, extract_container_config, image_repository, image_version, perform_update, stop_container
 from docker_compose_manager import (
@@ -41,7 +41,7 @@ from i18n import get_text, language
 from logger import debug, error, warning
 from message_queue import MessageQueue
 
-VERSION = "5.0.0_RC8a"
+VERSION = "5.0.0_RC8b"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -5307,6 +5307,9 @@ def comparison_message(containerId, containerName, comparison):
 			changes.append(f"{comparison['days_diff']} {get_text('update_days_newer')}")
 		elif comparison['days_diff'] < 0:
 			changes.append(f"{abs(comparison['days_diff'])} {get_text('update_days_older')}")
+		version_change = comparison_version_change(comparison)
+		if version_change:
+			changes.append(version_change)
 		# Bullets only when there is more than one change.
 		changes_text = ("\n   • " + "\n   • ".join(changes)) if len(changes) > 1 else f"\n   {changes[0]}"
 		for side, emoji, title in (("current", "📌", "update_current_image"), ("new", "🆕", "update_new_image")):

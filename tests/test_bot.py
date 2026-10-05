@@ -3411,6 +3411,27 @@ def test_versions_read_old_to_new_and_escape_what_the_image_wrote():
 	assert "&lt;b&gt;" in dcb.format_versions("<b>", "2"), "una etiqueta es texto de la imagen"
 
 
+def _comparison(old, new):
+	return {'current_tag': 'plex:latest', 'new_tag': 'plex:latest', 'current_digest': 'aaa', 'new_digest': 'bbb',
+			'current_size': '405MiB', 'new_size': '398MiB', 'size_diff': '-6.6MiB',
+			'current_date': '2026-09-28', 'new_date': '2026-10-05', 'days_diff': 7,
+			'description': None, 'registry_url': None, 'registry_name': None,
+			'current_version': old, 'new_version': new, 'release_notes_url': None}
+
+
+def test_the_comparison_lists_the_version_as_one_more_change():
+	"""It came after the bullets without one, and a long version ran on in one line."""
+	ref = dcb.make_ref("h_local", "abcde")
+	short = dcb.comparison_message(ref, "plex", _comparison("1.43.3", "1.43.4"))
+	assert "   • " + i18n.get_text("update_version") + ": <code>1.43.3</code> → <b><code>1.43.4</code></b>" in short, short
+	long = dcb.comparison_message(ref, "plex", _comparison("1.43.4.10903-e5521bd8c-ls326", "1.43.4.10903-e5521bd8c-ls327"))
+	assert ("   • " + i18n.get_text("update_version") + ":\n      <code>1.43.4.10903-e5521bd8c-ls326</code>"
+			"\n       ↓\n      <b><code>1.43.4.10903-e5521bd8c-ls327</code></b>") in long, long
+	assert dcb.comparison_message(ref, "plex", _comparison(None, None)).count("   • ") == 2
+	for text in (short, long):
+		_assert_telegram_html(text, "comparativa")
+
+
 def test_long_versions_go_one_under_the_other_and_short_ones_stay_on_a_line():
 	"""linuxserver's versions side by side made a line no phone could show whole."""
 	assert dcb.version_lines("v3.2.3", "v3.2.4") == "\n   <code>v3.2.3</code> → <b><code>v3.2.4</code></b>"

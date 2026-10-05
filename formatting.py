@@ -71,18 +71,32 @@ def comparison_version_line(version):
 	return f"\n   {get_text('update_version')}: <code>{html.escape(version)}</code>"
 
 
+def comparison_version_change(comparison):
+	"""
+	The version step as one of the comparison's changes, or None when there
+	is none to show. A bullet like the others: on its line when short, and
+	one version under the other, lined up with the bullet's text, when long.
+	"""
+	old, new = comparison.get('current_version'), comparison.get('new_version')
+	if not (old and new and old != new):
+		return None
+	label = get_text('update_version')
+	if len(old) + len(new) > VERSION_STACK_THRESHOLD:
+		# Under the text of "   • ", which starts in the sixth column.
+		return f"{label}:{version_lines(old, new, indent=' ' * 6)}"
+	return f"{label}: {format_versions(old, new)}"
+
+
 def comparison_version_notes(comparison):
 	"""
-	What the comparison says about the versions, under its changes: the step
-	itself, a warning when the major version goes up — where the breaking
-	changes are — and where to read what is new.
+	What the comparison says about the versions below its changes: a warning
+	when the major version goes up — where the breaking changes are — and
+	where to read what is new.
 	"""
 	old, new = comparison.get('current_version'), comparison.get('new_version')
 	notes = ""
-	if old and new and old != new:
-		notes += f"\n   {get_text('update_version')}: {format_versions(old, new)}"
-		if is_major_upgrade(old, new):
-			notes += f"\n\n{get_text('update_major_warning')}"
+	if old and new and old != new and is_major_upgrade(old, new):
+		notes += f"\n\n{get_text('update_major_warning')}"
 	if comparison.get('release_notes_url'):
 		notes += (f"\n\n📋 <a href=\"{html.escape(comparison['release_notes_url'], quote=True)}\">"
 				f"{get_text('update_release_notes', html.escape(new or ''))}</a>")
@@ -140,17 +154,18 @@ def format_versions(old, new):
 VERSION_STACK_THRESHOLD = 24
 
 
-def version_lines(old, new):
+def version_lines(old, new, indent="   "):
 	"""
-	The versions under a container's line: `old → new` on one line when they
-	are short, the old one, an arrow and the new one on three when they are
-	not; "" when the image says nothing.
+	The versions under a line: `old → new` on one line when they are short,
+	the old one, an arrow and the new one on three when they are not; ""
+	when the image says nothing. `indent` lines them up under what they
+	belong to — a container's name, or a bullet's text.
 	"""
 	if old and new and old != new and len(old) + len(new) > VERSION_STACK_THRESHOLD:
-		return (f"\n   <code>{html.escape(old)}</code>\n    ↓"
-				f"\n   <b><code>{html.escape(new)}</code></b>")
+		return (f"\n{indent}<code>{html.escape(old)}</code>\n{indent} ↓"
+				f"\n{indent}<b><code>{html.escape(new)}</code></b>")
 	text = format_versions(old, new)
-	return f"\n   {text}" if text else ""
+	return f"\n{indent}{text}" if text else ""
 
 
 def container_line(name, old=None, new=None):
