@@ -2344,7 +2344,7 @@ def test_info_reads_the_update_cache_of_its_own_host():
 		for host_id, expected in (("h_nas", True), ("h_local", False)):
 			owner = dcb.manager(host_id)
 			owner.client.containers.get = lambda _id, _c=nginx: _c
-			_text, possible_update = owner.get_info(container_id="abc12", container_name="nginx")
+			_text, possible_update, _can_start = owner.get_info(container_id="abc12", container_name="nginx")
 			assert possible_update is expected, (host_id, possible_update)
 	finally:
 		dcb.DockerManager.list_containers = original
@@ -3439,6 +3439,51 @@ def test_the_comparison_lists_the_version_as_one_more_change():
 	assert dcb.comparison_message(ref, "plex", _comparison(None, None)).count("   • ") == 2
 	for text in (short, long):
 		_assert_telegram_html(text, "comparativa")
+
+
+def _info(**overrides):
+	info = {"name": "plex", "host": None, "own": False, "status": "running", "health": "healthy", "restarts": 0,
+			"short_id": "4f2a91c3d7e8", "created": "2026-09-28 10:00", "image": "lscr.io/linuxserver/plex:latest",
+			"since": "2026-10-02 09:14", "since_seconds": 3 * 86400 + 60, "version": "1.43.4.10903-e5521bd8c-ls326",
+			"image_created": "2026-09-28", "image_size": "405.1MiB", "image_digest": "7a94fbb0a7e8",
+			"release_notes_url": None, "registry_url": None, "registry_name": None,
+			"has_update": False, "update_versions": (None, None), "auto_update": False, "ignore_checks": False,
+			"schedules": [], "networks": [], "shared_by": [], "ports": [], "mounts": []}
+	info.update(overrides)
+	return info
+
+
+def test_info_leaves_out_what_it_has_nothing_to_say_about():
+	text = formatting.render_container_info(_info())
+	assert "📦 <b>plex</b>" in text and "🖥️" not in text, text
+	for absent in ("info_update_available", "info_storage", "info_resources"):
+		assert i18n.get_text(absent) not in text, (absent, text)
+	assert "Compose" not in text, text
+	_assert_telegram_html(text, "info mínimo")
+
+
+def test_info_says_why_it_stopped_and_what_it_is_tied_to():
+	text = formatting.render_container_info(_info(
+		status="exited", health=None, oom=True, exit_code_text="137 (SIGKILL)", restarts=3,
+		restart_policy="on-failure:3", network_of="gluetun", memory_limit=512 * 1024 * 1024, privileged=True,
+		compose_project="descargas", compose_service="qbittorrent", depends_on=["gluetun"], dependents=[],
+		mounts=[("/srv/<qbit>", "/config", False), ("/mnt/downloads", "/downloads", True)],
+		schedules=[("Reinicio <nocturno>", "0 4 * * *")], last_check_seconds=40 * 60, host="Trappist"))
+	assert i18n.get_text("info_oom") in text and "137 (SIGKILL)" in text, text
+	assert i18n.get_text("info_uses_network_of") + ": <code>gluetun</code>" in text, text
+	assert "RAM 512.0 MiB" in text and i18n.get_text("info_privileged") in text, text
+	assert "&lt;qbit&gt;" in text and "&lt;nocturno&gt;" in text, "lo que escribió el usuario va escapado"
+	assert i18n.get_text("info_ago", i18n.get_text("info_minutes", 40)) in text, text
+	assert "🖥️ <b>Trappist</b>" in text, text
+	_assert_telegram_html(text, "info parado")
+
+
+def test_info_cuts_long_lists_and_names_durations_in_the_singular_too():
+	text = formatting.render_container_info(_info(mounts=[(f"/v{i}", f"/m{i}", False) for i in range(12)],
+													since_seconds=86400 + 5))
+	assert text.count("→ <code>/m") == formatting.INFO_LIST_LIMIT, text
+	assert i18n.get_text("info_more", 4) in text, text
+	assert i18n.get_text("info_day", 1) in text, text
 
 
 def test_long_versions_go_one_under_the_other_and_short_ones_stay_on_a_line():

@@ -1239,6 +1239,60 @@ def test_a_version_label_left_on_the_container_by_4x_is_neither_read_nor_kept():
 		cleanup()
 
 
+def test_info_tells_everything_about_a_real_container():
+	"""
+	/info against containers that have everything to show: a Compose service
+	with a dependency and a dependent, a healthcheck, limits, ports, a named
+	volume, a read-only bind and a tmpfs; and one stopped for running out of
+	memory, privileged, on another's network.
+	"""
+	_setup()
+	core, _ = _load()
+	try:
+		publish("1", 'LABEL org.opencontainers.image.version="1.4.2"')
+		_compose_project(f"""
+name: dcbtest
+services:
+  db: {{image: "{IMAGE}:latest", container_name: {PREFIX}db, labels: [dcbtest=1]}}
+  plex:
+    image: {IMAGE}:latest
+    container_name: {PREFIX}plex
+    labels: [dcbtest=1, DCB-Auto-Update]
+    depends_on: [db]
+    ports: ["55201:32400"]
+    volumes: ["cfg:/config", "/tmp:/media:ro"]
+    tmpfs: ["/transcode"]
+    cpus: 2
+    mem_limit: 256m
+    healthcheck: {{test: ["CMD", "true"], interval: 1s}}
+  overseerr: {{image: "{IMAGE}:latest", container_name: {PREFIX}overseerr, labels: [dcbtest=1], depends_on: [plex]}}
+volumes:
+  cfg: {{name: {PREFIX}cfg, labels: [dcbtest=1]}}
+""")
+		vpn = run("vpn")
+		client.containers.run(BASE, ["sh", "-c", "sleep 1; tail /dev/zero"], name=PREFIX + "qb", detach=True,
+								labels=LABEL, network_mode=f"container:{vpn.id}", mem_limit="8m", memswap_limit="8m",
+								privileged=True)
+		time.sleep(4)
+		owner = core.manager(core.host_registry.local_host_id())
+		plex, _, can_start = owner.get_info(fetch("plex").id, PREFIX + "plex")
+		assert not can_start
+		for expected in ("💚", "<code>1.4.2</code>", f"({core.get_text('info_limit')}: 2 CPU)",
+							"/ 256.0 MiB", "55201 → 32400/tcp", f"<code>{PREFIX}cfg</code> → <code>/config</code>",
+							"<code>tmpfs</code> → <code>/transcode</code>", "<code>db</code>", "<code>overseerr</code>",
+							core.get_text("schedule_yes")):
+			assert expected in plex, (expected, plex)
+		qb, _, can_start = owner.get_info(fetch("qb").id, PREFIX + "qb")
+		assert can_start
+		for expected in (core.get_text("info_oom"), "137 (SIGKILL)", f"<code>{PREFIX}vpn</code>",
+							core.get_text("info_privileged"), "RAM 8.0 MiB"):
+			assert expected in qb, (expected, qb)
+		vpn_info, _, _ = owner.get_info(vpn.id, vpn.name)
+		assert f"{core.get_text('info_network_shared_by')}: <code>{PREFIX}qb</code>" in vpn_info, vpn_info
+	finally:
+		cleanup()
+
+
 def test_zz_the_registry_goes_when_the_tests_are_done():
 	"""Last by name, so the registry is there for all the others."""
 	cleanup()

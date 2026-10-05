@@ -19,13 +19,13 @@ import telemetry
 from config import *
 from croniter import croniter
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from telebot.types import InlineKeyboardButton
 from telebot.types import InlineKeyboardMarkup
 from compose_generator import ComposeGenerator
 from formatting import (
-	EVENT_LOG_LINES, by_host, comparison_version_change, comparison_version_line, comparison_version_notes, container_line, describe_exit_code, log_excerpt, release_notes_url, version_lines,
+	EVENT_LOG_LINES, by_host, render_container_info, comparison_version_change, comparison_version_line, comparison_version_notes, container_line, describe_exit_code, log_excerpt, release_notes_url, version_lines,
 )
 from docker_update import container_platform, extract_container_config, image_repository, image_version, perform_update, stop_container
 from docker_compose_manager import (
@@ -41,7 +41,7 @@ from i18n import get_text, language
 from logger import debug, error, warning
 from message_queue import MessageQueue
 
-VERSION = "5.0.0_RC8b"
+VERSION = "5.0.0_RC9"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -466,108 +466,20 @@ class DockerManager:
 			return get_text("error_showing_info_project", project_name)
 
 	def get_info(self, container_id, container_name):
+		"""
+		The /info of a container: (text, has_update, can_start).
+
+		Everything is gathered here and drawn in formatting.render_container_info,
+		so what the message says and how it looks are tested apart.
+		"""
 		try:
 			container = self.client.containers.get(container_id)
-			if container.status == "running":
-				used_cpu = 0.0
-				ram = "N/A"
-				try:
-					stats = container.stats(stream=False)
-
-					if "cpu_stats" in stats and "precpu_stats" in stats:
-						cpu_delta = stats["cpu_stats"]["cpu_usage"].get("total_usage", 0) - stats["precpu_stats"]["cpu_usage"].get("total_usage", 0)
-						system_cpu_delta = stats["cpu_stats"]["system_cpu_usage"] - stats["precpu_stats"]["system_cpu_usage"]
-						online_cpus = stats["cpu_stats"]["online_cpus"]
-						if system_cpu_delta > 0 and cpu_delta > 0:
-							cpu_usage_percentage = (cpu_delta / system_cpu_delta) * online_cpus * 100
-							used_cpu = round(cpu_usage_percentage, 2)
-
-					if "memory_stats" in stats:
-						memory_stats = stats["memory_stats"]
-						stats = memory_stats.get("stats", {})
-						active_anon = stats.get("active_anon", 0)
-						active_file = stats.get("active_file", 0)
-						inactive_anon = stats.get("inactive_anon", 0)
-						inactive_file = stats.get("inactive_file", 0)
-						memory_used = active_anon + active_file + inactive_anon + inactive_file
-						used_ram_mb = memory_used / (1024 * 1024)
-						if "limit" in memory_stats and memory_stats["limit"] > 0:
-							limit_mb = memory_stats["limit"] / (1024 * 1024)
-							memory_usage_percentage = round((used_ram_mb / limit_mb) * 100, 2)
-							if used_ram_mb > 1024:
-								used_ram_gb = used_ram_mb / 1024
-								limit_mb_gb = limit_mb / 1024
-								ram = f"{used_ram_gb:.2f}/{limit_mb_gb:.2f} GB ({memory_usage_percentage}%)"
-							else:
-								ram = f"{used_ram_mb:.2f}/{limit_mb:.2f} MB ({memory_usage_percentage}%)"
-						else:
-							ram = f"{used_ram_mb:.2f} MB"
-				except Exception as e:
-					error(f"Container {container_name} statistics not available. Error: [{e}]")
-
-			has_update = None
-			container_attrs = container.attrs.get('Config', {})
-			image_with_tag = container_attrs.get('Image', 'N/A')
-
-			# Always read cache, regardless of the check_updates setting, which
-			# only controls automatic detection and not manual /checkupdate.
-			#
-			# Keyed by this host: the same image and name on two machines have
-			# two independent answers, and without it /info on a remote
-			# container reported the local machine's, so the update button
-			# appeared when there was nothing to update and hid a real one.
-			try:
-				has_update = read_container_update_status(image_with_tag, container_name, self.host_id)
-			except Exception as e:
-				debug(f"Queried for update {container_name} and it is not available: [{e}]")
-
-			possible_update = has_update is True
-
-			text = '<pre><code>\n'
-			text += f'{get_text("status")}: {get_status_emoji(container.status, container_name, container, self.host_id)} ({container.status})\n\n'
-			if container.status == "running":
-				health_text = get_health_status_text(container)
-				if health_text:
-					text += f"- {get_text('health')}: {health_text}\n\n"
-				if 0.0 != used_cpu:
-					text += f"- CPU: {used_cpu}%\n\n"
-				if ("0.00 MB") not in ram:
-					text += f"- RAM: {ram}\n\n"
-
-			# Port mappings
-			port_bindings = container.attrs.get('HostConfig', {}).get('PortBindings', {})
-			if port_bindings:
-				text += f"- {get_text('ports')}:\n"
-				for container_port, host_bindings in port_bindings.items():
-					if host_bindings:
-						for host_binding in host_bindings:
-							host_ip = host_binding.get('HostIp', '0.0.0.0')
-							host_port = host_binding.get('HostPort', '')
-							# Format: 0.0.0.0:8080 -> 80/tcp
-							if host_ip == '0.0.0.0' or host_ip == '':
-								text += f"  {host_port} → {container_port}\n"
-							else:
-								text += f"  {host_ip}:{host_port} → {container_port}\n"
-				text += "\n"
-
-			text += f'- {get_text("container_id")}: {container_id}\n\n'
-			text += f'- {get_text("used_image")}:\n{image_with_tag}\n\n'
-
-			# Try to get image ID (may fail if image was deleted)
-			try:
-				image_id = container.image.id.replace("sha256:", "")[:CONTAINER_ID_LENGTH]
-				text += f'- {get_text("image_id")}: {image_id}'
-			except Exception as e:
-				debug(f"Could not get image ID for container {container_name}: [{e}]")
-				text += f'- {get_text("image_id")}: N/A'
-
-			if store.get("bot.check_updates"):
-				text += f"\n\n{update_status_text(has_update)}"
-			text += "</code></pre>"
-			return f'📜 {get_text("information")} <b>{container_name}</b>:\n{text}', possible_update
+			info = gather_container_info(self, container)
+			return (render_container_info(info), info.get("has_update") is True,
+					info["status"] in ("exited", "dead", "created"))
 		except Exception as e:
 			error(f"Could not display information for container {container_name}. Error: [{e}]")
-			return get_text("error_showing_info_container", container_name), False
+			return get_text("error_showing_info_container", container_name), False, False
 
 	def update(self, container_id, container_name, message, bot, tag=None):
 		"""
@@ -5221,15 +5133,233 @@ def compose(containerId, containerName):
 	else:
 		send_message(message=result, reply_markup=markup)
 
+def _parse_docker_time(value):
+	"""A timestamp from the Docker API as an aware datetime, or None for its zero."""
+	if not value or str(value).startswith("0001-"):
+		return None
+	text = str(value).replace("Z", "+00:00")
+	# Docker writes nanoseconds; Python reads up to microseconds.
+	text = re.sub(r"(\.\d{6})\d+", r"\1", text)
+	try:
+		return datetime.fromisoformat(text)
+	except ValueError:
+		return None
+
+
+def _local_time(moment):
+	return moment.astimezone().strftime("%Y-%m-%d %H:%M") if moment else None
+
+
+def container_stats(container):
+	"""
+	One reading of a running container's usage, the way `docker stats` takes
+	it — memory without the page cache it could give back —, or None.
+	"""
+	try:
+		return _read_stats(container.stats(stream=False))
+	except Exception as e:
+		# A missing figure, or one in a shape this does not expect, costs the
+		# resources line and not the whole of /info.
+		debug(f"Statistics of {container.name} not available: {e}")
+		return None
+
+
+def _read_stats(stats):
+	"""The figures container_stats reports, out of one stats sample."""
+	result = {}
+	cpu, precpu = stats.get("cpu_stats") or {}, stats.get("precpu_stats") or {}
+	cpu_delta = (cpu.get("cpu_usage") or {}).get("total_usage", 0) - (precpu.get("cpu_usage") or {}).get("total_usage", 0)
+	system_delta = (cpu.get("system_cpu_usage") or 0) - (precpu.get("system_cpu_usage") or 0)
+	cpus = cpu.get("online_cpus") or len((cpu.get("cpu_usage") or {}).get("percpu_usage") or []) or 1
+	result["cpu"] = (cpu_delta / system_delta) * cpus * 100 if system_delta > 0 and cpu_delta > 0 else 0.0
+	memory = stats.get("memory_stats") or {}
+	if memory.get("usage") is not None:
+		breakdown = memory.get("stats") or {}
+		cache = breakdown.get("inactive_file", breakdown.get("total_inactive_file", 0)) or 0
+		result["memory"] = max(memory["usage"] - cache, 0)
+		result["memory_limit"] = memory.get("limit")
+	networks = stats.get("networks")
+	if isinstance(networks, dict):
+		result["rx"] = sum(n.get("rx_bytes", 0) for n in networks.values())
+		result["tx"] = sum(n.get("tx_bytes", 0) for n in networks.values())
+	io = (stats.get("blkio_stats") or {}).get("io_service_bytes_recursive")
+	if isinstance(io, list):
+		result["read"] = sum(e.get("value", 0) for e in io if str(e.get("op", "")).lower() == "read")
+		result["write"] = sum(e.get("value", 0) for e in io if str(e.get("op", "")).lower() == "write")
+	result["pids"] = (stats.get("pids_stats") or {}).get("current")
+	return result
+
+
+def gather_container_info(owner, container):
+	"""
+	Everything /info shows about a container, as plain values.
+
+	From what is already at hand: the inspect output, its image, one reading
+	of its stats when it runs, the update cache, the schedules, and a sparse
+	listing of the host to know who shares its network or depends on it.
+	The one thing that leaves the host is checking that a release page
+	exists, so the link never leads to a 404.
+	"""
+	host_id = owner.host_id
+	attrs = container.attrs or {}
+	config = attrs.get("Config") or {}
+	host_config = attrs.get("HostConfig") or {}
+	state = attrs.get("State") or {}
+	labels = config.get("Labels") or {}
+	now = datetime.now(timezone.utc)
+	status = container.status
+	info = {
+		"name": container.name,
+		"host": None if host_registry.is_single_host() else host_registry.alias(host_id),
+		"own": is_own_container(host_id, container.id, container.name),
+		"status": status,
+		"health": (state.get("Health") or {}).get("Status"),
+		"restarts": attrs.get("RestartCount", 0),
+		# Twelve, as `docker ps` shows them: the five the buttons carry are an
+		# internal shorthand, not something to read.
+		"short_id": container.id[:12],
+		"created": _local_time(_parse_docker_time(attrs.get("Created"))),
+		"image": config.get("Image", ""),
+	}
+
+	# Since when it is in the state it is in.
+	moment = _parse_docker_time(state.get("StartedAt") if status in ("running", "paused", "restarting") else state.get("FinishedAt"))
+	if moment:
+		info["since"] = _local_time(moment)
+		info["since_seconds"] = (now - moment).total_seconds()
+	if status in ("exited", "dead"):
+		info["oom"] = bool(state.get("OOMKilled"))
+		if state.get("ExitCode") is not None:
+			info["exit_code_text"] = describe_exit_code(state.get("ExitCode"))
+	policy = host_config.get("RestartPolicy") or {}
+	if policy.get("Name") and policy["Name"] != "no":
+		info["restart_policy"] = policy["Name"] + (f":{policy['MaximumRetryCount']}" if policy.get("MaximumRetryCount") else "")
+
+	# The image: what it is, which version, and where to read about it.
+	try:
+		image = container.image
+		image_attrs = image.attrs or {}
+		info["image_digest"] = image.id.replace("sha256:", "")[:12]
+		info["image_size"] = sizeof_fmt(image_attrs.get("Size", 0)) if image_attrs.get("Size") else None
+		created = _parse_docker_time(image_attrs.get("Created"))
+		info["image_created"] = created.astimezone().strftime("%Y-%m-%d") if created else None
+		image_labels = (image_attrs.get("Config") or {}).get("Labels") or {}
+	except Exception as e:
+		debug(f"Could not read the image of {container.name}: {e}")
+		image_labels = {}
+	info["version"] = running_version(host_id, container)
+	info["release_notes_url"] = release_notes_url(image_labels.get("org.opencontainers.image.source"), info["version"])
+	info["registry_url"], info["registry_name"] = build_registry_url(info["image"])
+	platform = container_platform(container)
+	host_architecture = get_my_architecture(host_id)
+	if platform and host_architecture:
+		architecture = platform.split("/", 1)[1] if "/" in platform else platform
+		if docker_architectures.get(architecture.split("/")[0], architecture.split("/")[0]) != host_architecture:
+			info["foreign_platform"] = architecture
+			info["host_architecture"] = host_architecture
+
+	# Updates, and how the bot treats it.
+	info["has_update"] = read_container_update_status(info["image"], container.name, host_id)
+	info["update_versions"] = store.update_versions(host_id, container.name)
+	info["auto_update"] = LABEL_AUTO_UPDATE in labels
+	info["ignore_checks"] = LABEL_IGNORE_CHECK_UPDATES in labels
+	checked = store.update_checked_at(host_id, container.name)
+	if checked:
+		try:
+			info["last_check_seconds"] = (datetime.now() - datetime.fromisoformat(checked)).total_seconds()
+		except ValueError:
+			pass
+	info["schedules"] = [
+		(task.get("name", ""), task.get("cron", ""))
+		for task in schedule_manager.get_all_schedules()
+		if task.get("enabled", True) and task.get("container") == container.name
+		and (task.get("host") or host_registry.local_host_id()) == host_id]
+
+	# What it uses, and what it is allowed to.
+	if status == "running":
+		info["stats"] = container_stats(container)
+	if host_config.get("NanoCpus"):
+		info["cpu_limit"] = host_config["NanoCpus"] / 1e9
+	elif host_config.get("CpuQuota") and host_config.get("CpuPeriod"):
+		info["cpu_limit"] = host_config["CpuQuota"] / host_config["CpuPeriod"]
+	info["memory_limit"] = host_config.get("Memory") or None
+	gpus = [r for r in host_config.get("DeviceRequests") or []
+			if "gpu" in [cap for group in (r.get("Capabilities") or []) for cap in group]]
+	if gpus:
+		request = gpus[0]
+		count = get_text("info_all") if request.get("Count") == -1 else (request.get("Count") or len(request.get("DeviceIDs") or []))
+		info["gpu"] = ", ".join(str(part) for part in (request.get("Driver"), count) if part)
+	info["privileged"] = bool(host_config.get("Privileged"))
+	info["all_capabilities"] = "ALL" in [str(c).upper() for c in host_config.get("CapAdd") or []]
+
+	# Where it is reachable, and who it shares that with.
+	try:
+		neighbours = owner.client.containers.list(all=True, sparse=True)
+	except Exception as e:
+		debug(f"Could not list the neighbours of {container.name}: {e}")
+		neighbours = []
+	names = {c.id: (c.attrs.get("Names") or [c.id[:12]])[0].lstrip("/") for c in neighbours}
+	mode = host_config.get("NetworkMode") or ""
+	if mode.startswith("container:"):
+		target = mode.split(":", 1)[1]
+		info["network_of"] = next((name for cid, name in names.items() if cid.startswith(target) or target.startswith(cid)), target[:12])
+	elif mode in ("host", "none"):
+		info["network_mode"] = mode
+	else:
+		info["networks"] = [(name, settings.get("IPAddress") or settings.get("GlobalIPv6Address") or "")
+							for name, settings in ((attrs.get("NetworkSettings") or {}).get("Networks") or {}).items()]
+	refs = {f"container:{container.id}", f"container:{container.id[:12]}"}
+	info["shared_by"] = sorted(names[c.id] for c in neighbours
+								if ((c.attrs.get("HostConfig") or {}).get("NetworkMode") or "") in refs)
+	ports = []
+	bindings = ((attrs.get("NetworkSettings") or {}).get("Ports") if status == "running" else None) or host_config.get("PortBindings") or {}
+	for container_port, host_bindings in bindings.items():
+		for binding in host_bindings or []:
+			host_ip = binding.get("HostIp") or ""
+			published = binding.get("HostPort") or ""
+			entry = f"{published} → {container_port}" if host_ip in ("", "0.0.0.0", "::") else f"{host_ip}:{published} → {container_port}"
+			if entry not in ports:
+				ports.append(entry)
+	info["ports"] = ports
+
+	# What it keeps.
+	info["mounts"] = [(mount.get("Name") if mount.get("Type") == "volume" and mount.get("Name") and len(mount.get("Name")) != 64
+						else ("tmpfs" if mount.get("Type") == "tmpfs" else mount.get("Source") or mount.get("Name") or "?"),
+						mount.get("Destination", "?"), not mount.get("RW", True))
+						for mount in attrs.get("Mounts") or []]
+	# compose's short `tmpfs:` is not among the mounts.
+	listed = {target for _, target, _ in info["mounts"]}
+	info["mounts"] += [("tmpfs", target, False) for target in host_config.get("Tmpfs") or {} if target not in listed]
+
+	# What it is part of.
+	project = labels.get("com.docker.compose.project")
+	if project:
+		service = labels.get("com.docker.compose.service")
+		info["compose_project"], info["compose_service"] = project, service
+		info["depends_on"] = owner.compose_manager.get_service_dependencies(container)
+		# A sparse listing has no `.labels`: they are in its raw attributes.
+		def sparse_labels(c):
+			return c.attrs.get("Labels") or {}
+		info["dependents"] = sorted(
+			sparse_labels(c).get("com.docker.compose.service") or names.get(c.id, "")
+			for c in neighbours
+			if sparse_labels(c).get("com.docker.compose.project") == project and c.id != container.id
+			and service in [d.split(":")[0].strip() for d in
+							sparse_labels(c).get("com.docker.compose.depends_on", "").split(",") if d.strip()])
+	return info
+
+
 def info(containerId, containerName):
 	debug(f"Running command: info for container {containerName}")
 	markup = InlineKeyboardMarkup(row_width = 1)
 	x = send_message(message=get_text("obtaining_info", containerName))
-	result, possible_update = manager_for(containerId).get_info(container_id=ref_id(containerId), container_name=containerName)
+	result, possible_update, can_start = manager_for(containerId).get_info(container_id=ref_id(containerId), container_name=containerName)
 	if x:
 		delete_message(x.message_id)
 	if possible_update:
 		markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{containerId}"))
+	if can_start:
+		markup.add(InlineKeyboardButton(get_text("button_start"), callback_data=f"run|{containerId}"))
 	markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
 	send_message(message=result, reply_markup=markup)
 

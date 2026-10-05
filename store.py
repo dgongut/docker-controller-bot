@@ -545,6 +545,14 @@ def set_update_status(host_id, container_name, image, has_update, checked_at=Non
 		_flush("updates")
 
 
+def update_checked_at(host_id, container_name):
+	"""When this container's image was last checked for an update, or None."""
+	with _lock:
+		entry = _updates_document()["entries"].get(_update_key(host_id, container_name))
+		checked = entry.get("checked") if isinstance(entry, dict) else None
+		return checked if isinstance(checked, str) else None
+
+
 def update_versions(host_id, container_name):
 	"""(running, available) as last recorded, or (None, None)."""
 	with _lock:
