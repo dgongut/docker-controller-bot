@@ -1216,6 +1216,29 @@ def test_the_event_monitor_says_why_a_container_stopped_and_when_it_is_unhealthy
 		cleanup()
 
 
+def test_a_version_label_left_on_the_container_by_4x_is_neither_read_nor_kept():
+	"""
+	Seen on a real host: 4.x copied every label of the image onto the
+	containers it recreated. rosario-duckdns, on d860cc34-ls92, still carried
+	org.opencontainers.image.version=c1012ade-ls54 from then, and the RC8
+	summary said "c1012ade-ls54" on both sides of an update.
+	"""
+	_setup()
+	core, sent = _load()
+	try:
+		core.store.set("bot.extended_messages", False)
+		publish("1", 'LABEL org.opencontainers.image.version="d860cc34-ls91"')
+		container = run("duck", labels={"org.opencontainers.image.version": "c1012ade-ls54"})
+		assert core.running_version(core.host_registry.local_host_id(), container) == "d860cc34-ls91"
+		publish("2", 'LABEL org.opencontainers.image.version="d860cc34-ls92"')
+		core.update_container(_ref(core, container), container.name)
+		assert sent[-1].endswith("<code>d860cc34-ls91</code> → <b><code>d860cc34-ls92</code></b>"), sent[-1]
+		labels = fetch("duck").attrs["Config"]["Labels"]
+		assert labels.get("org.opencontainers.image.version") == "d860cc34-ls92", "la etiqueta vieja sigue pegada"
+	finally:
+		cleanup()
+
+
 def test_zz_the_registry_goes_when_the_tests_are_done():
 	"""Last by name, so the registry is there for all the others."""
 	cleanup()

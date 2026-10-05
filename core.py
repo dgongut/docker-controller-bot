@@ -36,7 +36,7 @@ from i18n import get_text, language
 from logger import debug, error, warning
 from message_queue import MessageQueue
 
-VERSION = "5.0.0_RC8"
+VERSION = "5.0.0_RC8a"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -7829,7 +7829,18 @@ def running_version(host_id, container):
 	if is_own_container(host_id, container.id, container.name):
 		return VERSION
 	config = (container.attrs or {}).get('Config') or {}
-	return image_version(config, image_repository(config.get('Image', '')))
+	reference = config.get('Image', '')
+	# From the image, not from the container's own labels: 4.x copied every
+	# label of the image onto the containers it recreated, the version among
+	# them, and those containers kept announcing the version they had then.
+	try:
+		image_config = (container.image.attrs or {}).get('Config') or {}
+	except Exception as e:
+		debug(f"Could not read the image of {container.name}: {e}")
+		image_config = None
+	if isinstance(image_config, dict):
+		return image_version(image_config, image_repository(reference))
+	return image_version(config, image_repository(reference))
 
 
 def available_version(image, reference):

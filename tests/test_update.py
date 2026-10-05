@@ -305,3 +305,14 @@ def test_a_major_upgrade_is_one_whose_first_number_goes_up():
 	# Calendar versions change their first number every January.
 	assert not major("2026.12.3", "2027.1.0")
 	assert not major("latest", "2.0") and not major(None, "2.0")
+
+
+def test_image_metadata_labels_are_left_to_the_new_image():
+	"""Whatever their value: a stale one pinned by 4.x matches no image any more."""
+	container = FakeDocker().add("duck")
+	container.attrs = {"Config": {"Labels": {
+		"org.opencontainers.image.version": "c1012ade-ls54",
+		"org.label-schema.build-date": "2024-01-01",
+		"traefik.enable": "true"}}, "HostConfig": {}}
+	labels = docker_update.extract_container_config(container)["labels"]
+	assert labels == {"traefik.enable": "true"}, labels

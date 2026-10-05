@@ -3,7 +3,7 @@ ARG BASE_IMAGE=alpine:3.24.2
 FROM ${BASE_IMAGE}
 ARG BASE_IMAGE
 
-ARG VERSION=5.0.0_RC8
+ARG VERSION=5.0.0_RC8a
 
 # Standard OCI labels. The version comes from the same VERSION that picks the
 # source tag below, so it cannot say one thing and contain another; it is

@@ -102,6 +102,9 @@ def image_repository(reference):
 	return reference[:colon] if colon > reference.rfind('/') else reference
 
 
+# Label namespaces that describe an image, and only ever come from one.
+IMAGE_METADATA_LABEL_PREFIXES = ("org.opencontainers.image.", "org.label-schema.")
+
 # Where an image says which version of its program it carries. The OCI label
 # is the standard and most images set it; label-schema is what came before.
 VERSION_LABELS = ("org.opencontainers.image.version", "org.label-schema.version")
@@ -461,6 +464,14 @@ def extract_container_config(container, tag=None):
 
 	# Drop values inherited from the old image so the new image's defaults apply
 	_strip_old_image_defaults(config, container_attrs, container)
+	# And the image's own metadata, whatever its value. A container recreated
+	# by 4.x got every label of its image copied onto it as if the user had
+	# set it, the version among them, and once the image moved on they no
+	# longer matched it: carried over on every update since, so a container
+	# on d860cc34-ls92 still said c1012ade-ls54 — to the bot, to /compose, to
+	# Portainer. Nobody sets these on a container meaning it.
+	config['labels'] = {key: value for key, value in config['labels'].items()
+						if not key.startswith(IMAGE_METADATA_LABEL_PREFIXES)}
 
 	# compose's `stop_grace_period`. An image cannot set it, so it is always
 	# the user's — and stop_container reads it on the next update.
