@@ -1726,7 +1726,7 @@ class DockerUpdateMonitor:
 		else:
 			def _auto_update_send_fn(msg):
 				return send_message_to_notification_channel(message=msg)
-		perform_container_update(reference, name, send_fn=_auto_update_send_fn)
+		update_container(reference, name, send=_auto_update_send_fn)
 
 	def _check_host(self, entry, owner, cold_cache, containers):
 		"""
@@ -4495,8 +4495,10 @@ def perform_container_update(container_id, container_name, tag=None, send_fn=Non
 	  5. If the container belongs to a Compose project, restart only the services
 	     that depend on it (directly or transitively).
 
-	All update triggers (/update, /changetag, auto-update daemon) should go
-	through this function so the behaviour is identical regardless of origin.
+	Every update ends up here, so the behaviour is identical regardless of
+	origin. The triggers themselves (/update, /changetag, the auto-update
+	daemon, /updateall) go through update_container or update_containers,
+	which decide how the update is reported.
 
 	Args:
 		container_id: Container ID to update.
@@ -4596,6 +4598,30 @@ def _perform_container_update(owner, host_id, container_id, container_name, tag,
 	return ok, result
 
 
+def update_container(ref, name, tag=None, send=None):
+	"""
+	Updates one container, reporting it the way a batch does.
+
+	One update without extended messages used to leave four messages behind:
+	the result, and the "stopped", "created" and "started" the event monitor
+	adds of its own. A batch already said all of that in one progress message
+	and one summary, so a single update is now a batch of one.
+
+	The bot's own container keeps its own messages, as it does in a batch: its
+	update recreates the bot, and a summary would never arrive. So do extended
+	messages, which are asked for precisely to see every step.
+
+	`send` takes the text and returns the sent message, or None to stay quiet:
+	the auto-update writes to the notification channel and goes silent muted.
+	"""
+	if send is None:
+		send = lambda msg: send_message(message=msg)
+	if store.get("bot.extended_messages") or is_own_container(ref_host(ref), ref_id(ref), name):
+		perform_container_update(ref, name, tag=tag, send_fn=send)
+		return
+	_update_containers_quietly([(ref, name)], tag=tag, send=send)
+
+
 def update_containers(targets):
 	"""
 	Updates several containers, as (reference, name) pairs, in the order given.
@@ -4630,15 +4656,22 @@ def _batch_progress_text(index, total, host_id, name):
 	and what. One line each, so the machine does not have to be read off the
 	front of the name — and with a single host that line is simply not there.
 	"""
-	lines = [get_text("updating_batch", index, total)]
+	# A batch of one has nothing to count: "(1/1)" only reads as noise.
+	lines = [get_text("updating_batch", index, total) if total > 1 else get_text("updating_one")]
 	if not host_registry.is_single_host():
 		lines.append(f"🖥️ <b>{host_alias(host_id)}</b>")
-	lines.append(f"🔄 <b>{html.escape(name)}</b>")
+	lines.append(f"🔄 <b>{html.escape(str(name))}</b>")
 	return "\n".join(lines)
 
 
-def _update_containers_quietly(targets):
-	"""The summarised form of update_containers."""
+def _update_containers_quietly(targets, tag=None, send=None):
+	"""
+	The summarised form of update_containers, and of update_container.
+
+	`tag` only makes sense with one target: it is the /changetag flow's.
+	"""
+	if send is None:
+		send = lambda msg: send_message(message=msg)
 	total = len(targets)
 	updated, failed = [], []
 	progress = None
@@ -4648,9 +4681,9 @@ def _update_containers_quietly(targets):
 		if progress:
 			edit_message_text(text, progress.chat.id, progress.message_id)
 		else:
-			progress = send_message(message=text)
+			progress = send(text)
 		try:
-			ok, _ = perform_container_update(ref, name, send_fn=lambda msg: None, hold_events=True)
+			ok, _ = perform_container_update(ref, name, tag=tag, send_fn=lambda msg: None, hold_events=True)
 		except Exception as e:
 			error(f"Could not update container {name}. Error: [{e}]")
 			ok = False
@@ -4661,10 +4694,15 @@ def _update_containers_quietly(targets):
 	if progress:
 		delete_message(progress.message_id, progress.chat.id)
 	# The count alone left the chat asking which ones, so they are listed too.
-	summary = get_text("updated_batch", len(updated), total) + "".join(f"\n· {line}" for line in updated)
-	if failed:
-		summary += get_text("updated_batch_failed") + "".join(f"\n· {line}" for line in failed)
-	send_message(message=summary)
+	if total == 1:
+		# No counts for a batch of one: it worked or it did not.
+		head = get_text("updated_one") if updated else get_text("updated_one_failed")
+		summary = head + "".join(f"\n· {line}" for line in updated + failed)
+	else:
+		summary = get_text("updated_batch", len(updated), total) + "".join(f"\n· {line}" for line in updated)
+		if failed:
+			summary += get_text("updated_batch_failed") + "".join(f"\n· {line}" for line in failed)
+	send(summary)
 
 def run_compose_project(project_name, host_id=None):
 	"""Starts a complete Docker Compose project respecting dependency order."""

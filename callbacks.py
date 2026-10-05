@@ -113,7 +113,7 @@ def cb_checkUpdate(ctx):
 	params=('containerId',),
 )
 def cb_update(ctx):
-	core.perform_container_update(ctx.containerId, ctx.containerName)
+	core.update_container(ctx.containerId, ctx.containerName)
 
 @callback(
 	name='updateAll',
@@ -213,7 +213,7 @@ def cb_changeTag(ctx):
 	ctx.containerName = core.get_container_name(ctx.chatId, ctx.messageId, ctx.containerId)
 	if not ctx.containerName:
 		ctx.containerName = "Unknown"
-	core.perform_container_update(ctx.containerId, ctx.containerName, tag=ctx.tag)
+	core.update_container(ctx.containerId, ctx.containerName, tag=ctx.tag)
 
 @callback(
 	name='deleteSchedule',

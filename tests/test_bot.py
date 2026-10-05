@@ -4817,9 +4817,55 @@ def test_the_bot_updates_itself_last_and_outside_the_summary():
 	try:
 		dcb.update_containers(_targets("docker-controller-bot", "nginx"))
 		assert calls == [("nginx", True, False), ("docker-controller-bot", False, True)], calls
-		assert sent[-1] == i18n.get_text("updated_batch", 1, 1) + "\n· <b>nginx</b>", sent
+		assert sent[-1] == i18n.get_text("updated_one") + "\n· <b>nginx</b>", sent
 	finally:
 		restore()
+
+
+def test_a_single_update_reads_like_a_batch_of_one():
+	"""
+	One update used to leave its result plus a "stopped", "created" and
+	"started" behind. It is a batch now: one progress message, without a
+	"(1/1)" to count, and a summary.
+	"""
+	calls, sent, edited, deleted, restore = _batch_stubs({})
+	try:
+		ref, name = _targets("nginx")[0]
+		dcb.update_container(ref, name)
+		assert calls == [("nginx", True, False)], calls
+		assert sent[0].split("\n")[0] == i18n.get_text("updating_one"), sent
+		assert deleted == [1]
+		assert sent[-1] == i18n.get_text("updated_one") + "\n· <b>nginx</b>", sent
+	finally:
+		restore()
+	calls, sent, edited, deleted, restore = _batch_stubs({"nginx": False})
+	try:
+		dcb.update_container(ref, name)
+		assert sent[-1] == i18n.get_text("updated_one_failed") + "\n· <b>nginx</b>", sent
+	finally:
+		restore()
+
+
+def test_a_single_update_of_the_bot_or_with_extended_messages_keeps_its_messages():
+	"""The bot's summary would never arrive, and extended messages ask for every step."""
+	calls, sent, edited, deleted, restore = _batch_stubs({}, own=("docker-controller-bot",))
+	try:
+		ref, name = _targets("docker-controller-bot")[0]
+		dcb.update_container(ref, name)
+		assert calls == [("docker-controller-bot", False, False)], calls
+		assert sent == [], sent
+	finally:
+		restore()
+	calls, sent, edited, deleted, restore = _batch_stubs({}, extended=True)
+	try:
+		ref, name = _targets("nginx")[0]
+		dcb.update_container(ref, name)
+		assert calls == [("nginx", False, False)], calls
+		assert sent == [], sent
+	finally:
+		restore()
+
+
 
 
 def test_an_update_holds_its_events_only_while_it_runs():
