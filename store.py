@@ -527,14 +527,32 @@ def update_status(host_id, container_name, image):
 		return value if isinstance(value, bool) else None
 
 
-def set_update_status(host_id, container_name, image, has_update, checked_at=None):
-	"""Records the outcome of an update check."""
+def set_update_status(host_id, container_name, image, has_update, checked_at=None, versions=None):
+	"""
+	Records the outcome of an update check.
+
+	`versions` is (running, available), either of them None when the image
+	does not say: kept so every message about this update can say what it
+	goes from and to without pulling anything again.
+	"""
 	with _lock:
 		entry = {"image": image, "update": bool(has_update)}
 		if checked_at is not None:
 			entry["checked"] = checked_at
+		if versions and any(versions):
+			entry["versions"] = [versions[0], versions[1]]
 		_updates_document()["entries"][_update_key(host_id, container_name)] = entry
 		_flush("updates")
+
+
+def update_versions(host_id, container_name):
+	"""(running, available) as last recorded, or (None, None)."""
+	with _lock:
+		entry = _updates_document()["entries"].get(_update_key(host_id, container_name))
+		versions = entry.get("versions") if isinstance(entry, dict) else None
+		if not isinstance(versions, list) or len(versions) != 2:
+			return None, None
+		return tuple(v if isinstance(v, str) and v else None for v in versions)
 
 
 def forget_update_status(host_id, container_name):

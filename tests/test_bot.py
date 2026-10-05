@@ -3402,6 +3402,73 @@ def test_the_more_info_link_points_somewhere_that_exists():
 		assert dcb.build_registry_url(image)[0] == expected, (image, dcb.build_registry_url(image))
 
 
+def test_versions_read_old_to_new_and_escape_what_the_image_wrote():
+	assert dcb.format_versions("1.43.3", "1.43.4") == "<code>1.43.3</code> → <b><code>1.43.4</code></b>"
+	# A rebuild of the same version, or one side unknown: what is known.
+	assert dcb.format_versions("1.31.6", "1.31.6") == "<code>1.31.6</code>"
+	assert dcb.format_versions("5.0.0_RC7", None) == "<code>5.0.0_RC7</code>"
+	assert dcb.format_versions(None, None) == "" and dcb.versions_suffix(None, None) == ""
+	assert "&lt;b&gt;" in dcb.format_versions("<b>", "2"), "una etiqueta es texto de la imagen"
+
+
+def test_the_bot_knows_its_own_version_without_a_label():
+	"""Published images before RC8 carry no label, and the bot still knows what it runs."""
+	bot = MagicMock(id="a" * 64)
+	bot.name = "docker-controller-bot"
+	bot.attrs = {"Config": {"Image": "dgongut/docker-controller-bot:latest", "Labels": {}}}
+	original = dcb.is_own_container
+	dcb.is_own_container = lambda host_id=None, container_id=None, container_name=None: True
+	try:
+		assert dcb.running_version("h_local", bot) == dcb.VERSION
+	finally:
+		dcb.is_own_container = original
+
+
+def test_the_update_list_says_what_each_one_goes_to_and_fits_in_a_message():
+	"""Telegram refuses a message over 4096 characters; forty updates did not fit."""
+	pairs = [(dcb.make_ref("h_local", f"{i:05d}"), f"servicio-{i}") for i in range(200)]
+	original = dcb.store.update_versions
+	dcb.store.update_versions = lambda host_id, name: ("1.0.0", "1.0.1")
+	try:
+		text = dcb.available_updates_text(pairs[:2])
+		assert text.startswith(i18n.get_text("available_updates", 2)), text
+		assert "· <b>servicio-0</b>  <code>1.0.0</code> → <b><code>1.0.1</code></b>" in text, text
+		long = dcb.available_updates_text(pairs)
+		assert len(long) < 4096, len(long)
+		assert long.rstrip().endswith(")") and "· … (+" in long, long[-80:]
+		_assert_telegram_html(long, "lista larga")
+	finally:
+		dcb.store.update_versions = original
+
+
+def test_the_update_cache_keeps_the_versions_until_the_container_is_up_to_date():
+	store = dcb.store
+	store.set_update_status("h_local", "plex", "plex:latest", True, versions=("1.43.3", "1.43.4"))
+	assert store.update_versions("h_local", "plex") == ("1.43.3", "1.43.4")
+	dcb.save_container_update_status("plex:latest", "plex", False, "h_local", ("1.43.3", "1.43.4"))
+	assert store.update_versions("h_local", "plex") == (None, None), "al día no hay versión pendiente"
+	assert store.update_versions("h_local", "nadie") == (None, None)
+
+
+def test_release_notes_link_to_the_release_or_to_the_list():
+	answers = {"https://github.com/home-assistant/core/releases/tag/2026.9.4": 200,
+				"https://github.com/immich-app/immich/releases/tag/3.2.4": 404,
+				"https://github.com/immich-app/immich/releases/tag/v3.2.4": 200}
+	original = dcb.requests.head
+	dcb.requests.head = lambda url, **kwargs: MagicMock(status_code=answers.get(url, 404))
+	try:
+		assert dcb.release_notes_url("https://github.com/home-assistant/core", "2026.9.4") == \
+			"https://github.com/home-assistant/core/releases/tag/2026.9.4"
+		assert dcb.release_notes_url("https://github.com/immich-app/immich.git", "3.2.4") == \
+			"https://github.com/immich-app/immich/releases/tag/v3.2.4"
+		assert dcb.release_notes_url("https://github.com/grafana/grafana", "12.0.0") == \
+			"https://github.com/grafana/grafana/releases"
+		assert dcb.release_notes_url("https://gitlab.com/x/y", "1.0") is None
+		assert dcb.release_notes_url(None, "1.0") is None
+	finally:
+		dcb.requests.head = original
+
+
 def test_registry_tags_are_offered_newest_first():
 	"""
 	Alphabetical is what a registry hands over, and its first twenty were

@@ -27,7 +27,7 @@ from core import (
 	run, save_container_refs, save_update_data,
 	send_message, send_settings_menu,
 	send_ports_menu, show_schedule_menu,
-	stop, pending_updates,
+	stop, pending_updates, available_updates_text,
 )
 
 
@@ -125,7 +125,7 @@ def cmd_updateall(user_id=None, chat_id=None, container_id=None, container_name=
 	# ended up naming its hosts only from the second tap onwards.
 	markup = build_generic_keyboard(containersToUpdate, set(), None, "Update",
 									get_text("button_update"), get_text("button_update_all"))
-	message = send_message(message=get_text("available_updates", len(containersToUpdate)), reply_markup=markup)
+	message = send_message(message=available_updates_text(containersToUpdate), reply_markup=markup)
 	if message:
 		save_update_data(message.chat.id, message.message_id, containersToUpdate)
 		# Pre-populate the name cache so the callback parser can resolve names

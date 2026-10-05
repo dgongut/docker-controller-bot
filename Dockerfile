@@ -1,6 +1,6 @@
 FROM alpine:3.24.2
 
-ARG VERSION=5.0.0_RC7
+ARG VERSION=5.0.0_RC8
 
 # Standard OCI labels. The version comes from the same VERSION that picks the
 # source tag below, so it cannot say one thing and contain another; it is

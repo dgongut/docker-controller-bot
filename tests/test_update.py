@@ -277,3 +277,31 @@ def test_the_repository_of_an_image_keeps_the_registrys_port():
 	}
 	for reference, expected in cases.items():
 		assert docker_update.image_repository(reference) == expected, (reference, docker_update.image_repository(reference))
+
+
+def test_an_image_says_its_version_by_label_or_by_its_own_variable():
+	"""
+	The OCI label first — most images set it. Docker's official images do
+	not, and say it in NGINX_VERSION or PG_VERSION; but only the variable
+	named after the image counts, not GOSU_VERSION or NODE_VERSION.
+	"""
+	version = docker_update.image_version
+	assert version({"Labels": {"org.opencontainers.image.version": "1.43.4-ls326"}}) == "1.43.4-ls326"
+	assert version({"Labels": {"org.label-schema.version": "2.1"}}) == "2.1"
+	assert version({"Env": ["NJS_VERSION=1.0.1", "NGINX_VERSION=1.31.6"]}, "nginx") == "1.31.6"
+	assert version({"Env": ["GOSU_VERSION=1.19", "PG_VERSION=16.15-1"]}, "library/postgres") == "16.15-1"
+	assert version({"Env": ["NODE_VERSION=24.21.0"]}, "immich-app/immich-server") is None
+	assert version({"Env": ["NGINX_VERSION=1.31.6"]}) is None, "sin repositorio no se adivina"
+	assert version({}) is None and version(None) is None
+	assert version({"Labels": {"org.opencontainers.image.version": "  "}}) is None
+
+
+def test_a_major_upgrade_is_one_whose_first_number_goes_up():
+	major = docker_update.is_major_upgrade
+	assert major("1.43.3", "2.0.0") and major("v0.107.79", "v1.0.0")
+	assert major("5.2.4_v2.0.15-ls479", "6.0.0-ls480")
+	assert not major("1.43.3", "1.44.0") and not major("2.0", "2.0")
+	assert not major("2.0", "1.9"), "bajar no es subir"
+	# Calendar versions change their first number every January.
+	assert not major("2026.12.3", "2027.1.0")
+	assert not major("latest", "2.0") and not major(None, "2.0")

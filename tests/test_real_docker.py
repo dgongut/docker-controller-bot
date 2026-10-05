@@ -598,7 +598,10 @@ def test_a_single_update_through_the_bot_ends_in_its_summary():
 		container = run("single")
 		publish("2")
 		core.update_container(_ref(core, container), container.name)
-		assert sent[-1] == core.get_text("updated_one") + f"\n· <b>{container.name}</b>", sent
+		# The test image is called `app` and sets APP_VERSION: the variable
+		# named after the image, which is how official images say it.
+		assert sent[-1] == (core.get_text("updated_one") + f"\n· <b>{container.name}</b>"
+							"  <code>1</code> → <b><code>2</code></b>"), sent
 		assert fetch("single").id != container.id
 	finally:
 		cleanup()
@@ -1101,6 +1104,63 @@ def test_the_compose_of_every_monstrous_service_is_a_valid_file():
 				invalid[name] = done.stderr.strip() + "\n" + document
 		assert not invalid, "\n\n".join(f"{n}: {e}" for n, e in invalid.items())
 	finally:
+		cleanup()
+
+
+def _versioned(version):
+	return (f'LABEL org.opencontainers.image.version="{version}" '
+			f'org.opencontainers.image.source="https://github.com/dgongut/docker-controller-bot"')
+
+
+def test_an_update_says_which_version_it_goes_from_and_to():
+	"""
+	The check, the comparison before confirming, and the summary after: all
+	three by the number the image declares, read from what was pulled anyway.
+	"""
+	_setup()
+	core, sent = _load()
+	try:
+		core.store.set("bot.extended_messages", False)
+		publish("1", _versioned("1.4.2"))
+		container = run("versioned")
+		ref = _ref(core, container)
+		publish("2", _versioned("2.0.0"))
+
+		core.manager_for(ref).force_check_update(core.ref_id(ref))
+		assert core.store.update_versions(core.ref_host(ref), container.name) == ("1.4.2", "2.0.0")
+		announced = [m for m in sent if m and core.get_text("available_update", container.name) in m]
+		assert announced and "<code>1.4.2</code> → <b><code>2.0.0</code></b>" in announced[-1], sent
+
+		comparison = core.get_image_comparison(ref, container.name)
+		assert (comparison["current_version"], comparison["new_version"]) == ("1.4.2", "2.0.0"), comparison
+		notes = core.comparison_version_notes(comparison)
+		assert core.get_text("update_major_warning") in notes, notes
+		assert comparison["release_notes_url"].startswith("https://github.com/dgongut/docker-controller-bot/releases")
+
+		assert "1.4.2" in core.available_updates_text([(ref, container.name)])
+
+		sent.clear()
+		core.update_container(ref, container.name)
+		assert sent[-1] == (core.get_text("updated_one") + f"\n· <b>{container.name}</b>"
+							"  <code>1.4.2</code> → <b><code>2.0.0</code></b>"), sent[-1]
+	finally:
+		cleanup()
+
+
+def test_with_extended_messages_the_result_says_the_versions_too():
+	_setup()
+	core, sent = _load()
+	try:
+		core.store.set("bot.extended_messages", True)
+		publish("1", _versioned("3.1"))
+		container = run("versioned-ext")
+		publish("2", _versioned("3.2"))
+		core.update_container(_ref(core, container), container.name)
+		expected = core.get_text("updated_container_versions", container.name,
+									"<code>3.1</code> → <b><code>3.2</code></b>")
+		assert expected in sent, sent
+	finally:
+		core.store.set("bot.extended_messages", False)
 		cleanup()
 
 

@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 from telebot.types import InlineKeyboardButton
 from telebot.types import InlineKeyboardMarkup
 from compose_generator import ComposeGenerator
-from docker_update import container_platform, extract_container_config, image_repository, perform_update, stop_container
+from docker_update import container_platform, extract_container_config, image_repository, image_version, is_major_upgrade, perform_update, stop_container
 from docker_compose_manager import (
     ComposeDetector,
     ComposeProjectManager
@@ -36,7 +36,7 @@ from i18n import get_text, language
 from logger import debug, error, warning
 from message_queue import MessageQueue
 
-VERSION = "5.0.0_RC7"
+VERSION = "5.0.0_RC8"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -585,6 +585,9 @@ class DockerManager:
 				else:
 					container_environment = {'CONTAINER_NAME': container_name, 'TAG': tag}
 				container_volumes = {'/var/run/docker.sock': {'bind': '/var/run/docker.sock', 'mode': 'rw'}}
+				# The version it is leaving, for the bot that comes back to say
+				# what it updated from: it is the only one that will know.
+				store.state_set("self_update_from", VERSION)
 				new_container = local.containers.run(
 					UPDATER_IMAGE,
 					name=UPDATER_CONTAINER_NAME,
@@ -664,6 +667,7 @@ class DockerManager:
 		container = None
 		image_with_tag = ''
 		has_update = None
+		versions = None
 		try:
 			container = self.client.containers.get(container_id)
 			container_attrs = container.attrs.get('Config', {})
@@ -719,8 +723,9 @@ class DockerManager:
 				markup = InlineKeyboardMarkup(row_width = 1)
 				markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{container_ref(self.host_id, container)}"))
 				has_update = True
+				versions = (running_version(self.host_id, container), available_version(remote_image, image_with_tag))
 				sent_message = send_message(
-					message=f'{get_text("available_update", container.name)}{host_suffix(self.host_id)}',
+					message=f'{get_text("available_update", container.name)}{versions_suffix(*versions)}{host_suffix(self.host_id)}',
 					reply_markup=markup)
 				# Save container cache for this notification
 				if sent_message:
@@ -738,7 +743,7 @@ class DockerManager:
 					pass
 
 		if image_with_tag and container is not None and getattr(container, 'name', None):
-			save_container_update_status(image_with_tag, container.name, has_update, self.host_id)
+			save_container_update_status(image_with_tag, container.name, has_update, self.host_id, versions)
 
 	def delete(self, container_id, container_name):
 		try:
@@ -1726,7 +1731,7 @@ class DockerUpdateMonitor:
 		# both have to agree on what a button says.
 		markup = build_generic_keyboard(all_updates, set(), None, "Update",
 										get_text("button_update"), get_text("button_update_all"))
-		message = send_message(message=get_text("available_updates", len(all_updates)), reply_markup=markup)
+		message = send_message(message=available_updates_text(all_updates), reply_markup=markup)
 		if message:
 			save_update_data(message.chat.id, message.message_id, all_updates)
 			# The name cache the callback parser reads, written from the
@@ -1791,6 +1796,7 @@ class DockerUpdateMonitor:
 
 			container_attrs = container.attrs['Config']
 			image_with_tag = container_attrs['Image']
+			versions = None
 			try:
 				local_image = container.image.id
 				# Per image and platform: two containers on the same tag may run
@@ -1818,6 +1824,7 @@ class DockerUpdateMonitor:
 						continue
 					old_has_update = read_container_update_status(image_with_tag, container.name, host_id)
 					has_update = True
+					versions = (running_version(host_id, container), available_version(remote_image, image_with_tag))
 					# Keep the pulled image cached locally so the subsequent update
 					# operation does not need to re-download it.
 					debug(f"{container.name} update detected! Keeping downloaded image [{remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}] for upcoming update")
@@ -1827,13 +1834,18 @@ class DockerUpdateMonitor:
 
 					if old_has_update is True:
 						debug("Update already notified")
+						# Not announced again, but a newer release than the one
+						# announced is what the update will now bring, and what
+						# every later message about it has to say.
+						if store.update_versions(host_id, container.name) != versions:
+							save_container_update_status(image_with_tag, container.name, has_update, host_id, versions)
 						continue
 
 					if is_own_container(host_id, container.id, container.name):
 						markup = InlineKeyboardMarkup(row_width = 1)
 						markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{container_ref(host_id, container)}"))
 						if not is_muted() and not cold_cache:
-							sent_message = send_message(message=f'{get_text("available_update", container.name)}{host_suffix(host_id)}', reply_markup=markup)
+							sent_message = send_message(message=f'{get_text("available_update", container.name)}{versions_suffix(*versions)}{host_suffix(host_id)}', reply_markup=markup)
 							# Save container cache for this notification
 							if sent_message:
 								save_container_cache(sent_message.chat.id, sent_message.message_id, [container], host_id)
@@ -1843,7 +1855,7 @@ class DockerUpdateMonitor:
 						# every cycle. Other containers reach the equivalent save below
 						# via the grouped-updates flow; the bot's self-update has its
 						# own dedicated message and would otherwise skip it.
-						save_container_update_status(image_with_tag, container.name, has_update, host_id)
+						save_container_update_status(image_with_tag, container.name, has_update, host_id, versions)
 						continue
 
 					should_notify = not cold_cache
@@ -1856,7 +1868,7 @@ class DockerUpdateMonitor:
 				# announced for a new one, and announce it again.
 				error(f"Could not check update: [{e}]")
 				continue
-			save_container_update_status(image_with_tag, container.name, has_update, host_id)
+			save_container_update_status(image_with_tag, container.name, has_update, host_id, versions)
 
 		return grouped_updates_containers, should_notify
 
@@ -4618,6 +4630,8 @@ def perform_container_update(container_id, container_name, tag=None, send_fn=Non
 	except Exception as e:
 		debug(f"Could not list what was running before updating {container_name}: {e}")
 
+	old_version = running_version(host_id, container_obj) if container_obj is not None else None
+
 	if container_obj is not None and bot_shares_namespace_with(owner, container_obj):
 		warning(f"Not updating {container_name}: the bot shares its namespace")
 		result = get_text("error_update_bot_shares_namespace", container_name)
@@ -4626,20 +4640,29 @@ def perform_container_update(container_id, container_name, tag=None, send_fn=Non
 
 	if not hold_events:
 		return _perform_container_update(owner, host_id, container_id, container_name, tag, send_fn,
-										project_name, updated_service_name, old_parent_id, False, running_before)
+										project_name, updated_service_name, old_parent_id, False, running_before,
+										old_version)
 	# The old container is renamed before the new one exists, and a rollback
 	# can start it again under that name, so both are held.
 	names = [container_name, f"{container_name}_old"]
 	hold_container_events(host_id, names)
 	try:
 		return _perform_container_update(owner, host_id, container_id, container_name, tag, send_fn,
-										project_name, updated_service_name, old_parent_id, True, running_before)
+										project_name, updated_service_name, old_parent_id, True, running_before,
+										old_version)
 	finally:
 		release_container_events(host_id, names)
 
 
+# What the last update of each container went from and to, for the batch
+# summary to list: perform_container_update answers (ok, result) to callers
+# that only want that, and the summary is the one that wants more.
+_last_update_versions = {}
+
+
 def _perform_container_update(owner, host_id, container_id, container_name, tag, send_fn,
-							project_name, updated_service_name, old_parent_id, hold_events, running_before=None):
+							project_name, updated_service_name, old_parent_id, hold_events, running_before=None,
+							old_version=None):
 	"""The body of perform_container_update, once the Compose info is captured."""
 	# Send the initial "updating" progress message
 	# Both the progress line and the result say which machine, the same as the
@@ -4661,20 +4684,29 @@ def _perform_container_update(owner, host_id, container_id, container_name, tag,
 	# una cláusula pegada después de eso queda mal. La comparación es contra
 	# el mismo get_text que produce el éxito, así que no se desincroniza.
 	ok = result == get_text("updated_container", container_name)
-	if ok:
-		send_fn(f"{result}{host_suffix(host_id)}")
-	else:
-		send_fn(f"{label}{result}")
 
-	# Restart dependents if applicable. Resolve the freshly recreated container
-	# by name (Docker enforces unique container names, and perform_update keeps
-	# the original name) so dependents can wait on its healthcheck when their
-	# compose `depends_on` declared `condition: service_healthy`.
+	# Resolve the freshly recreated container by name (Docker enforces unique
+	# container names, and perform_update keeps the original name): it says
+	# which version the update landed on, and dependents can wait on its
+	# healthcheck when their compose `depends_on` declared `service_healthy`.
 	new_parent_container = None
 	try:
 		new_parent_container = owner.client.containers.get(container_name)
 	except Exception as e:
 		debug(f"Could not fetch new container after update for {container_name}: {e}")
+
+	if ok:
+		new_version = running_version(host_id, new_parent_container) if new_parent_container is not None else None
+		if hold_events:
+			# Only a batch reads it back, and pops what it reads.
+			_last_update_versions[(host_id, container_name)] = (old_version, new_version)
+		versions = format_versions(old_version, new_version)
+		shown = get_text("updated_container_versions", container_name, versions) if versions else result
+		send_fn(f"{shown}{host_suffix(host_id)}")
+	else:
+		send_fn(f"{label}{result}")
+
+	# Restart dependents if applicable.
 	if project_name and updated_service_name:
 		restart_dependents_after_update(
 			project_name,
@@ -4827,7 +4859,8 @@ def _update_containers_quietly(targets, tag=None, send=None):
 		except Exception as e:
 			error(f"Could not update container {name}. Error: [{e}]")
 			ok = False
-		(updated if ok else failed).append(f"<b>{name}</b>{host_suffix(host_id)}")
+		versions = _last_update_versions.pop((host_id, name), (None, None)) if ok else (None, None)
+		(updated if ok else failed).append(f"<b>{name}</b>{versions_suffix(*versions)}{host_suffix(host_id)}")
 
 	# Deleted and sent anew rather than edited into the summary: an edit makes
 	# no sound, and the summary is the one message of the batch worth hearing.
@@ -5131,7 +5164,7 @@ def confirm_change_tag(containerId, containerName, tag):
 		message = f"""{host_label(ref_host(containerId))}📦 <b>{containerName}</b>
 
 ℹ️ <b>Información:</b>
-   {get_text('update_tag')}: <code>{comparison['current_tag']}</code> → <code>{comparison['new_tag']}</code>
+   {get_text('update_tag')}: <code>{comparison['current_tag']}</code> → <code>{comparison['new_tag']}</code>{comparison_version_line(comparison['current_version'])}
    {get_text('update_created')}: {comparison['current_date']}
    {get_text('update_size')}: {comparison['current_size']}
    {get_text('update_digest')}: <code>{comparison['current_digest']}</code>
@@ -5156,18 +5189,20 @@ def confirm_change_tag(containerId, containerName, tag):
 		message = f"""{host_label(ref_host(containerId))}📦 <b>{containerName}</b>
 
 📌 <b>{get_text('update_current_image')}:</b>
-   {get_text('update_tag')}: <code>{comparison['current_tag']}</code>
+   {get_text('update_tag')}: <code>{comparison['current_tag']}</code>{comparison_version_line(comparison['current_version'])}
    {get_text('update_created')}: {comparison['current_date']}
    {get_text('update_size')}: {comparison['current_size']}
    {get_text('update_digest')}: <code>{comparison['current_digest']}</code>
 
 🆕 <b>{get_text('update_new_image')}:</b>
-   {get_text('update_tag')}: <code>{comparison['new_tag']}</code>
+   {get_text('update_tag')}: <code>{comparison['new_tag']}</code>{comparison_version_line(comparison['new_version'])}
    {get_text('update_created')}: {comparison['new_date']}
    {get_text('update_size')}: {comparison['new_size']}
    {get_text('update_digest')}: <code>{comparison['new_digest']}</code>
 
 📊 <b>{get_text('update_changes')}:</b>{changes_text}"""
+
+	message += comparison_version_notes(comparison)
 
 	if comparison['description']:
 		message += f"\n\n📝 <b>{get_text('update_description')}:</b>\n{comparison['description']}"
@@ -5304,6 +5339,11 @@ def get_image_comparison(containerId, containerName, new_tag=None):
 		# Build registry URL
 		registry_url, registry_name = build_registry_url(tag_to_pull)
 
+		# What each one is, by the number its image declares.
+		current_version = running_version(ref_host(containerId), container)
+		new_version = available_version(new_image, tag_to_pull)
+		new_labels = ((new_image.attrs or {}).get('Config') or {}).get('Labels') or {}
+
 		# Keep the pulled image cached locally so that the subsequent update
 		# (or change-tag) operation does not need to re-download it.
 
@@ -5321,11 +5361,69 @@ def get_image_comparison(containerId, containerName, new_tag=None):
 			'days_diff': days_diff,
 			'description': description,
 			'registry_url': registry_url,
-			'registry_name': registry_name
+			'registry_name': registry_name,
+			'current_version': current_version,
+			'new_version': new_version,
+			'release_notes_url': release_notes_url(new_labels.get('org.opencontainers.image.source'), new_version),
 		}
 	except Exception as e:
 		error(f"Error getting update comparison for {containerName}: {e}")
 		return None
+
+def comparison_version_line(version):
+	"""The version line under a tag in the comparison, or nothing."""
+	if not version:
+		return ""
+	return f"\n   {get_text('update_version')}: <code>{html.escape(version)}</code>"
+
+
+def comparison_version_notes(comparison):
+	"""
+	What the comparison says about the versions, under its changes: the step
+	itself, a warning when the major version goes up — where the breaking
+	changes are — and where to read what is new.
+	"""
+	old, new = comparison.get('current_version'), comparison.get('new_version')
+	notes = ""
+	if old and new and old != new:
+		notes += f"\n   {get_text('update_version')}: {format_versions(old, new)}"
+		if is_major_upgrade(old, new):
+			notes += f"\n\n{get_text('update_major_warning')}"
+	if comparison.get('release_notes_url'):
+		notes += (f"\n\n📋 <a href=\"{html.escape(comparison['release_notes_url'], quote=True)}\">"
+				f"{get_text('update_release_notes', html.escape(new or ''))}</a>")
+	return notes
+
+
+def release_notes_url(source, version):
+	"""
+	The page of a release on GitHub, from the repository an image names as its
+	source; or its list of releases when the version has no page of its own;
+	or None when the source is not on GitHub.
+
+	Checked, because the tag is not always the version as the image writes
+	it: `3.2.4` may be released as `v3.2.4`, and a link that 404s is worse
+	than the list.
+	"""
+	match = re.match(r"https?://github\.com/([^/\s]+)/([^/\s#?]+)", str(source or ""))
+	if not match:
+		return None
+	owner, repository = match.group(1), match.group(2)
+	if repository.endswith(".git"):
+		repository = repository[:-len(".git")]
+	base = f"https://github.com/{owner}/{repository}"
+	if version:
+		candidates = [version] + ([version[1:]] if version.startswith("v") else [f"v{version}"])
+		for tag in candidates:
+			url = f"{base}/releases/tag/{tag}"
+			try:
+				if requests.head(url, timeout=5, allow_redirects=True).status_code == 200:
+					return url
+			except Exception as e:
+				debug(f"Could not check {url}: {e}")
+				break
+	return f"{base}/releases"
+
 
 def sanitize_dockerhub_description(text):
 	"""
@@ -5524,18 +5622,20 @@ def confirm_update(containerId, containerName):
 	message = f"""{host_label(ref_host(containerId))}📦 <b>{containerName}</b>
 
 📌 <b>{get_text('update_current_image')}:</b>
-   {get_text('update_tag')}: <code>{comparison['current_tag']}</code>
+   {get_text('update_tag')}: <code>{comparison['current_tag']}</code>{comparison_version_line(comparison['current_version'])}
    {get_text('update_created')}: {comparison['current_date']}
    {get_text('update_size')}: {comparison['current_size']}
    {get_text('update_digest')}: <code>{comparison['current_digest']}</code>
 
 🆕 <b>{get_text('update_new_image')}:</b>
-   {get_text('update_tag')}: <code>{comparison['new_tag']}</code>
+   {get_text('update_tag')}: <code>{comparison['new_tag']}</code>{comparison_version_line(comparison['new_version'])}
    {get_text('update_created')}: {comparison['new_date']}
    {get_text('update_size')}: {comparison['new_size']}
    {get_text('update_digest')}: <code>{comparison['new_digest']}</code>
 
 📊 <b>{get_text('update_changes')}:</b>{changes_text}"""
+
+	message += comparison_version_notes(comparison)
 
 	if comparison['description']:
 		message += f"\n\n📝 <b>{get_text('update_description')}:</b>\n{comparison['description']}"
@@ -7517,7 +7617,7 @@ def _schedule_cache_sweep():
 	timer.daemon = True
 	timer.start()
 
-def save_container_update_status(image_with_tag, container_name, has_update, host_id=None):
+def save_container_update_status(image_with_tag, container_name, has_update, host_id=None, versions=None):
 	"""
 	Records whether `container_name` has a pending update.
 
@@ -7535,6 +7635,7 @@ def save_container_update_status(image_with_tag, container_name, has_update, hos
 		image_with_tag,
 		has_update,
 		checked_at=datetime.now().isoformat(timespec="seconds"),
+		versions=versions if has_update else None,
 	)
 
 def read_container_update_status(image_with_tag, container_name, host_id=None):
@@ -7546,6 +7647,74 @@ def read_container_update_status(image_with_tag, container_name, host_id=None):
 	change makes what was cached say nothing about what runs now.
 	"""
 	return store.update_status(host_id or LOCAL_HOST_ID, container_name, image_with_tag)
+
+# Telegram refuses a message over 4096 characters. A long list of updates
+# keeps its header and as many lines as fit, and says how many it left out.
+AVAILABLE_UPDATES_TEXT_BUDGET = 3500
+
+
+def available_updates_text(pairs):
+	"""
+	The announcement of several updates: how many, and what each one goes
+	from and to — the buttons below only have room for the names.
+	"""
+	header = get_text("available_updates", len(pairs))
+	lines = []
+	used = len(header)
+	for index, (ref, name) in enumerate(pairs):
+		host_id = ref_host(ref)
+		line = f"· <b>{html.escape(str(name))}</b>{versions_suffix(*store.update_versions(host_id, name))}{host_suffix(host_id)}"
+		if used + len(line) + 1 > AVAILABLE_UPDATES_TEXT_BUDGET:
+			lines.append(f"· … (+{len(pairs) - index})")
+			break
+		lines.append(line)
+		used += len(line) + 1
+	return "\n".join([header, ""] + lines) if lines else header
+
+
+def running_version(host_id, container):
+	"""
+	The version a container runs, or None when its image does not say.
+
+	The bot knows its own without asking: the images published before it
+	carried the label do not have it, and it would otherwise announce its own
+	update without the number it is updating from.
+	"""
+	if is_own_container(host_id, container.id, container.name):
+		return VERSION
+	config = (container.attrs or {}).get('Config') or {}
+	return image_version(config, image_repository(config.get('Image', '')))
+
+
+def available_version(image, reference):
+	"""The version a pulled image carries, or None."""
+	try:
+		config = (image.attrs or {}).get('Config') or {}
+	except Exception:
+		return None
+	return image_version(config, image_repository(reference))
+
+
+def format_versions(old, new):
+	"""
+	`old → new` for a message, or as much of it as is known; "" for nothing.
+
+	The same version on both sides is a rebuild of it — nginx:latest again
+	with a patched base — and reads as just that version.
+	"""
+	old, new = (html.escape(v) if v else None for v in (old, new))
+	if old and new and old != new:
+		return f"<code>{old}</code> → <b><code>{new}</code></b>"
+	if old or new:
+		return f"<code>{old or new}</code>"
+	return ""
+
+
+def versions_suffix(old, new):
+	"""format_versions, set off from the name it follows."""
+	text = format_versions(old, new)
+	return f"  {text}" if text else ""
+
 
 def update_status_text(has_update):
 	"""
@@ -8155,8 +8324,12 @@ def delete_updater():
 			stop_container(container)
 			container.remove()
 			local_manager().client.images.remove(updater_image)
-			send_message(message=f'{get_text("updated_container", own_container_name())}'
-								f'{host_suffix(host_registry.local_host_id())}')
+			previous = store.state_get("self_update_from")
+			store.state_set("self_update_from", None)
+			versions = format_versions(previous, VERSION) if previous and previous != VERSION else ""
+			name = own_container_name()
+			text = get_text("updated_container_versions", name, versions) if versions else get_text("updated_container", name)
+			send_message(message=f'{text}{host_suffix(host_registry.local_host_id())}')
 		except Exception as e:
 			error(f"Could not delete container {UPDATER_CONTAINER_NAME}. Error: [{e}]")
 

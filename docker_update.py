@@ -8,6 +8,7 @@ import docker
 import docker.types
 import docker.errors
 import copy
+import re
 import time
 import threading
 
@@ -99,6 +100,59 @@ def image_repository(reference):
 	reference = str(reference or '').split('@', 1)[0]
 	colon = reference.rfind(':')
 	return reference[:colon] if colon > reference.rfind('/') else reference
+
+
+# Where an image says which version of its program it carries. The OCI label
+# is the standard and most images set it; label-schema is what came before.
+VERSION_LABELS = ("org.opencontainers.image.version", "org.label-schema.version")
+
+# Docker's official images (nginx, postgres, redis…) set neither, and say it
+# in an environment variable instead: NGINX_VERSION, PG_VERSION. Only the one
+# named after the image counts — the same images also carry GOSU_VERSION or
+# NODE_VERSION, which are the version of something else.
+_VERSION_ENV_ALIASES = {"postgres": ("pg",)}
+
+
+def image_version(config, repository=None):
+	"""
+	The version an image declares, from its Config, or None.
+
+	`config` is the Config of an image or of a container (which carries its
+	image's labels and environment). Shown as the image wrote it:
+	`1.43.4.10903-e5521bd8c-ls326` is what linuxserver calls that release.
+	"""
+	config = config if isinstance(config, dict) else {}
+	labels = config.get('Labels') if isinstance(config.get('Labels'), dict) else {}
+	for key in VERSION_LABELS:
+		value = labels.get(key)
+		if isinstance(value, str) and value.strip():
+			return value.strip()
+	if not repository:
+		return None
+	name = str(repository).rsplit('/', 1)[-1].lower()
+	accepted = {name} | set(_VERSION_ENV_ALIASES.get(name, ()))
+	for entry in config.get('Env') or []:
+		key, _, value = str(entry).partition('=')
+		if key.endswith('_VERSION') and value.strip() and key[:-len('_VERSION')].lower() in accepted:
+			return value.strip()
+	return None
+
+
+def _major(version):
+	"""The leading number of a version, when it is a semantic one."""
+	match = re.match(r"v?(\d+)(?:[.\-_+]|$)", str(version or "").strip(), re.IGNORECASE)
+	if not match:
+		return None
+	number = int(match.group(1))
+	# 2026.9.4 is a date: its first number changes every January, and that
+	# says nothing about compatibility.
+	return None if number >= 1000 else number
+
+
+def is_major_upgrade(old, new):
+	"""Whether going from `old` to `new` raises the major version."""
+	before, after = _major(old), _major(new)
+	return before is not None and after is not None and after > before
 
 
 def container_platform(container):
