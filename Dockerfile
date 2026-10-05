@@ -1,4 +1,7 @@
-FROM alpine:3.24.2
+# Named once, for FROM and for the label that says which base this is.
+ARG BASE_IMAGE=alpine:3.24.2
+FROM ${BASE_IMAGE}
+ARG BASE_IMAGE
 
 ARG VERSION=5.0.0_RC8
 
@@ -10,7 +13,11 @@ LABEL org.opencontainers.image.title="docker-controller-bot" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.source="https://github.com/dgongut/docker-controller-bot" \
       org.opencontainers.image.url="https://hub.docker.com/r/dgongut/docker-controller-bot" \
-      org.opencontainers.image.licenses="GPL-3.0"
+      org.opencontainers.image.licenses="GPL-3.0" \
+      org.opencontainers.image.description="Control all your Docker containers from a single place: your Telegram." \
+      org.opencontainers.image.documentation="https://github.com/dgongut/docker-controller-bot#readme" \
+      org.opencontainers.image.authors="dgongut" \
+      org.opencontainers.image.base.name="${BASE_IMAGE}"
 
 ENV TZ=UTC \
     PYTHONUNBUFFERED=1
@@ -59,3 +66,12 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD python3 -c "import sys; sys.exit(0)" || exit 1
 
 ENTRYPOINT ["python3", "docker-controller-bot.py"]
+
+# When and from which commit, passed at build time:
+#   --build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) --build-arg VCS_REF=$(git rev-parse HEAD)
+# Last on purpose: they change on every build, and anything after them would
+# be rebuilt every time instead of coming from the cache.
+ARG BUILD_DATE
+ARG VCS_REF
+LABEL org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.revision="${VCS_REF}"
