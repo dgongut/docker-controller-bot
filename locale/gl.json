@@ -185,7 +185,6 @@
   "checkupdate_command_container": "⚠️ Fai clic nun <b>proxecto ou contedor</b> para comprobar se está actualizado",
   "no_containers_for_checkupdate": "Non hai contedores dispoñibles para comprobar actualizacións",
   "updated_container": "✅ contedor <b>$1</b> actualizado con éxito",
-  "updated_container_versions": "✅ Contedor <b>$1</b> actualizado: $2",
   "updating": "<i>Actualizando</i> <b>$1</b>..",
   "updating_batch": "<b>Actualizando ($1/$2)</b>",
   "updated_batch": "✅ Actualizados <b>$1/$2</b>",

@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import harness
 
 import i18n
+import formatting
 
 import callback_registry
 
@@ -1354,18 +1355,26 @@ def test_the_host_disappears_from_both_shapes_with_one_host():
 
 def test_the_update_result_carries_its_host_and_the_failure_keeps_the_prefix():
 	"""
-	The update result is whatever string the updater returned, success or
-	failure. A success reads as one statement and takes the suffix; a failure
-	ends in "check the bot's logs", where a clause tacked on afterwards reads
-	wrong, so it keeps the prefix. The success is recognised by comparing
-	against the same get_text that produces it, so the two cannot drift — and
-	this test is what says so out loud.
+	A success is laid out like every list of updates: under its host when
+	there is more than one, with its versions below. A failure ends in "check
+	the bot's logs", where a clause tacked on afterwards reads wrong, so it
+	keeps the prefix. The success is recognised by comparing against the same
+	get_text that produces it, so the two cannot drift.
 	"""
 	import inspect
 	source = inspect.getsource(dcb._perform_container_update)
 	assert 'result == get_text("updated_container", container_name)' in source, source
-	assert "host_suffix(host_id)" in source, source
+	assert "update_result_text(" in source, source
 	assert 'f"{label}{result}"' in source, "el fallo ya no lleva el prefijo"
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	try:
+		text = dcb.update_result_text("h_nas", "plex", "1.0", "1.1")
+	finally:
+		_restore_hosts()
+	assert text == (i18n.get_text("updated_one") + "\n🖥️ <b>nas</b>\n🐳 <b>plex</b>"
+					"\n   <code>1.0</code> → <b><code>1.1</code></b>"), text
+	single = dcb.update_result_text("h_local", "plex")
+	assert single == i18n.get_text("updated_one") + "\n🐳 <b>plex</b>", single
 
 
 def test_the_queue_gives_up_on_what_telegram_will_refuse_again():
@@ -3403,12 +3412,12 @@ def test_the_more_info_link_points_somewhere_that_exists():
 
 
 def test_versions_read_old_to_new_and_escape_what_the_image_wrote():
-	assert dcb.format_versions("1.43.3", "1.43.4") == "<code>1.43.3</code> → <b><code>1.43.4</code></b>"
+	assert formatting.format_versions("1.43.3", "1.43.4") == "<code>1.43.3</code> → <b><code>1.43.4</code></b>"
 	# A rebuild of the same version, or one side unknown: what is known.
-	assert dcb.format_versions("1.31.6", "1.31.6") == "<code>1.31.6</code>"
-	assert dcb.format_versions("5.0.0_RC7", None) == "<code>5.0.0_RC7</code>"
-	assert dcb.format_versions(None, None) == "" and dcb.version_lines(None, None) == ""
-	assert "&lt;b&gt;" in dcb.format_versions("<b>", "2"), "una etiqueta es texto de la imagen"
+	assert formatting.format_versions("1.31.6", "1.31.6") == "<code>1.31.6</code>"
+	assert formatting.format_versions("5.0.0_RC7", None) == "<code>5.0.0_RC7</code>"
+	assert formatting.format_versions(None, None) == "" and dcb.version_lines(None, None) == ""
+	assert "&lt;b&gt;" in formatting.format_versions("<b>", "2"), "una etiqueta es texto de la imagen"
 
 
 def _comparison(old, new):

@@ -185,7 +185,6 @@
   "checkupdate_command_container": "⚠️ Klicken Sie auf ein <b>Projekt oder Container</b>, um zu prüfen, ob er jetzt aktualisiert ist",
   "no_containers_for_checkupdate": "Keine Container verfügbar, um nach Updates zu suchen",
   "updated_container": "✅ Container <b>$1</b> erfolgreich aktualisiert",
-  "updated_container_versions": "✅ Container <b>$1</b> aktualisiert: $2",
   "updating": "<i>Aktualisiere</i> <b>$1</b>..",
   "updating_batch": "<b>Aktualisiere ($1/$2)</b>",
   "updated_batch": "✅ Aktualisiert: <b>$1/$2</b>",

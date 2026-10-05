@@ -185,7 +185,6 @@
   "checkupdate_command_container": "⚠️ Prem un <b>projecte o contenidor</b> per comprovar ara si està actualitzat",
   "no_containers_for_checkupdate": "No hi ha contenidors disponibles per comprovar actualitzacions",
   "updated_container": "✅ Contenidor <b>$1</b> actualitzat amb éxit",
-  "updated_container_versions": "✅ Contenidor <b>$1</b> actualitzat: $2",
   "updating": "<i>Actualizant</i> <b>$1</b>..",
   "updating_batch": "<b>Actualitzant ($1/$2)</b>",
   "updated_batch": "✅ Actualitzats <b>$1/$2</b>",

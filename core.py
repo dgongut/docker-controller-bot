@@ -25,7 +25,7 @@ from telebot.types import InlineKeyboardButton
 from telebot.types import InlineKeyboardMarkup
 from compose_generator import ComposeGenerator
 from formatting import (
-	EVENT_LOG_LINES, by_host, comparison_version_change, comparison_version_line, comparison_version_notes, container_line, describe_exit_code, format_versions, log_excerpt, release_notes_url, version_lines,
+	EVENT_LOG_LINES, by_host, comparison_version_change, comparison_version_line, comparison_version_notes, container_line, describe_exit_code, log_excerpt, release_notes_url, version_lines,
 )
 from docker_update import container_platform, extract_container_config, image_repository, image_version, perform_update, stop_container
 from docker_compose_manager import (
@@ -4838,9 +4838,7 @@ def _perform_container_update(plan, send_fn, hold_events):
 	if ok:
 		outcome.old_version = plan.old_version
 		outcome.new_version = running_version(host_id, new_parent_container) if new_parent_container is not None else None
-		versions = format_versions(outcome.old_version, outcome.new_version)
-		shown = get_text("updated_container_versions", container_name, versions) if versions else result
-		send_fn(f"{shown}{host_suffix(host_id)}")
+		send_fn(update_result_text(host_id, container_name, outcome.old_version, outcome.new_version))
 	else:
 		send_fn(f"{label}{result}")
 
@@ -4974,6 +4972,20 @@ def _batch_progress_text(index, total, host_id, name):
 	return "\n".join(lines)
 
 
+def update_result_text(host_id, name, old=None, new=None, ok=True):
+	"""
+	How the update of one container is reported, wherever it is reported
+	from: the summary of an update, its result with extended messages on,
+	and the bot announcing itself back from updating. Each had a text of its
+	own, and changing how one looked left the others as they were.
+
+	No counts — it worked or it did not —, laid out like every other list of
+	updates: under its host, with its versions below.
+	"""
+	head = get_text("updated_one") if ok else get_text("updated_one_failed")
+	return f"{head}\n{by_host([(host_id, container_line(name, old, new))])}"
+
+
 def _update_containers_quietly(targets, tag=None, send=None):
 	"""
 	The summarised form of update_containers, and of update_container.
@@ -5009,10 +5021,8 @@ def _update_containers_quietly(targets, tag=None, send=None):
 	# The count alone left the chat asking which ones, so they are listed too.
 	lines = lambda entries: by_host([(h, container_line(n, *v)) for h, n, v in entries])
 	if total == 1:
-		# No counts for a batch of one: it worked or it did not. Laid out
-		# like every other list of updates, under its host.
-		head = get_text("updated_one") if updated else get_text("updated_one_failed")
-		summary = f"{head}\n{lines(updated + failed)}"
+		host_id, name, versions = (updated + failed)[0]
+		summary = update_result_text(host_id, name, *versions, ok=bool(updated))
 	else:
 		summary = get_text("updated_batch", len(updated), total)
 		if updated:
@@ -8367,10 +8377,8 @@ def delete_updater():
 			local_manager().client.images.remove(updater_image)
 			previous = store.state_get("self_update_from")
 			store.state_set("self_update_from", None)
-			versions = format_versions(previous, VERSION) if previous and previous != VERSION else ""
-			name = own_container_name()
-			text = get_text("updated_container_versions", name, versions) if versions else get_text("updated_container", name)
-			send_message(message=f'{text}{host_suffix(host_registry.local_host_id())}')
+			send_message(message=update_result_text(host_registry.local_host_id(), own_container_name(),
+													previous, VERSION if previous else None))
 		except Exception as e:
 			error(f"Could not delete container {UPDATER_CONTAINER_NAME}. Error: [{e}]")
 

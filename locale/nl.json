@@ -185,7 +185,6 @@
   "checkupdate_command_container": "⚠️ Klik op een <b>project of container</b> om te controleren of deze nu is bijgewerkt",
   "no_containers_for_checkupdate": "Geen containers beschikbaar om updates te controleren",
   "updated_container": "✅ Container <b>$1</b> succesvol bijgewerkt",
-  "updated_container_versions": "✅ Container <b>$1</b> bijgewerkt: $2",
   "updating": "<b>$1</b> <i>bijwerken</i>..",
   "updating_batch": "<b>Bijwerken ($1/$2)</b>",
   "updated_batch": "✅ Bijgewerkt: <b>$1/$2</b>",

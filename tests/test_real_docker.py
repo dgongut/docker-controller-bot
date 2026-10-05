@@ -1157,8 +1157,7 @@ def test_with_extended_messages_the_result_says_the_versions_too():
 		container = run("versioned-ext")
 		publish("2", _versioned("3.2"))
 		core.update_container(_ref(core, container), container.name)
-		expected = core.get_text("updated_container_versions", container.name,
-									"<code>3.1</code> → <b><code>3.2</code></b>")
+		expected = core.update_result_text(core.host_registry.local_host_id(), container.name, "3.1", "3.2")
 		assert expected in sent, sent
 	finally:
 		core.store.set("bot.extended_messages", False)
