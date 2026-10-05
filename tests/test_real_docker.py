@@ -601,8 +601,8 @@ def test_a_single_update_through_the_bot_ends_in_its_summary():
 		core.update_container(_ref(core, container), container.name)
 		# The test image is called `app` and sets APP_VERSION: the variable
 		# named after the image, which is how official images say it.
-		assert sent[-1] == (core.get_text("updated_one") + f"\n· <b>{container.name}</b>"
-							"  <code>1</code> → <b><code>2</code></b>"), sent
+		assert sent[-1] == (core.get_text("updated_one") + f"\n🐳 <b>{container.name}</b>"
+							"\n   <code>1</code> → <b><code>2</code></b>"), sent
 		assert fetch("single").id != container.id
 	finally:
 		cleanup()
@@ -1142,8 +1142,8 @@ def test_an_update_says_which_version_it_goes_from_and_to():
 
 		sent.clear()
 		core.update_container(ref, container.name)
-		assert sent[-1] == (core.get_text("updated_one") + f"\n· <b>{container.name}</b>"
-							"  <code>1.4.2</code> → <b><code>2.0.0</code></b>"), sent[-1]
+		assert sent[-1] == (core.get_text("updated_one") + f"\n🐳 <b>{container.name}</b>"
+							"\n   <code>1.4.2</code> → <b><code>2.0.0</code></b>"), sent[-1]
 	finally:
 		cleanup()
 
@@ -1232,7 +1232,8 @@ def test_a_version_label_left_on_the_container_by_4x_is_neither_read_nor_kept():
 		assert core.running_version(core.host_registry.local_host_id(), container) == "d860cc34-ls91"
 		publish("2", 'LABEL org.opencontainers.image.version="d860cc34-ls92"')
 		core.update_container(_ref(core, container), container.name)
-		assert sent[-1].endswith("<code>d860cc34-ls91</code> → <b><code>d860cc34-ls92</code></b>"), sent[-1]
+		# Long enough to go one under the other.
+		assert sent[-1].endswith("<code>d860cc34-ls91</code>\n    ↓\n   <b><code>d860cc34-ls92</code></b>"), sent[-1]
 		labels = fetch("duck").attrs["Config"]["Labels"]
 		assert labels.get("org.opencontainers.image.version") == "d860cc34-ls92", "la etiqueta vieja sigue pegada"
 	finally:

@@ -3407,8 +3407,37 @@ def test_versions_read_old_to_new_and_escape_what_the_image_wrote():
 	# A rebuild of the same version, or one side unknown: what is known.
 	assert dcb.format_versions("1.31.6", "1.31.6") == "<code>1.31.6</code>"
 	assert dcb.format_versions("5.0.0_RC7", None) == "<code>5.0.0_RC7</code>"
-	assert dcb.format_versions(None, None) == "" and dcb.versions_suffix(None, None) == ""
+	assert dcb.format_versions(None, None) == "" and dcb.version_lines(None, None) == ""
 	assert "&lt;b&gt;" in dcb.format_versions("<b>", "2"), "una etiqueta es texto de la imagen"
+
+
+def test_long_versions_go_one_under_the_other_and_short_ones_stay_on_a_line():
+	"""linuxserver's versions side by side made a line no phone could show whole."""
+	assert dcb.version_lines("v3.2.3", "v3.2.4") == "\n   <code>v3.2.3</code> → <b><code>v3.2.4</code></b>"
+	assert dcb.version_lines("1.43.4.10903-e5521bd8c-ls326", "1.43.4.10903-e5521bd8c-ls327") == (
+		"\n   <code>1.43.4.10903-e5521bd8c-ls326</code>\n    ↓\n   <b><code>1.43.4.10903-e5521bd8c-ls327</code></b>")
+	# The same long version on both sides is one version, on one line.
+	assert dcb.version_lines("1.43.4.10903-e5521bd8c-ls326", "1.43.4.10903-e5521bd8c-ls326").count("\n") == 1
+
+
+def test_a_list_of_updates_is_grouped_by_host_and_only_with_more_than_one():
+	pairs = [(dcb.make_ref("h_local", "aaaaa"), "plex"), (dcb.make_ref("h_local", "bbbbb"), "nginx"),
+				(dcb.make_ref("h_nas", "ccccc"), "duckdns")]
+	original = dcb.store.update_versions
+	dcb.store.update_versions = lambda host_id, name: (None, None)
+	try:
+		_with_hosts(HOST_FIXTURE, unreachable=())
+		try:
+			text = dcb.available_updates_text(pairs)
+		finally:
+			_restore_hosts()
+		body = text.split("\n\n", 1)[1]
+		assert body == ("🖥️ <b>casa</b>\n🐳 <b>plex</b>\n🐳 <b>nginx</b>\n\n"
+						"🖥️ <b>nas</b>\n🐳 <b>duckdns</b>"), body
+		single = dcb.available_updates_text(pairs[:2]).split("\n\n", 1)[1]
+		assert single == "🐳 <b>plex</b>\n🐳 <b>nginx</b>", single
+	finally:
+		dcb.store.update_versions = original
 
 
 def test_the_bot_knows_its_own_version_without_a_label():
@@ -3432,10 +3461,10 @@ def test_the_update_list_says_what_each_one_goes_to_and_fits_in_a_message():
 	try:
 		text = dcb.available_updates_text(pairs[:2])
 		assert text.startswith(i18n.get_text("available_updates", 2)), text
-		assert "· <b>servicio-0</b>  <code>1.0.0</code> → <b><code>1.0.1</code></b>" in text, text
+		assert "🐳 <b>servicio-0</b>\n   <code>1.0.0</code> → <b><code>1.0.1</code></b>" in text, text
 		long = dcb.available_updates_text(pairs)
 		assert len(long) < 4096, len(long)
-		assert long.rstrip().endswith(")") and "· … (+" in long, long[-80:]
+		assert long.rstrip().endswith(")") and "\n\n… (+" in long, long[-80:]
 		_assert_telegram_html(long, "lista larga")
 	finally:
 		dcb.store.update_versions = original
@@ -4998,7 +5027,7 @@ def test_a_batch_where_everything_worked_says_nothing_failed():
 	calls, sent, edited, deleted, restore = _batch_stubs({})
 	try:
 		dcb.update_containers(_targets("nginx", "plex"))
-		assert sent[-1] == i18n.get_text("updated_batch", 2, 2) + "\n· <b>nginx</b>\n· <b>plex</b>", sent[-1]
+		assert sent[-1] == i18n.get_text("updated_batch", 2, 2) + "\n🐳 <b>nginx</b>\n🐳 <b>plex</b>", sent[-1]
 	finally:
 		restore()
 
@@ -5024,7 +5053,7 @@ def test_the_bot_updates_itself_last_and_outside_the_summary():
 	try:
 		dcb.update_containers(_targets("docker-controller-bot", "nginx"))
 		assert calls == [("nginx", True, False), ("docker-controller-bot", False, True)], calls
-		assert sent[-1] == i18n.get_text("updated_one") + "\n· <b>nginx</b>", sent
+		assert sent[-1] == i18n.get_text("updated_one") + "\n🐳 <b>nginx</b>", sent
 	finally:
 		restore()
 
@@ -5042,13 +5071,13 @@ def test_a_single_update_reads_like_a_batch_of_one():
 		assert calls == [("nginx", True, False)], calls
 		assert sent[0].split("\n")[0] == i18n.get_text("updating_one"), sent
 		assert deleted == [1]
-		assert sent[-1] == i18n.get_text("updated_one") + "\n· <b>nginx</b>", sent
+		assert sent[-1] == i18n.get_text("updated_one") + "\n🐳 <b>nginx</b>", sent
 	finally:
 		restore()
 	calls, sent, edited, deleted, restore = _batch_stubs({"nginx": False})
 	try:
 		dcb.update_container(ref, name)
-		assert sent[-1] == i18n.get_text("updated_one_failed") + "\n· <b>nginx</b>", sent
+		assert sent[-1] == i18n.get_text("updated_one_failed") + "\n🐳 <b>nginx</b>", sent
 	finally:
 		restore()
 

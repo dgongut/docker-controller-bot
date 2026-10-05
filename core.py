@@ -725,7 +725,7 @@ class DockerManager:
 				has_update = True
 				versions = (running_version(self.host_id, container), available_version(remote_image, image_with_tag))
 				sent_message = send_message(
-					message=f'{get_text("available_update", container.name)}{versions_suffix(*versions)}{host_suffix(self.host_id)}',
+					message=f'{get_text("available_update", container.name)}{host_suffix(self.host_id)}{version_lines(*versions)}',
 					reply_markup=markup)
 				# Save container cache for this notification
 				if sent_message:
@@ -1991,7 +1991,7 @@ class DockerUpdateMonitor:
 						markup = InlineKeyboardMarkup(row_width = 1)
 						markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{container_ref(host_id, container)}"))
 						if not is_muted() and not cold_cache:
-							sent_message = send_message(message=f'{get_text("available_update", container.name)}{versions_suffix(*versions)}{host_suffix(host_id)}', reply_markup=markup)
+							sent_message = send_message(message=f'{get_text("available_update", container.name)}{host_suffix(host_id)}{version_lines(*versions)}', reply_markup=markup)
 							# Save container cache for this notification
 							if sent_message:
 								save_container_cache(sent_message.chat.id, sent_message.message_id, [container], host_id)
@@ -5006,21 +5006,25 @@ def _update_containers_quietly(targets, tag=None, send=None):
 			error(f"Could not update container {name}. Error: [{e}]")
 			ok = False
 		versions = _last_update_versions.pop((host_id, name), (None, None)) if ok else (None, None)
-		(updated if ok else failed).append(f"<b>{name}</b>{versions_suffix(*versions)}{host_suffix(host_id)}")
+		(updated if ok else failed).append((host_id, name, versions))
 
 	# Deleted and sent anew rather than edited into the summary: an edit makes
 	# no sound, and the summary is the one message of the batch worth hearing.
 	if progress:
 		delete_message(progress.message_id, progress.chat.id)
 	# The count alone left the chat asking which ones, so they are listed too.
+	lines = lambda entries: by_host([(h, container_line(n, *v)) for h, n, v in entries])
 	if total == 1:
-		# No counts for a batch of one: it worked or it did not.
+		# No counts for a batch of one: it worked or it did not. Laid out
+		# like every other list of updates, under its host.
 		head = get_text("updated_one") if updated else get_text("updated_one_failed")
-		summary = head + "".join(f"\n· {line}" for line in updated + failed)
+		summary = f"{head}\n{lines(updated + failed)}"
 	else:
-		summary = get_text("updated_batch", len(updated), total) + "".join(f"\n· {line}" for line in updated)
+		summary = get_text("updated_batch", len(updated), total)
+		if updated:
+			summary += "\n" + lines(updated)
 		if failed:
-			summary += get_text("updated_batch_failed") + "".join(f"\n· {line}" for line in failed)
+			summary += get_text("updated_batch_failed") + "\n" + lines(failed)
 	send(summary)
 
 def run_compose_project(project_name, host_id=None):
@@ -7805,17 +7809,22 @@ def available_updates_text(pairs):
 	from and to — the buttons below only have room for the names.
 	"""
 	header = get_text("available_updates", len(pairs))
-	lines = []
+	entries = []
+	left_out = 0
 	used = len(header)
 	for index, (ref, name) in enumerate(pairs):
 		host_id = ref_host(ref)
-		line = f"· <b>{html.escape(str(name))}</b>{versions_suffix(*store.update_versions(host_id, name))}{host_suffix(host_id)}"
-		if used + len(line) + 1 > AVAILABLE_UPDATES_TEXT_BUDGET:
-			lines.append(f"· … (+{len(pairs) - index})")
+		line = container_line(name, *store.update_versions(host_id, name))
+		# A host's heading costs room too; counted generously, once per line.
+		if used + len(line) + 40 > AVAILABLE_UPDATES_TEXT_BUDGET:
+			left_out = len(pairs) - index
 			break
-		lines.append(line)
+		entries.append((host_id, line))
 		used += len(line) + 1
-	return "\n".join([header, ""] + lines) if lines else header
+	if not entries:
+		return header
+	text = f"{header}\n\n{by_host(entries)}"
+	return f"{text}\n\n… (+{left_out})" if left_out else text
 
 
 def running_version(host_id, container):
@@ -7867,10 +7876,46 @@ def format_versions(old, new):
 	return ""
 
 
-def versions_suffix(old, new):
-	"""format_versions, set off from the name it follows."""
+# Two versions longer than this together go one under the other: side by
+# side, linuxserver's `1.43.4.10903-e5521bd8c-ls326 → …-ls327` wrapped into a
+# line nobody could read on a phone.
+VERSION_STACK_THRESHOLD = 24
+
+
+def version_lines(old, new):
+	"""
+	The versions under a container's line: `old → new` on one line when they
+	are short, the old one, an arrow and the new one on three when they are
+	not; "" when the image says nothing.
+	"""
+	if old and new and old != new and len(old) + len(new) > VERSION_STACK_THRESHOLD:
+		return (f"\n   <code>{html.escape(old)}</code>\n    ↓"
+				f"\n   <b><code>{html.escape(new)}</code></b>")
 	text = format_versions(old, new)
-	return f"  {text}" if text else ""
+	return f"\n   {text}" if text else ""
+
+
+def container_line(name, old=None, new=None):
+	"""
+	One container in a list of updates: the whale, its name, and its
+	versions below. The host is the heading it goes under; see by_host.
+	"""
+	return f"🐳 <b>{html.escape(str(name))}</b>{version_lines(old, new)}"
+
+
+def by_host(entries):
+	"""
+	(host_id, line) pairs as one text, under a heading per host — or just
+	the lines with a single host, where there is no host to speak of. In the
+	order given: the lists are already walked host by host.
+	"""
+	if host_registry.is_single_host():
+		return "\n".join(line for _, line in entries)
+	groups = {}
+	for host_id, line in entries:
+		groups.setdefault(host_id, []).append(line)
+	return "\n\n".join(f"🖥️ <b>{host_alias(host_id)}</b>\n" + "\n".join(lines)
+						for host_id, lines in groups.items())
 
 
 def update_status_text(has_update):
