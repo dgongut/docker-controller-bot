@@ -80,6 +80,8 @@
   "error_stopping_container": "❌ No s'ha pogut aturar el contenidor <b>$1</b>. Consulta els registres del bot per a més informació",
   "error_updating_container": "❌ No s'ha pogut actualitzar el contenidor <b>$1</b>. Consulta els registres del bot per a més informació",
   "error_update_leftover_old": "❌ No s'ha actualitzat <b>$1</b>: ja existeix un contenidor anomenat <b>$2</b>, probablement d'una actualització interrompuda. Revisa'l i esborra'l si sobra",
+  "error_update_auto_remove": "❌ No s'ha actualitzat <b>$1</b>: es va crear amb <code>--rm</code>, així que Docker l'esborraria en aturar-lo i una actualització fallida no tindria marxa enrere. Torna'l a crear sense <code>--rm</code> per poder actualitzar-lo",
+  "error_update_bot_shares_namespace": "❌ No s'ha actualitzat <b>$1</b>: el bot fa servir la seva xarxa, així que actualitzar-lo deixaria el bot sense connexió a mig camí. Actualitza'l a mà juntament amb el bot",
   "error_use_mute_command": "❌ Si us plau, proporciona un número vàlid de minuts.\n · Uso: /mute &lt;minuts&gt;\nPer desactivar fes servir /mute 0",
   "exec_command_container": "⚡️ Prem un <b>projecte o contenidor</b> per executar-hi una comanda",
   "executed_command": "⚡️ La següent ordre s'ha executat al contenidor <b>$1</b>.\n\n<pre><code>$2</code></pre>\n\nResultat:\n<pre><code>$3</code></pre>",

@@ -100,7 +100,7 @@ REGISTRARS = ("commands", "callbacks")
 _loaded = None
 
 
-def load_bot(env=None):
+def load_bot(env=None, real_docker=False):
 	"""
 	Imports the core module under a temporary storage root, followed by
 	whatever registers commands and callbacks.
@@ -112,7 +112,9 @@ def load_bot(env=None):
 	them instead of reading them live.
 
 	Docker is stubbed rather than mocked selectively: the core builds a
-	DockerManager at import time, and no test here needs a real daemon.
+	DockerManager at import time, and the unit tests need no daemon.
+	`real_docker` leaves it alone, for test_real_docker.py, which runs in a
+	process of its own for exactly that reason.
 	"""
 	global _loaded
 	if _loaded is not None:
@@ -120,11 +122,12 @@ def load_bot(env=None):
 
 	store, root = temp_storage(env)
 
-	import docker
-	# Both entry points the bot uses: from_env for anything still resolving the
-	# environment, DockerClient for the host registry.
-	docker.from_env = lambda *args, **kwargs: MagicMock()
-	docker.DockerClient = lambda *args, **kwargs: MagicMock()
+	if not real_docker:
+		import docker
+		# Both entry points the bot uses: from_env for anything still resolving
+		# the environment, DockerClient for the host registry.
+		docker.from_env = lambda *args, **kwargs: MagicMock()
+		docker.DockerClient = lambda *args, **kwargs: MagicMock()
 
 	import host_registry
 	host_registry.reset()

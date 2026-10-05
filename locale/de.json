@@ -80,6 +80,8 @@
   "error_stopping_container": "❌ Fehler beim Stoppen des Containers <b>$1</b>. Weitere Informationen findest du in den Bot-Logs",
   "error_updating_container": "❌ Fehler beim Aktualisieren des Containers <b>$1</b>. Weitere Informationen findest du in den Bot-Logs",
   "error_update_leftover_old": "❌ <b>$1</b> wurde nicht aktualisiert: Es gibt bereits einen Container namens <b>$2</b>, vermutlich von einer abgebrochenen Aktualisierung. Prüfe ihn und entferne ihn, falls er nicht mehr benötigt wird",
+  "error_update_auto_remove": "❌ <b>$1</b> wurde nicht aktualisiert: Er wurde mit <code>--rm</code> erstellt, Docker würde ihn beim Stoppen löschen und eine fehlgeschlagene Aktualisierung ließe sich nicht rückgängig machen. Erstelle ihn ohne <code>--rm</code> neu, um ihn zu aktualisieren",
+  "error_update_bot_shares_namespace": "❌ <b>$1</b> wurde nicht aktualisiert: Der Bot nutzt sein Netzwerk, eine Aktualisierung würde den Bot mittendrin vom Netz trennen. Aktualisiere ihn von Hand zusammen mit dem Bot",
   "error_use_mute_command": "❌ Bitte gib eine gültige Anzahl von Minuten an.\n · Verwendung: /mute &lt;Minuten&gt;\nZum Deaktivieren /mute 0 verwenden",
   "exec_command_container": "⚡️ Klicke auf ein <b>Projekt oder Container</b>, um einen Befehl darin auszuführen",
   "executed_command": "⚡️ Der folgende Befehl wurde im Container <b>$1</b> ausgeführt.\n\n<pre><code>$2</code></pre>\n\nErgebnis:\n<pre><code>$3</code></pre>",

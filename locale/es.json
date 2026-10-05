@@ -80,6 +80,8 @@
   "error_stopping_container": "❌ No se ha podido detener el contenedor <b>$1</b>. Consulta los logs del bot para mayor información",
   "error_updating_container": "❌ No se ha podido actualizar el contenedor <b>$1</b>. Consulta los logs del bot para mayor información",
   "error_update_leftover_old": "❌ No se ha actualizado <b>$1</b>: ya existe un contenedor llamado <b>$2</b>, probablemente de una actualización interrumpida. Revísalo y bórralo si sobra",
+  "error_update_auto_remove": "❌ No se ha actualizado <b>$1</b>: se creó con <code>--rm</code>, así que Docker lo borraría al detenerlo y una actualización fallida no tendría vuelta atrás. Recréalo sin <code>--rm</code> para poder actualizarlo",
+  "error_update_bot_shares_namespace": "❌ No se ha actualizado <b>$1</b>: el bot usa su red, así que actualizarlo dejaría al bot sin conexión a mitad. Actualízalo a mano junto con el bot",
   "error_use_mute_command": "❌ Por favor, proporciona un número válido de minutos.\n · Uso: /mute &lt;minutos&gt;\nPara desactivar usa /mute 0",
   "exec_command_container": "⚡️ Pulsa en un <b>proyecto o contenedor</b> para ejecutar un comando en él",
   "executed_command": "⚡️ El siguiente comando se ha ejecutado en el contenedor <b>$1</b>.\n\n<pre><code>$2</code></pre>\n\nResultado:\n<pre><code>$3</code></pre>",

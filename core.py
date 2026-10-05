@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 from telebot.types import InlineKeyboardButton
 from telebot.types import InlineKeyboardMarkup
 from compose_generator import ComposeGenerator
-from docker_update import extract_container_config, perform_update, stop_container
+from docker_update import container_platform, extract_container_config, image_repository, perform_update, stop_container
 from docker_compose_manager import (
     ComposeDetector,
     ComposeProjectManager
@@ -674,7 +674,7 @@ class DockerManager:
 			loading_msg = send_message(message=get_text("fetching_image_data"))
 
 			try:
-				remote_image = self.client.images.pull(image_with_tag)
+				remote_image = pull_image(self.client, image_with_tag, container)
 				if not remote_image or not remote_image.id:
 					error(f"Failed to pull image {image_with_tag}. Verify that the image exists in the registry.")
 					has_update = None
@@ -1033,6 +1033,29 @@ def is_own_container(host_id=None, container_id=None, container_name=None):
 		return own_id.startswith(container_id) or container_id.startswith(own_id)
 	# No id to compare: the name, on our own host, is the best that is left.
 	return container_name == own_name
+
+
+def bot_shares_namespace_with(owner, container):
+	"""
+	Whether the bot lives inside this container's network, IPC, PID or UTS
+	namespace — the bot behind gluetun, `network_mode: service:vpn`.
+
+	Updating that container means recreating the bot to follow it into the new
+	namespace, and the bot cannot recreate itself halfway through a job: it
+	would stop, and nothing would start it again. Left alone instead, it would
+	keep running inside a namespace that is gone, without a network to reach
+	Telegram by.
+	"""
+	if owner.host_id != host_registry.local_host_id():
+		return False
+	try:
+		own = own_container()
+		bot = owner.client.containers.get(own[1] if own else own_container_name())
+	except Exception:
+		return False
+	refs = {f"container:{container.id}", f"container:{container.id[:12]}"}
+	host_config = bot.attrs.get("HostConfig") or {}
+	return any((host_config.get(field) or "") in refs for field, _ in _NAMESPACE_HOSTCONFIG_FIELDS)
 
 
 def own_container_name():
@@ -1770,12 +1793,15 @@ class DockerUpdateMonitor:
 			image_with_tag = container_attrs['Image']
 			try:
 				local_image = container.image.id
-				if image_with_tag not in pulled:
+				# Per image and platform: two containers on the same tag may run
+				# different architectures of it.
+				pull_key = (image_with_tag, container_platform(container))
+				if pull_key not in pulled:
 					try:
-						pulled[image_with_tag] = owner.client.images.pull(image_with_tag)
+						pulled[pull_key] = pull_image(owner.client, image_with_tag, container)
 					except Exception as pull_error:
-						pulled[image_with_tag] = pull_error
-				remote_image = pulled[image_with_tag]
+						pulled[pull_key] = pull_error
+				remote_image = pulled[pull_key]
 				if isinstance(remote_image, Exception):
 					raise remote_image
 				debug(f"Checking update: {container.name} ({image_with_tag}): LOCAL IMAGE [{local_image.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}] - REMOTE IMAGE [{remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}]")
@@ -2188,7 +2214,9 @@ def _build_schedule_summary(state: dict) -> str:
 	if state.get("action"):
 		lines.append(f"<b>{get_text('schedule_label_action')}:</b> {state.get('action')}")
 	if state.get("container"):
-		lines.append(f"<b>{get_text('schedule_label_container')}:</b> {state.get('container')}")
+		# Typed by hand when a task is edited, so not necessarily a name Docker
+		# would have allowed.
+		lines.append(f"<b>{get_text('schedule_label_container')}:</b> {html.escape(str(state.get('container')))}")
 	if state.get("minutes") is not None:  # Use is not None to handle 0
 		lines.append(f"<b>{get_text('schedule_label_minutes')}:</b> {state.get('minutes')}")
 	if state.get("prune_type"):
@@ -2256,7 +2284,7 @@ def show_schedule_menu(user_id: int, chat_id: int):
 			name = html.escape(str(sched['name']))
 			action = sched.get('action', '')
 			cron = sched.get('cron', '* * * * *')
-			container = sched.get('container', '')
+			container = html.escape(str(sched.get('container') or ''))
 			minutes = sched.get('minutes', '')
 			command = html.escape(str(sched.get('command') or ''))
 			show_output = sched.get('show_output', False)
@@ -2396,7 +2424,7 @@ def show_schedule_edit_options(user_id: int, schedule_name: str):
 	if action == 'mute':
 		message_text += f"<b>{get_text('schedule_label_minutes')}:</b> <b>{minutes}</b>\n"
 	elif action == 'exec':
-		message_text += f"<b>{get_text('schedule_label_container')}:</b> <b>{container}</b>\n"
+		message_text += f"<b>{get_text('schedule_label_container')}:</b> <b>{html.escape(str(container or ''))}</b>\n"
 		message_text += f"<b>{get_text('schedule_label_command')}:</b> <code>{html.escape(str(command or ''))}</code>\n"
 		message_text += host_line
 		message_text += f"<b>{get_text('schedule_label_show_output')}:</b> <b>{get_text('schedule_yes') if show_output else get_text('schedule_no')}</b>\n"
@@ -2405,7 +2433,7 @@ def show_schedule_edit_options(user_id: int, schedule_name: str):
 		message_text += host_line
 		message_text += f"<b>{get_text('schedule_label_show_output')}:</b> <b>{get_text('schedule_yes') if show_output else get_text('schedule_no')}</b>\n"
 	elif action in ('run', 'stop', 'restart'):
-		message_text += f"<b>{get_text('schedule_label_container')}:</b> <b>{container}</b>\n"
+		message_text += f"<b>{get_text('schedule_label_container')}:</b> <b>{html.escape(str(container or ''))}</b>\n"
 		message_text += host_line
 
 	message_text += "\n" + get_text("schedule_edit_what") + "\n\n"
@@ -2775,7 +2803,7 @@ def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: in
 				pass
 
 		# Build message with summary
-		message_text = f"<b>{get_text('schedule_label_name')}:</b> {user_input}\n\n"
+		message_text = f"<b>{get_text('schedule_label_name')}:</b> {html.escape(user_input)}\n\n"
 		message_text += get_text("schedule_ask_cron")
 
 		markup = InlineKeyboardMarkup(row_width=1)
@@ -2798,7 +2826,7 @@ def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: in
 			message_text = f"❌ <b>{get_text('schedule_invalid_cron')}</b>\n\n"
 			# Add current progress
 			if state.get("name"):
-				message_text += f"<b>{get_text('schedule_label_name')}:</b> {state.get('name')}\n\n"
+				message_text += f"<b>{get_text('schedule_label_name')}:</b> {html.escape(str(state.get('name')))}\n\n"
 			message_text += get_text("schedule_ask_cron")
 
 			markup = InlineKeyboardMarkup(row_width=1)
@@ -4286,7 +4314,7 @@ _NAMESPACE_HOSTCONFIG_FIELDS = (
 )
 
 
-def _compute_namespace_overrides(dep_container, old_parent_id, new_parent_id):
+def _compute_namespace_overrides(dep_container, old_parent_id, new_parent_id, start=True):
 	"""
 	Inspects a dependent container's HostConfig and returns a dict of config
 	overrides (in extract_container_config keys) to rewrite any namespace
@@ -4312,11 +4340,11 @@ def _compute_namespace_overrides(dep_container, old_parent_id, new_parent_id):
 	# container regardless of the current (exited) status, mirroring the
 	# stop+start behaviour applied to non-namespace dependents.
 	if overrides:
-		overrides['is_running'] = True
+		overrides['is_running'] = start
 	return overrides
 
 
-def restart_dependents_after_update(project_name, updated_service_name, new_parent_container=None, old_parent_id=None, send_fn=None, host_id=None, hold_events=False):
+def restart_dependents_after_update(project_name, updated_service_name, new_parent_container=None, old_parent_id=None, send_fn=None, host_id=None, hold_events=False, running_before=None):
 	"""
 	Restarts only the services that depend (directly or transitively) on the
 	updated service. Services unrelated to the updated one are left untouched.
@@ -4367,25 +4395,54 @@ def restart_dependents_after_update(project_name, updated_service_name, new_pare
 		project_info.containers, updated_service_name
 	)
 
+	# Never the bot itself: stopping it to start it again is the bot ending
+	# its own process halfway through, and nobody is left to do the start —
+	# `unless-stopped` does not bring back a container stopped on purpose.
+	# The docker-socket-proxy it depends on is exactly this case. It needs no
+	# restart either way: it reconnects to the proxy on its own.
+	dependents = [c for c in dependents if not is_own_container(owner.host_id, c.id, c.name)]
+
 	if not dependents:
 		debug(f"No dependents found for service {updated_service_name}, nothing to restart")
 		return
 
 	if not hold_events:
-		_restart_dependents(owner, dependents, updated_service_name, new_parent_container, old_parent_id, send_fn)
+		_restart_dependents(owner, dependents, updated_service_name, new_parent_container, old_parent_id, send_fn, running_before)
 		return
 	# The ones recreated for sharing the parent's namespace go through the
 	# same rename to _old as an update does.
 	names = [c.name for c in dependents] + [f"{c.name}_old" for c in dependents]
 	hold_container_events(owner.host_id, names)
 	try:
-		_restart_dependents(owner, dependents, updated_service_name, new_parent_container, old_parent_id, send_fn)
+		_restart_dependents(owner, dependents, updated_service_name, new_parent_container, old_parent_id, send_fn, running_before)
 	finally:
 		release_container_events(owner.host_id, names)
 
 
-def _restart_dependents(owner, dependents, updated_service_name, new_parent_container, old_parent_id, send_fn):
-	"""The body of restart_dependents_after_update, once the dependents are known."""
+def _restart_dependents(owner, dependents, updated_service_name, new_parent_container, old_parent_id, send_fn, running_before=None):
+	"""
+	The body of restart_dependents_after_update, once the dependents are known.
+
+	`running_before` is the set of ids that were running before the update;
+	None when that could not be read, and then every dependent counts as
+	running, as it always did. A dependent the user had stopped used to be
+	started along with the rest: it is left as it was now, except that one
+	sharing the parent's namespace is still recreated to point at the new
+	parent — stopped — so that starting it later does not fail.
+	"""
+	def was_running(container):
+		return running_before is None or container.id in running_before
+
+	new_parent_id = new_parent_container.id if new_parent_container is not None else None
+	namespace_overrides = {}
+	for container in dependents:
+		overrides = _compute_namespace_overrides(container, old_parent_id, new_parent_id,
+												start=was_running(container))
+		if overrides:
+			namespace_overrides[container.id] = overrides
+	dependents = [c for c in dependents if was_running(c) or c.id in namespace_overrides]
+	if not dependents:
+		return
 	dependent_count = len(dependents)
 
 	# Prefer the parent's container name (what shows up in `docker ps`) over
@@ -4396,16 +4453,9 @@ def _restart_dependents(owner, dependents, updated_service_name, new_parent_cont
 	# Initial message
 	send_fn(get_text("restarting_dependent_services", parent_display_name, dependent_count))
 
-	# Pre-compute which dependents need full recreation because they share a
-	# namespace with the (now-replaced) parent container id. Those are NOT
-	# stopped here; recreate_with_overrides will handle their lifecycle so
-	# the extracted config keeps is_running=True for them.
-	new_parent_id = new_parent_container.id if new_parent_container is not None else None
-	namespace_overrides = {}
-	for container in dependents:
-		overrides = _compute_namespace_overrides(container, old_parent_id, new_parent_id)
-		if overrides:
-			namespace_overrides[container.id] = overrides
+	# Which dependents need full recreation because they share a namespace
+	# with the (now-replaced) parent container id was worked out above. Those
+	# are NOT stopped here; recreate_with_overrides handles their lifecycle.
 
 	# Stop dependents in reverse order (deepest dependents first), skipping
 	# those that will be fully recreated. Per-service stop progress is logged
@@ -4451,8 +4501,21 @@ def _restart_dependents(owner, dependents, updated_service_name, new_parent_cont
 			else:
 				debug(f"{updated_service_name} declared as service_healthy dependency but has no healthcheck; not waiting")
 		if needs_completed:
+			# A one-shot job — a migration, an init — has exited, so its update
+			# leaves it created and not started, the way it was found. Waiting
+			# for that to exit waited the full three minutes with the
+			# dependents down, and the job never ran on its new image. Running
+			# it is what `service_completed_successfully` asks for.
+			try:
+				new_parent_container.reload()
+				if new_parent_container.status in ("created", "exited"):
+					debug(f"Running {updated_service_name} so its dependents can wait for it to complete")
+					new_parent_container.start()
+			except Exception as e:
+				debug(f"Could not start {updated_service_name} before its dependents: {e}")
 			debug(f"Waiting for {updated_service_name} to exit successfully before starting dependents")
-			_wait_for_container_exit_success(new_parent_container, timeout_seconds=180)
+			if not _wait_for_container_exit_success(new_parent_container, timeout_seconds=180):
+				debug(f"{updated_service_name} did not complete successfully; starting its dependents anyway")
 
 	# Start dependents in dependency order. Dependents whose namespace
 	# references the old parent id are recreated in-place (rewriting the
@@ -4521,35 +4584,62 @@ def perform_container_update(container_id, container_name, tag=None, send_fn=Non
 	project_name = None
 	updated_service_name = None
 	old_parent_id = None
+	container_obj = None
 	# The host comes from the reference and is used for everything below: the
 	# container, its update and its project's dependents all live on the same
 	# machine, and resolving it once keeps them from drifting apart.
 	host_id = ref_host(container_id)
 	owner = manager(host_id)
 	try:
-		container_obj = owner.client.containers.get(ref_id(container_id))
+		try:
+			container_obj = owner.client.containers.get(ref_id(container_id))
+		except docker.errors.NotFound:
+			# Recreated since the reference was taken, under the same name: an
+			# update batch that updates `vpn` recreates `app` behind it, and
+			# `app` is next in the batch with the id it had before. The name
+			# is unique on its host and survives a recreation, so it finds the
+			# container the reference meant.
+			container_obj = owner.client.containers.get(container_name)
+			container_id = container_ref(host_id, container_obj)
+			debug(f"{container_name} was recreated since it was listed; updating it by name")
 		project_name = ComposeDetector.get_project_name(container_obj)
 		updated_service_name = ComposeDetector.get_service_name(container_obj)
 		old_parent_id = container_obj.id
 	except Exception as e:
 		debug(f"Could not pre-fetch Compose info for {container_name}: {e}")
 
+	# What was running before anything is touched: the dependents restarted
+	# afterwards are those, and not the ones the user had stopped. Listed
+	# sparse — the state is in the listing itself, without an inspect each.
+	running_before = None
+	try:
+		running_before = {c.id for c in owner.client.containers.list(sparse=True)
+							if c.status in ("running", "restarting")}
+	except Exception as e:
+		debug(f"Could not list what was running before updating {container_name}: {e}")
+
+	if container_obj is not None and bot_shares_namespace_with(owner, container_obj):
+		warning(f"Not updating {container_name}: the bot shares its namespace")
+		result = get_text("error_update_bot_shares_namespace", container_name)
+		send_fn(f"{host_label(host_id)}{result}")
+		return False, result
+
 	if not hold_events:
 		return _perform_container_update(owner, host_id, container_id, container_name, tag, send_fn,
-										project_name, updated_service_name, old_parent_id, False)
+										project_name, updated_service_name, old_parent_id, False, running_before)
 	# The old container is renamed before the new one exists, and a rollback
 	# can start it again under that name, so both are held.
 	names = [container_name, f"{container_name}_old"]
 	hold_container_events(host_id, names)
 	try:
 		return _perform_container_update(owner, host_id, container_id, container_name, tag, send_fn,
-										project_name, updated_service_name, old_parent_id, True)
+										project_name, updated_service_name, old_parent_id, True, running_before)
 	finally:
 		release_container_events(host_id, names)
 
 
 def _perform_container_update(owner, host_id, container_id, container_name, tag, send_fn,
-							project_name, updated_service_name, old_parent_id, hold_events):
+							project_name, updated_service_name, old_parent_id, hold_events, running_before=None):
 	"""The body of perform_container_update, once the Compose info is captured."""
 	# Send the initial "updating" progress message
 	# Both the progress line and the result say which machine, the same as the
@@ -4580,12 +4670,12 @@ def _perform_container_update(owner, host_id, container_id, container_name, tag,
 	# by name (Docker enforces unique container names, and perform_update keeps
 	# the original name) so dependents can wait on its healthcheck when their
 	# compose `depends_on` declared `condition: service_healthy`.
+	new_parent_container = None
+	try:
+		new_parent_container = owner.client.containers.get(container_name)
+	except Exception as e:
+		debug(f"Could not fetch new container after update for {container_name}: {e}")
 	if project_name and updated_service_name:
-		new_parent_container = None
-		try:
-			new_parent_container = owner.client.containers.get(container_name)
-		except Exception as e:
-			debug(f"Could not fetch new container after update for {container_name}: {e}")
 		restart_dependents_after_update(
 			project_name,
 			updated_service_name,
@@ -4594,8 +4684,58 @@ def _perform_container_update(owner, host_id, container_id, container_name, tag,
 			send_fn=send_fn,
 			host_id=host_id,
 			hold_events=hold_events,
+			running_before=running_before,
 		)
+	if ok:
+		_recreate_namespace_sharers(owner, old_parent_id, new_parent_container, send_fn, hold_events, running_before)
 	return ok, result
+
+
+def _recreate_namespace_sharers(owner, old_parent_id, new_parent_container, send_fn, hold_events, running_before=None):
+	"""
+	Recreates whatever still shares a namespace with the container just replaced.
+
+	`--network container:vpn`, outside any Compose project — gluetun and the
+	apps routed through it, as often as not. Only Compose dependents used to be
+	looked after, so these kept running inside the network namespace of a
+	container that no longer existed: alive, and cut off from the new one. And
+	on their next restart they failed, pointing at an id that was gone.
+
+	Runs after the Compose dependents, which by then point at the new id, so
+	what is left matching the old one is exactly what nobody has handled.
+	"""
+	if not old_parent_id or new_parent_container is None or new_parent_container.id == old_parent_id:
+		return
+	old_refs = {f"container:{old_parent_id}", f"container:{old_parent_id[:12]}"}
+	try:
+		containers = owner.client.containers.list(all=True)
+	except Exception as e:
+		debug(f"Could not list containers to find namespace sharers: {e}")
+		return
+	sharers = [c for c in containers
+				if any(((c.attrs.get('HostConfig') or {}).get(field) or '') in old_refs
+						for field, _ in _NAMESPACE_HOSTCONFIG_FIELDS)]
+	if not sharers:
+		return
+	names = [c.name for c in sharers] + [f"{c.name}_old" for c in sharers]
+	if hold_events:
+		hold_container_events(owner.host_id, names)
+	try:
+		for container in sharers:
+			overrides = _compute_namespace_overrides(
+				container, old_parent_id, new_parent_container.id,
+				start=running_before is None or container.id in running_before)
+			if not overrides:
+				continue
+			debug(f"Recreating {container.name} to follow {new_parent_container.name} into its new namespace")
+			if store.get("bot.extended_messages"):
+				send_fn(get_text("recreating_namespace_dependent", container.name))
+			result = owner.recreate_with_overrides(container.id, container.name, overrides)
+			if result != get_text("updated_container", container.name):
+				send_fn(get_text("error_recreating_namespace_dependent", container.name))
+	finally:
+		if hold_events:
+			release_container_events(owner.host_id, names)
 
 
 def update_container(ref, name, tag=None, send=None):
@@ -5050,8 +5190,8 @@ def change_tag_container(containerId, containerName):
 	try:
 		markup = InlineKeyboardMarkup(row_width=button_columns())
 		container = manager_for(containerId).client.containers.get(ref_id(containerId))
-		repo = container.attrs['Config']['Image'].split(":")[0]
-		tags = get_docker_tags(repo)
+		repo = image_repository(container.attrs['Config']['Image'])
+		tags = get_docker_tags(repo, ref_host(containerId))
 
 		if not tags:
 			error(f"Could not get tags for image {repo}")
@@ -5100,15 +5240,14 @@ def get_image_comparison(containerId, containerName, new_tag=None):
 		# Determine what image to pull for comparison
 		if new_tag:
 			# Changing tag: use the new tag
-			repo = current_tag.split(':')[0]
-			tag_to_pull = f"{repo}:{new_tag}"
+			tag_to_pull = f"{image_repository(current_tag)}:{new_tag}"
 		else:
 			# Checking for update: pull the same tag
 			tag_to_pull = current_tag
 
 		# Pull new image (without applying to container)
 		debug(f"Pulling image {tag_to_pull} for comparison")
-		new_image = owner.client.images.pull(tag_to_pull)
+		new_image = pull_image(owner.client, tag_to_pull, container)
 
 		# New image info
 		new_digest = new_image.id.replace('sha256:', '')[:12]
@@ -5275,10 +5414,22 @@ def build_registry_url(image_tag):
 	Returns tuple (url, registry_name) or (None, None) if unknown.
 	"""
 	try:
+		# Docker Hub decided the way Docker decides it. Two components without
+		# a dot used to mean Docker Hub here, so `nas:5000/app` linked to a
+		# Docker Hub page that does not exist; and `docker.io/library/nginx`,
+		# three components, linked nowhere.
+		registry, repository = split_registry(image_repository(image_tag))
+		if registry is None:
+			if repository.startswith("library/"):
+				repository = repository[len("library/"):]
+			image_tag = repository
+		elif registry == "localhost" or ":" in registry or "." not in registry:
+			# A registry of the user's own: there is no public page to link.
+			return (None, None)
 		parts = image_tag.split('/')
 
 		# Check if it's a Docker Hub image
-		if len(parts) == 1 or (len(parts) == 2 and '.' not in parts[0]):
+		if registry is None and len(parts) <= 2:
 			if len(parts) == 1:
 				# Official image - use /_/ format
 				repo_with_tag = parts[0]
@@ -7828,6 +7979,20 @@ def resolve_project_hash(value):
 		return host_registry.local_host_id(), entry
 	return entry.get("host") or host_registry.local_host_id(), entry.get("name")
 
+def pull_image(client, image, container):
+	"""
+	Pulls an image for the platform the container runs, not the host's.
+
+	Without it a container forced to `linux/amd64` on an ARM machine was
+	compared against the ARM image: on the classic image store, an update
+	announced on every check that, once applied, switched its architecture.
+	"""
+	platform = container_platform(container) if container is not None else None
+	if platform:
+		return client.images.pull(image, platform=platform)
+	return client.images.pull(image)
+
+
 def generate_docker_compose(container):
 	"""
 	Builds the docker-compose of a container.
@@ -8031,109 +8196,6 @@ def check_own_container():
 	warning("Could not identify my own container, and CONTAINER_NAME is not set: "
 			"I will not stop myself from being stopped or deleted from my own menus")
 
-def parse_schedule_expression(line):
-	"""
-	Parse a schedule line into schedule expression and action+params.
-
-	Supports two formats:
-	1. Special cron: @daily run container
-	2. Normal cron: 0 0 * * * run container
-
-	Returns: (schedule_expression, action, params) or (None, None, None) if invalid
-	"""
-	parts = line.strip().split()
-
-	if not parts:
-		return None, None, None
-
-	# Check if it's a special cron expression (starts with @)
-	if parts[0].startswith("@"):
-		schedule = parts[0]
-		action_and_params = parts[1:]
-	else:
-		# Normal cron expression (5 parts: minute hour day month weekday)
-		if len(parts) < 5:
-			return None, None, None
-
-		schedule = " ".join(parts[:5])
-		action_and_params = parts[5:]
-
-	# Extract action and parameters
-	if not action_and_params:
-		return None, None, None
-
-	action = action_and_params[0].lower()
-	params = action_and_params[1:]
-
-	return schedule, action, params
-
-
-def parse_cron_line(line):
-	"""
-	Parse a complete schedule line and validate all components.
-
-	Format: [CRON_EXPRESSION] ACTION [PARAMS...]
-
-	Returns: dict with schedule, action, and parsed parameters, or None if invalid
-	"""
-	schedule, action, params = parse_schedule_expression(line)
-
-	if schedule is None or action is None:
-		return None
-
-	# Validate schedule expression
-	if not is_valid_cron(schedule):
-		return None
-
-	# Validate action and parameters using SCHEDULE_PATTERNS
-	if action not in SCHEDULE_PATTERNS:
-		return None  # Unknown action
-
-	pattern = SCHEDULE_PATTERNS[action]
-	required_params = pattern.get("params", [])
-	validators = pattern.get("validators", {})
-
-	# Check if we have enough parameters
-	if len(params) < len(required_params):
-		return None
-
-	result = {
-		"schedule": schedule,
-		"action": action,
-	}
-
-	# Parse and validate parameters
-	for i, param_name in enumerate(required_params):
-		param_value = params[i] if i < len(params) else None
-
-		if param_value is None:
-			return None
-
-		# Apply validator if exists
-		if param_name in validators:
-			validator = validators[param_name]
-			try:
-				if not validator(param_value):
-					return None
-			except Exception as e:
-				# Validator threw an exception, consider it invalid
-				error(f"Validator error for {param_name}: {str(e)}")
-				return None
-
-		# Special handling for command parameter (joins remaining params)
-		if param_name == "command":
-			result[param_name] = " ".join(params[i:])
-		# Special handling for show_output (convert to int)
-		elif param_name == "show_output":
-			try:
-				result[param_name] = int(param_value)
-			except (ValueError, TypeError):
-				return None
-		else:
-			result[param_name] = param_value
-
-	return result
-
 def is_valid_cron(cron_expression):
 	"""
 	Validate a cron expression.
@@ -8162,59 +8224,80 @@ def is_valid_cron(cron_expression):
 		if len(fields) != 5:
 			return False
 
-		croniter(cron_expression)
+		# Parsing is not enough: `0 0 30 2 *` parses, and fires on the 30th of
+		# February. It was saved, and never ran, and nothing said so. Asking
+		# for the next run is what tells a date that exists from one that
+		# does not.
+		croniter(cron_expression).get_next(datetime)
 		return True
 	except Exception:
 		return False
 
-def get_my_architecture():
+def get_my_architecture(host_id=None):
+	"""
+	The architecture of a host, in Docker Hub's naming.
+
+	Of the host the container lives on, not of the bot's: with a Raspberry Pi
+	managed from an x86 machine, filtering by the bot's own architecture
+	offered the Pi tags it cannot run.
+	"""
 	try:
-		info = local_manager().client.info()
+		info = manager(host_id or host_registry.local_host_id()).client.info()
 		architecture_docker = info['Architecture']
 		return docker_architectures.get(architecture_docker, architecture_docker)
 	except Exception as e:
 		error(f"Error getting Docker architecture: [{e}]")
 		return None
 
-def get_docker_tags(repo_name):
-	"""Get available tags for a Docker image"""
+# Docker Hub under the names it also answers to. `docker.io/library/nginx` is
+# how a lot of compose files spell `nginx`, and asking Docker Hub's API for a
+# repository called `docker.io/library/nginx` found nothing.
+DOCKER_HUB_PREFIXES = ("docker.io/", "index.docker.io/", "registry-1.docker.io/")
+
+# linuxserver.io publishes the same images on Docker Hub, whose API says when
+# each tag was pushed and for which architectures; lscr.io itself is a plain
+# registry and says neither.
+DOCKER_HUB_MIRRORS = ("lscr.io/",)
+
+# A registry lists its tags in alphabetical order, in pages: everything has to
+# be read to find the newest. Capped, so a repository with an absurd number of
+# tags costs a bounded wait.
+REGISTRY_TAG_PAGE_SIZE = 1000
+REGISTRY_TAG_MAX_PAGES = 20
+REGISTRY_TAGS_SHOWN = 20
+
+
+def split_registry(repo_name):
+	"""
+	(registry, repository) for an image repository; registry None for Docker Hub.
+
+	The first component is a registry when Docker would read it as one: it has
+	a dot or a port, or it is localhost.
+	"""
+	for prefix in DOCKER_HUB_PREFIXES + DOCKER_HUB_MIRRORS:
+		if repo_name.startswith(prefix):
+			return None, repo_name[len(prefix):]
+	first, _, rest = repo_name.partition("/")
+	if rest and ("." in first or ":" in first or first == "localhost"):
+		return first, rest
+	return None, repo_name
+
+
+def get_docker_tags(repo_name, host_id=None):
+	"""Tags to offer for an image repository, newest first."""
 	try:
-		if repo_name.startswith("ghcr.io/"):
-			debug(f"Getting tags from ghcr.io registry for {repo_name}")
-			try:
-				tags = get_docker_tags_from_ghcr(repo_name.replace("ghcr.io/", ""))
-				return tags if tags else []
-			except Exception as e:
-				error(f"Failed to get tags from ghcr.io for {repo_name}: {str(e)}")
-				return []
-		elif repo_name.startswith("lscr.io/"):
+		registry, repository = split_registry(repo_name)
+		if registry is None:
 			debug(f"Getting tags from DockerHub for {repo_name}")
-			try:
-				architecture = get_my_architecture()
-				if architecture is None:
-					error(f"Could not determine system architecture for {repo_name}")
-					return []
-				return get_docker_tags_from_DockerHub(repo_name.replace("lscr.io/", ""))
-			except Exception as e:
-				error(f"Failed to get tags from DockerHub for {repo_name}: {str(e)}")
-				return []
-		else:
-			debug(f"Getting tags from DockerHub for {repo_name}")
-			try:
-				architecture = get_my_architecture()
-				if architecture is None:
-					error(f"Could not determine system architecture for {repo_name}")
-					return []
-				return get_docker_tags_from_DockerHub(repo_name)
-			except Exception as e:
-				error(f"Failed to get tags from DockerHub for {repo_name}: {str(e)}")
-				return []
+			return get_docker_tags_from_DockerHub(repository, host_id)
+		debug(f"Getting tags from {registry} for {repository}")
+		return get_docker_tags_from_registry(registry, repository)
 	except Exception as e:
 		error(f"Failed to get tags for {repo_name}: {str(e)}")
 		return []
 
-def get_docker_tags_from_DockerHub(repo_name):
-	architecture = get_my_architecture()
+def get_docker_tags_from_DockerHub(repo_name, host_id=None):
+	architecture = get_my_architecture(host_id)
 	if architecture is None:
 		return []
 
@@ -8255,33 +8338,86 @@ def get_docker_tags_from_DockerHub(repo_name):
 		error(f"Error getting tags from DockerHub for {repo_name}: {e}")
 		raise
 
-def get_docker_tags_from_ghcr(repo_name):
-	"""Get tags from ghcr.io using Docker Registry V2 API"""
-	try:
-		# Get auth token
-		token_url = f'https://ghcr.io/token?service=ghcr.io&scope=repository:{repo_name}:pull'
-		token = requests.get(token_url, timeout=10).json().get('token')
-		if not token:
-			error(f"Could not get an auth token from ghcr.io for {repo_name}")
-			return []
 
-		# Get tags
-		tags_url = f'https://ghcr.io/v2/{repo_name}/tags/list'
-		tags = requests.get(tags_url, headers={'Authorization': f'Bearer {token}'}, timeout=10).json().get('tags', [])
+_STABLE_VERSION = re.compile(r"v?\d+(?:\.\d+)*")
 
+
+def sort_tags_newest_first(tags):
+	"""
+	Version tags newest first, by their numbers rather than alphabetically.
+
+	A registry hands tags over in alphabetical order, and taking the first
+	twenty of those offered Home Assistant's 2021 releases and Plex's from
+	2020 — a /changetag that read as a list of upgrades and was a list of
+	downgrades. Released versions (`2025.10.1`, `v1.2`) come first; then the
+	named ones (`latest`, `stable`), which mean something without numbers;
+	then everything else with a version in it (`2025.11.0b1`,
+	`version-1.43.4-ls326`).
+	"""
+	def numbers(tag):
+		return tuple(int(n) for n in re.findall(r"\d+", tag))
+
+	stable = sorted((t for t in tags if _STABLE_VERSION.fullmatch(t)), key=numbers, reverse=True)
+	named = sorted(t for t in tags if not re.search(r"\d", t))
+	rest = sorted((t for t in tags if t not in stable and t not in named), key=numbers, reverse=True)
+	return stable + named + rest
+
+
+def _registry_get(url, session):
+	"""A registry request, with the anonymous token most of them want first."""
+	response = session.get(url, timeout=10)
+	if response.status_code == 401:
+		challenge = response.headers.get("WWW-Authenticate", "")
+		if challenge.lower().startswith("bearer"):
+			fields = dict(re.findall(r'(\w+)="([^"]*)"', challenge))
+			token_response = session.get(fields.get("realm", ""), timeout=10, params={
+				key: fields[key] for key in ("service", "scope") if key in fields})
+			body = token_response.json() if token_response.ok else {}
+			token = body.get("token") or body.get("access_token")
+			if token:
+				session.headers["Authorization"] = f"Bearer {token}"
+				response = session.get(url, timeout=10)
+	return response
+
+
+def get_docker_tags_from_registry(registry, repo_name):
+	"""
+	Tags from any registry speaking the Docker Registry API: ghcr.io, quay.io,
+	a private one on the user's NAS.
+
+	HTTPS first, and plain HTTP after it only for the addresses Docker itself
+	allows it for without configuration: localhost.
+	"""
+	schemes = ["https"]
+	host = registry.split(":")[0]
+	if host in ("localhost", "127.0.0.1"):
+		schemes.append("http")
+	for scheme in schemes:
+		session = requests.Session()
+		tags = []
+		path = f"/v2/{repo_name}/tags/list?n={REGISTRY_TAG_PAGE_SIZE}"
+		try:
+			for _ in range(REGISTRY_TAG_MAX_PAGES):
+				response = _registry_get(f"{scheme}://{registry}{path}", session)
+				if response.status_code != 200:
+					error(f"{registry} answered {response.status_code} listing the tags of {repo_name}")
+					return []
+				tags.extend(t for t in (response.json().get("tags") or []) if t)
+				# The next page, if any, is announced in a Link header.
+				match = re.search(r"<([^>]+)>\s*;\s*rel=\"?next\"?", response.headers.get("Link", ""))
+				if not match:
+					break
+				path = match.group(1)
+			else:
+				debug(f"Stopped reading the tags of {registry}/{repo_name} after {REGISTRY_TAG_MAX_PAGES} pages")
+		except requests.exceptions.RequestException as e:
+			debug(f"Could not reach {scheme}://{registry}: {e}")
+			continue
 		if not tags:
-			debug(f"No tags returned by ghcr.io for {repo_name}")
-			return []
-
-		# Sort: version tags first (newest), then others
-		version_tags = sorted([t for t in tags if t and t[0] == 'v' and any(c.isdigit() for c in t)], reverse=True)
-		other_tags = sorted([t for t in tags if t not in version_tags])
-
-		return (version_tags + other_tags)[:20]  # Limit to 20
-
-	except Exception as e:
-		error(f"Error getting tags from ghcr.io/{repo_name}: {e}")
-		return []
+			debug(f"No tags returned by {registry} for {repo_name}")
+		return sort_tags_newest_first(list(dict.fromkeys(tags)))[:REGISTRY_TAGS_SHOWN]
+	error(f"Could not reach the registry {registry} to list the tags of {repo_name}")
+	return []
 
 # Global schedule monitor instance (used by /schedule command)
 schedule_monitor = None

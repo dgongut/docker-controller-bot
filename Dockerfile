@@ -2,6 +2,16 @@ FROM alpine:3.24.2
 
 ARG VERSION=5.0.0_RC7
 
+# Standard OCI labels. The version comes from the same VERSION that picks the
+# source tag below, so it cannot say one thing and contain another; it is
+# what lets the bot — and Watchtower, Diun, Portainer… — announce an update
+# of this image with numbers instead of dates.
+LABEL org.opencontainers.image.title="docker-controller-bot" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.source="https://github.com/dgongut/docker-controller-bot" \
+      org.opencontainers.image.url="https://hub.docker.com/r/dgongut/docker-controller-bot" \
+      org.opencontainers.image.licenses="GPL-3.0"
+
 ENV TZ=UTC \
     PYTHONUNBUFFERED=1
 

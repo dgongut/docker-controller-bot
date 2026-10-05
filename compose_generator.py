@@ -181,6 +181,9 @@ class ComposeGenerator:
 		self._set(service, "hostname", self._get("hostname"))
 		self._set(service, "domainname", self._get("domainname"))
 		self._set(service, "stop_signal", self._get("stop_signal"))
+		stop_timeout = self._get("stop_timeout")
+		if isinstance(stop_timeout, int) and not isinstance(stop_timeout, bool) and stop_timeout >= 0:
+			service["stop_grace_period"] = _format_duration(stop_timeout * 1_000_000_000)
 		self._set(service, "stdin_open", self.config.get("stdin_open", False))
 		self._set(service, "tty", self.config.get("tty", False))
 		self._set(service, "init", self.config.get("init", False))
@@ -224,10 +227,23 @@ class ComposeGenerator:
 				self._named_volumes.add(source)
 			volumes.append(str(bind))
 
+		mount_tmpfs = []
 		for mount in self._get("mounts_list", []):
 			target = mount.get("Target")
 			source = mount.get("Source")
 			if not target or target in seen_targets:
+				continue
+			if mount.get("Type") == "tmpfs":
+				# `--mount type=tmpfs`: written as compose's short tmpfs syntax,
+				# with the size and mode it was given.
+				seen_targets.add(target)
+				options = mount.get("TmpfsOptions") or {}
+				flags = []
+				if options.get("SizeBytes"):
+					flags.append(f"size={options['SizeBytes']}")
+				if options.get("Mode") is not None:
+					flags.append(f"mode={options['Mode']:o}")
+				mount_tmpfs.append(f"{target}:{','.join(flags)}" if flags else target)
 				continue
 			seen_targets.add(target)
 			if _is_named_volume(source):
@@ -237,11 +253,20 @@ class ComposeGenerator:
 				entry = f"{entry}:ro"
 			volumes.append(entry)
 
+		# `-v /data` with nothing before it: an anonymous volume the user
+		# asked for. The image's own VOLUMEs are left out, as its other
+		# defaults are.
+		for target in self._get("anonymous_targets", []):
+			if target not in seen_targets:
+				seen_targets.add(target)
+				volumes.append(target)
+
 		self._set(service, "volumes", volumes)
 
 		tmpfs = []
 		for target, options in self._get("tmpfs_mounts", {}).items():
 			tmpfs.append(f"{target}:{options}" if options else target)
+		tmpfs.extend(mount_tmpfs)
 		self._set(service, "tmpfs", tmpfs)
 
 	def _add_ports(self, service):
@@ -264,6 +289,13 @@ class ComposeGenerator:
 				if entry not in ports:
 					ports.append(_Quoted(entry))
 		self._set(service, "ports", ports)
+		# Exposed and not published. `-P` has no compose equivalent, so a port
+		# that relied on it is at least still listed here.
+		expose = []
+		for port_spec in self._get("exposed_ports", []):
+			container_port, _, protocol = str(port_spec).partition("/")
+			expose.append(_Quoted(container_port if protocol in ("", "tcp") else f"{container_port}/{protocol}"))
+		self._set(service, "expose", expose)
 
 	def _add_networking(self, service):
 		"""
@@ -354,6 +386,12 @@ class ComposeGenerator:
 		DNS name the rest of the stack uses to reach this one.
 		"""
 		endpoint = dict(endpoint or {})
+		# Compose has no per-network links: the service's `external_links`
+		# carries them, and Docker puts them back on every network.
+		endpoint.pop("links", None)
+		# Docker reports the MAC it is using, set by hand or not: writing it
+		# would pin every assigned one.
+		endpoint.pop("mac_address", None)
 		aliases = endpoint.get("aliases")
 		if not aliases:
 			return endpoint
@@ -459,6 +497,27 @@ class ComposeGenerator:
 		self._set(service, "devices", self._get("devices"))
 		self._set(service, "device_cgroup_rules", self._get("device_cgroup_rules"))
 		self._set(service, "blkio_config", self._blkio_config())
+		extra = self._get("host_config_extra", {})
+		self._set(service, "annotations", dict(extra.get("Annotations") or {}))
+		# GPUs: `--gpus` and compose's device reservations are the same
+		# DeviceRequests underneath, and compose spells them this way.
+		devices = []
+		for request in extra.get("DeviceRequests") or []:
+			device = {}
+			self._set(device, "driver", request.get("Driver"))
+			count = request.get("Count")
+			if count == -1:
+				device["count"] = "all"
+			elif count:
+				device["count"] = count
+			self._set(device, "device_ids", request.get("DeviceIDs"))
+			capabilities = [cap for group in (request.get("Capabilities") or []) for cap in group]
+			self._set(device, "capabilities", capabilities)
+			self._set(device, "options", request.get("Options"))
+			if device:
+				devices.append(device)
+		if devices:
+			service["deploy"] = {"resources": {"reservations": {"devices": devices}}}
 
 	def _blkio_config(self):
 		"""Groups the blkio weights and per-device limits under blkio_config"""
@@ -543,5 +602,12 @@ class ComposeGenerator:
 
 	def _add_legacy(self, service):
 		"""Legacy options that would otherwise be silently dropped"""
-		self._set(service, "links", self._get("links"))
-		self._set(service, "volumes_from", self._get("volumes_from"))
+		# The generated file holds one service, so whatever it links to lives
+		# outside it: that is `external_links`, by container name.
+		self._set(service, "external_links", [
+			name if name == alias else f"{name}:{alias}" for name, alias in self._get("links", [])])
+		# Another container, not a service of this file: compose's
+		# `container:` form.
+		self._set(service, "volumes_from", [
+			entry if str(entry).startswith(("container:", "service:")) else f"container:{entry}"
+			for entry in self._get("volumes_from", [])])

@@ -80,6 +80,8 @@
   "error_stopping_container": "Kan container <b>$1</b> niet stoppen. Zie botlogs voor meer informatie",
   "error_updating_container": "❌ Kan container <b>$1</b> niet bijwerken. Zie botlogs voor meer informatie",
   "error_update_leftover_old": "❌ <b>$1</b> is niet bijgewerkt: er bestaat al een container met de naam <b>$2</b>, waarschijnlijk van een onderbroken update. Controleer hem en verwijder hem als hij niet meer nodig is",
+  "error_update_auto_remove": "❌ <b>$1</b> is niet bijgewerkt: hij is gemaakt met <code>--rm</code>, dus Docker zou hem bij het stoppen verwijderen en een mislukte update kan niet worden teruggedraaid. Maak hem opnieuw aan zonder <code>--rm</code> om hem bij te werken",
+  "error_update_bot_shares_namespace": "❌ <b>$1</b> is niet bijgewerkt: de bot gebruikt zijn netwerk, dus bijwerken zou de bot halverwege afsluiten. Werk hem handmatig bij samen met de bot",
   "error_use_mute_command": "❌ Geef een geldig aantal minuten op.\n · Gebruik: /mute &lt;minuten&gt;\nOm te deactiveren gebruik /mute 0",
   "exec_command_container": "⚡️ Klik op een <b>project of container</b> om een commando in uit te voeren",
   "executed_command": "⚡️ De volgende opdracht is uitgevoerd in container <b>$1</b>.\n\n<pre><code>$2</code></pre>\n\nResultaat:\n<pre><code>$3</code></pre>",

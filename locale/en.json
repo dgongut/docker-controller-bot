@@ -80,6 +80,8 @@
   "error_stopping_container": "❌ Failed to stop container <b>$1</b>. See bot logs for more information",
   "error_updating_container": "❌ Failed to update container <b>$1</b>. See bot logs for more information",
   "error_update_leftover_old": "❌ <b>$1</b> was not updated: a container named <b>$2</b> already exists, probably from an interrupted update. Check it and remove it if it is no longer needed",
+  "error_update_auto_remove": "❌ <b>$1</b> was not updated: it was created with <code>--rm</code>, so Docker would delete it when stopped and a failed update could not be rolled back. Recreate it without <code>--rm</code> to update it",
+  "error_update_bot_shares_namespace": "❌ <b>$1</b> was not updated: the bot uses its network, so updating it would cut the bot off halfway through. Update it by hand together with the bot",
   "error_use_mute_command": "❌ Please provide a valid number of minutes.\n · Usage: /mute &lt;minutes&gt;\nTo deactivate use /mute 0",
   "exec_command_container": "⚡️ Click on a <b>project or container</b> to execute a command in it",
   "executed_command": "⚡️ The following command has been executed in container <b>$1</b>.\n\n<pre><code>$2</code></pre>\n\nResult:\n<pre><code>$3</code></pre>",

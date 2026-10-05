@@ -17,6 +17,20 @@ python3 tests/run_all.py store
 | `test_store.py` | Ajustes, estado y caché de actualizaciones. Ficheros corruptos, claves desconocidas que sobreviven, invalidación por cambio de tag y el volumen antiguo de 4.x |
 | `test_migration.py` | Que actualizar desde 4.x no cambie nada visible: valores importados tal cual, el entorno sin ganar tras el sembrado, y el silencio activo trasladado |
 | `test_bot.py` | Ajustes leídos en caliente, los menús de `/settings` y `/start`, y el registro de callbacks |
+| `test_real_docker.py` | **Contra Docker de verdad, solo con `--docker`.** Actualiza contenedores con toda la configuración posible y compara el `docker inspect` de antes y después; la ida y vuelta de `/compose`; dependientes de Compose y contenedores que comparten red; tags de un registro privado |
+
+## Contra Docker de verdad
+
+```bash
+python3 tests/run_all.py --docker
+```
+
+Los dobles dicen si la vuelta atrás borra el contenedor correcto, pero no si el
+contenedor que vuelve es el que se fue. Eso solo lo sabe Docker. Estos tests
+necesitan un demonio en `/var/run/docker.sock`, levantan un registro en
+`127.0.0.1:55000` para publicar versiones «nuevas» de una imagen, y tardan unos
+minutos. Solo tocan lo que crean: todo se llama `dcbtest-…` y lleva la etiqueta
+`dcbtest=1`, y la limpieza exige las dos cosas.
 
 ## Cómo funcionan
 

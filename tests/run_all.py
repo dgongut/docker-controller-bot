@@ -5,6 +5,7 @@ only need the ones it already ships with.
 
 	python3 tests/run_all.py            todo
 	python3 tests/run_all.py bot        solo los módulos que casen con "bot"
+	python3 tests/run_all.py --docker   contra el Docker de verdad (ver test_real_docker.py)
 
 Each test file is a module of `test_*` functions that assert. A failure prints
 the assertion and the run ends non-zero.
@@ -22,6 +23,12 @@ REPO = os.path.dirname(HERE)
 # module, which is global state, so it goes last.
 MODULES = ("test_lint", "test_store", "test_migration", "test_identity", "test_hosts", "test_update", "test_bot", "test_monitors")
 
+# Against the real daemon, so not by default: they need Docker running, create
+# and update containers, and take minutes. `--docker` runs these and nothing
+# else, since the bot module they load must not be the stubbed one the others
+# share.
+DOCKER_MODULES = ("test_real_docker",)
+
 
 def load(name):
 	spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, f"{name}.py"))
@@ -31,7 +38,7 @@ def load(name):
 	return module
 
 
-def run(selector=None):
+def run(selector=None, modules=MODULES):
 	sys.path.insert(0, REPO)
 	sys.path.insert(0, HERE)
 	# The tests chdir into temporary directories; come back afterwards.
@@ -40,7 +47,7 @@ def run(selector=None):
 	passed = failed = 0
 	failures = []
 	try:
-		for name in MODULES:
+		for name in modules:
 			if selector and selector not in name:
 				continue
 			print(f"\n\033[1m{name}\033[0m")
@@ -75,4 +82,9 @@ def run(selector=None):
 
 
 if __name__ == "__main__":
-	sys.exit(run(sys.argv[1] if len(sys.argv) > 1 else None))
+	arguments = sys.argv[1:]
+	modules = MODULES
+	if "--docker" in arguments:
+		arguments.remove("--docker")
+		modules = DOCKER_MODULES
+	sys.exit(run(arguments[0] if arguments else None, modules))

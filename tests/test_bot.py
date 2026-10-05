@@ -3269,6 +3269,11 @@ def _assert_telegram_html(text, where=""):
 
 	Checker(convert_charrefs=True).feed(text)
 	assert not stack, f"{where}: sin cerrar {stack} en {text!r}"
+	# The parser above reads `a < b` as text, and Telegram does not: any `<`
+	# that does not open one of its tags makes it refuse the message.
+	import re
+	stray = re.sub(r"</?(?:%s)(?:\s[^>]*)?>" % "|".join(sorted(allowed, key=len, reverse=True)), "", text)
+	assert "<" not in stray, f"{where}: «<» sin escapar en {text!r}"
 
 
 def test_what_the_user_typed_in_a_schedule_never_breaks_its_screens():
@@ -3279,7 +3284,7 @@ def test_what_the_user_typed_in_a_schedule_never_breaks_its_screens():
 	"""
 	_with_hosts([HOST_FIXTURE[0]], unreachable=())
 	task = {"id": 7, "name": "copia <diaria> & co", "cron": "@daily", "action": "exec",
-			"container": "db", "command": "mysql < dump.sql > out", "show_output": True,
+			"container": "db<x>", "command": "mysql < dump.sql > out", "show_output": True,
 			"host": "h_local", "enabled": True}
 	sent = []
 	original = (dcb.send_message, dcb.schedule_manager.get_all_schedules,
@@ -3310,6 +3315,141 @@ def test_what_the_user_typed_in_a_schedule_never_breaks_its_screens():
 			dcb.schedule_manager.get_schedule_by_id, dcb.schedule_manager.update_schedule,
 			dcb.schedule_manager.delete_schedule) = original
 		_restore_hosts()
+
+
+def test_the_schedule_wizard_survives_whatever_is_typed_into_it():
+	"""
+	Every step of creating a task, fed what a user might type: a name with
+	`<`, `&` and quotes, a cron that is not one, minutes that are not a
+	number, a command with redirections. Each screen it answers with has to
+	be one Telegram accepts, or the wizard stops halfway with no message.
+	"""
+	_with_hosts([HOST_FIXTURE[0]], unreachable=())
+	nasty = 'copia <diaria> & "co"'
+	sent = []
+	original = (dcb.send_message, dcb.save_schedule_state, dcb.schedule_manager.get_schedule,
+				dcb.schedule_manager.add_schedule, dcb.delete_message)
+	dcb.send_message = lambda **kwargs: sent.append(kwargs.get("message", "")) or MagicMock(message_id=1)
+	dcb.save_schedule_state = lambda *a, **k: None
+	dcb.delete_message = lambda *a, **k: None
+	dcb.schedule_manager.get_schedule = lambda name: None
+	dcb.schedule_manager.add_schedule = lambda *a, **k: True
+	try:
+		steps = [
+			({"step": "ask_name"}, nasty),
+			({"step": "ask_cron", "name": nasty}, "<no es cron>"),
+			({"step": "ask_cron", "name": nasty}, "0 3 * * *"),
+			({"step": "ask_minutes", "name": nasty, "cron": "@daily", "action": "mute"}, "<diez>"),
+			({"step": "ask_minutes", "name": nasty, "cron": "@daily", "action": "mute"}, "-5"),
+			({"step": "ask_minutes", "name": nasty, "cron": "@daily", "action": "mute"}, "10"),
+			({"step": "ask_command", "name": nasty, "cron": "@daily", "action": "exec",
+				"container": "db<1>", "host": "h_local"}, "mysql < dump.sql > out && echo ok"),
+		]
+		for state, typed in steps:
+			before = len(sent)
+			dcb.handle_schedule_flow(1, typed, dict(state), chat_id=1)
+			assert len(sent) > before, f"{state['step']} con {typed!r} no contestó nada"
+		for i, text in enumerate(sent):
+			_assert_telegram_html(text, f"mensaje {i}")
+	finally:
+		(dcb.send_message, dcb.save_schedule_state, dcb.schedule_manager.get_schedule,
+			dcb.schedule_manager.add_schedule, dcb.delete_message) = original
+		_restore_hosts()
+
+
+def test_a_cron_that_never_fires_is_not_accepted():
+	"""
+	`0 0 30 2 *` parses — and fires on the 30th of February. It was saved,
+	never ran, and nothing said why.
+	"""
+	for never in ("0 0 30 2 *", "0 0 31 4 *", "0 0 31 6 *"):
+		assert not dcb.is_valid_cron(never), never
+	for fine in ("0 0 29 2 *", "0 0 L * *", "*/5 * * * *", "@daily", "@reboot", "0 0 * * 1#2"):
+		assert dcb.is_valid_cron(fine), fine
+	for broken in ("", "60 * * * *", "* * * *", "* * * * * *", "*/0 * * * *", "<b>", "@nunca"):
+		assert not dcb.is_valid_cron(broken), broken
+
+
+def test_the_registry_of_an_image_is_read_the_way_docker_reads_it():
+	"""`docker.io/library/nginx` is Docker Hub's nginx, not a repository by that name."""
+	cases = {
+		"nginx": (None, "nginx"),
+		"linuxserver/plex": (None, "linuxserver/plex"),
+		"docker.io/library/nginx": (None, "library/nginx"),
+		"index.docker.io/linuxserver/plex": (None, "linuxserver/plex"),
+		"lscr.io/linuxserver/plex": (None, "linuxserver/plex"),
+		"ghcr.io/home-assistant/home-assistant": ("ghcr.io", "home-assistant/home-assistant"),
+		"quay.io/prometheus/node-exporter": ("quay.io", "prometheus/node-exporter"),
+		"nas:5000/app": ("nas:5000", "app"),
+		"localhost/app": ("localhost", "app"),
+	}
+	for reference, expected in cases.items():
+		assert dcb.split_registry(reference) == expected, (reference, dcb.split_registry(reference))
+
+
+def test_the_more_info_link_points_somewhere_that_exists():
+	cases = {
+		"nginx:latest": "https://hub.docker.com/_/nginx",
+		"docker.io/library/nginx:1.27": "https://hub.docker.com/_/nginx",
+		"linuxserver/plex": "https://hub.docker.com/r/linuxserver/plex",
+		"docker.io/linuxserver/plex:latest": "https://hub.docker.com/r/linuxserver/plex",
+		"lscr.io/linuxserver/plex:latest": "https://hub.docker.com/r/linuxserver/plex",
+		"quay.io/prometheus/node-exporter:v1": "https://quay.io/repository/prometheus/node-exporter",
+		"nas:5000/app:latest": None,
+		"localhost/app": None,
+	}
+	for image, expected in cases.items():
+		assert dcb.build_registry_url(image)[0] == expected, (image, dcb.build_registry_url(image))
+
+
+def test_registry_tags_are_offered_newest_first():
+	"""
+	Alphabetical is what a registry hands over, and its first twenty were
+	Home Assistant's 2021 releases: a list of downgrades under a menu that
+	reads as one of upgrades.
+	"""
+	tags = ["2021.5.0", "2021.5.0b1", "2026.9.10", "2026.9.9", "latest", "stable",
+			"2026.10.0b2", "v9.1", "v10.0", "dev", "2026.9.9-ls12"]
+	ordered = dcb.sort_tags_newest_first(tags)
+	# By number: 2026.9.10 after 2026.9.9 alphabetically, v10 after v9.
+	assert ordered[:5] == ["2026.9.10", "2026.9.9", "2021.5.0", "v10.0", "v9.1"], ordered
+	assert ordered[5:8] == ["dev", "latest", "stable"], ordered
+	assert ordered[8:] == ["2026.10.0b2", "2026.9.9-ls12", "2021.5.0b1"], ordered
+
+
+def test_registry_tags_are_read_to_the_last_page():
+	"""The newest sort last alphabetically, so stopping at the first page missed them."""
+	pages = {
+		"/v2/team/app/tags/list?n=1000": (["1.0", "1.1"], '</v2/team/app/tags/list?last=1.1&n=1000>; rel="next"'),
+		"/v2/team/app/tags/list?last=1.1&n=1000": (["2.0"], ""),
+	}
+	seen = []
+
+	class Response:
+		def __init__(self, url):
+			path = url.split("nas:5000", 1)[1]
+			seen.append(path)
+			self.status_code = 200
+			self.ok = True
+			self._tags, link = pages[path]
+			self.headers = {"Link": link} if link else {}
+
+		def json(self):
+			return {"tags": self._tags}
+
+	class Session:
+		headers = {}
+
+		def get(self, url, **kwargs):
+			return Response(url)
+
+	original = dcb.requests.Session
+	dcb.requests.Session = Session
+	try:
+		assert dcb.get_docker_tags_from_registry("nas:5000", "team/app") == ["2.0", "1.1", "1.0"]
+		assert len(seen) == 2, seen
+	finally:
+		dcb.requests.Session = original
 
 
 def test_the_three_renderers_put_the_host_in_the_same_place():
@@ -4864,8 +5004,6 @@ def test_a_single_update_of_the_bot_or_with_extended_messages_keeps_its_messages
 		assert sent == [], sent
 	finally:
 		restore()
-
-
 
 
 def test_an_update_holds_its_events_only_while_it_runs():

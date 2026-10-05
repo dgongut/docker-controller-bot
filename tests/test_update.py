@@ -21,6 +21,10 @@ if harness.REPO not in sys.path:
 import docker.errors
 import docker_update
 
+# The in-memory Docker never crashes on its own, so there is nothing to wait
+# for; test_real_docker exercises the wait itself.
+docker_update.VERIFY_STABLE_SECONDS = 0
+
 
 class FakeContainer:
 	def __init__(self, engine, name, status="running", role=None):
@@ -253,3 +257,23 @@ def test_an_update_in_progress_is_claimed_and_then_released():
 		assert docker_update._updating == set(), docker_update._updating
 	finally:
 		docker_update._perform_update_locked = original
+
+
+def test_the_repository_of_an_image_keeps_the_registrys_port():
+	"""
+	`nas:5000/app:latest` split on the first colon is `nas`, and a /changetag
+	to v2 then pulled `nas:v2`. Found by test_real_docker, whose registry is
+	on localhost:55000.
+	"""
+	cases = {
+		"nginx": "nginx",
+		"nginx:1.27": "nginx",
+		"lscr.io/linuxserver/plex:latest": "lscr.io/linuxserver/plex",
+		"nas:5000/app": "nas:5000/app",
+		"nas:5000/app:latest": "nas:5000/app",
+		"localhost:55000/team/app:v2": "localhost:55000/team/app",
+		"nginx@sha256:" + "a" * 64: "nginx",
+		"nas:5000/app:1.0@sha256:" + "b" * 64: "nas:5000/app",
+	}
+	for reference, expected in cases.items():
+		assert docker_update.image_repository(reference) == expected, (reference, docker_update.image_repository(reference))

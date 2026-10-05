@@ -7,6 +7,7 @@ while preserving all configuration, mounts, networks, and resources.
 import docker
 import docker.types
 import docker.errors
+import copy
 import time
 import threading
 
@@ -86,6 +87,122 @@ def _normalize_command(value):
 	return list(value)
 
 
+def image_repository(reference):
+	"""
+	The repository of an image reference, without its tag or digest.
+
+	The tag is whatever follows the last colon *after the last slash*: the
+	first colon may be a registry's port. Splitting on it turned
+	`nas:5000/app:latest` into `nas`, and a /changetag to v2 into a pull of
+	`nas:v2`.
+	"""
+	reference = str(reference or '').split('@', 1)[0]
+	colon = reference.rfind(':')
+	return reference[:colon] if colon > reference.rfind('/') else reference
+
+
+def container_platform(container):
+	"""
+	The platform a container actually runs, as `os/arch[/variant]`, or None.
+
+	Not the host's: `platform: linux/amd64` on an Apple Silicon Mac or a
+	Raspberry Pi, or a 32-bit image on a 64-bit Pi. A pull without a platform
+	brings the host's own, and the update quietly turned an x86_64 container
+	into an aarch64 one. Read from the manifest the container was created
+	from (the containerd image store, where an image's id is the same for
+	every architecture), or from the image itself (the classic store).
+	"""
+	descriptor = _get_dict(container.attrs, 'ImageManifestDescriptor')
+	platform = _get_dict(descriptor, 'platform')
+	os_name, architecture, variant = platform.get('os'), platform.get('architecture'), platform.get('variant')
+	if not architecture:
+		try:
+			image = container.image.attrs or {}
+		except Exception:
+			return None
+		os_name, architecture, variant = image.get('Os'), image.get('Architecture'), image.get('Variant')
+	if not isinstance(os_name, str) or not isinstance(architecture, str) or not os_name or not architecture:
+		return None
+	return "/".join(part for part in (os_name, architecture, variant if isinstance(variant, str) else None) if part)
+
+
+def _link_pairs(links):
+	"""
+	Links as (container, alias) pairs, the only shape the SDK takes.
+
+	Docker reports them in two others: `/db:/web/alias` in HostConfig.Links,
+	and `db:alias` on a network endpoint. Both used to be handed back as
+	strings, which the SDK unpacks as pairs: any container with `links:`
+	failed to update, every time.
+	"""
+	pairs = []
+	for link in links or []:
+		if isinstance(link, (list, tuple)) and len(link) == 2:
+			pairs.append((str(link[0]), str(link[1])))
+			continue
+		name, _, alias = str(link).partition(':')
+		name = name.lstrip('/')
+		alias = alias.rsplit('/', 1)[-1] if alias else name
+		if name:
+			pairs.append((name, alias))
+	return list(dict.fromkeys(pairs))
+
+
+# How long the new container has to stay up, and how long it is given to
+# get there, before the original is deleted.
+VERIFY_STABLE_SECONDS = 2
+VERIFY_TIMEOUT_SECONDS = 15
+VERIFY_POLL_SECONDS = 0.5
+
+
+def _container_logs(container):
+	try:
+		return container.logs(tail=50).decode('utf-8', errors='ignore')
+	except Exception as log_error:
+		return f"[Could not retrieve logs: {log_error}]"
+
+
+def _verify_stays_up(container, container_name, debug_func):
+	"""Raises unless the container stays running, unrestarted, for a while."""
+	deadline = time.time() + VERIFY_TIMEOUT_SECONDS
+	up_since = None
+	restarts = None
+	while True:
+		try:
+			container.reload()
+		except docker.errors.NotFound:
+			raise Exception("Container was removed by external process during verification")
+		state = _get_dict(container.attrs, 'State')
+		status = container.status
+		count = _get_val(container.attrs, 'RestartCount', 0)
+		if restarts is None:
+			restarts = count
+		elif count != restarts:
+			# A restart policy hides a crash behind a container that is
+			# "running" again by the next look.
+			raise Exception(f"Container restarted during verification. Last logs: {_container_logs(container)}")
+		debug_func(f"[VERIFY_CONTAINER] Container status: {status}")
+		if status in ('exited', 'dead'):
+			raise Exception(f"Container exited with code {_get_val(state, 'ExitCode')}. Last logs: {_container_logs(container)}")
+		now = time.time()
+		if status == 'running':
+			up_since = up_since or now
+			if now - up_since >= VERIFY_STABLE_SECONDS:
+				debug_func(f"[VERIFY_CONTAINER] ✅ Container {container_name} stayed up for {VERIFY_STABLE_SECONDS}s")
+				return
+		else:
+			up_since = None
+		if now >= deadline:
+			raise Exception(f"Container did not stay running (status: {status}). Last logs: {_container_logs(container)}")
+		time.sleep(VERIFY_POLL_SECONDS)
+
+
+def _bind_target(bind):
+	"""Where a `source:target[:mode]` bind lands in the container."""
+	parts = str(bind).split(':')
+	return parts[1] if len(parts) >= 2 else None
+
+
 def _get_old_image_config(container):
 	"""
 	Returns the Config dict of the image the container was created from,
@@ -159,6 +276,10 @@ _ENDPOINT_TO_CONNECT_KWARGS = {
 	'links': 'links',
 	'link_local_ips': 'link_local_ips',
 	'driver_opts': 'driver_opt',
+	# Kept like the primary network's: one assigned by Docker stays the same
+	# across updates, and one set by hand — a DHCP reservation on macvlan —
+	# is not lost on a network that happens not to be the first.
+	'mac_address': 'mac_address',
 }
 
 
@@ -201,11 +322,64 @@ def _connect_extra_networks(client, new_container, config, debug_func, error_fun
 
 		try:
 			network = client.networks.get(network_name)
-			network.connect(new_container.id, **connect_kwargs)
+			gw_priority = (endpoint or {}).get('gw_priority')
+			if gw_priority:
+				# The request Network.connect() sends, plus the gateway
+				# priority it has no argument for: without it every network
+				# came back at 0, and the default route could move to another.
+				api = client.api
+				endpoint_config = api.create_endpoint_config(**connect_kwargs)
+				endpoint_config['GwPriority'] = gw_priority
+				response = api._post_json(api._url("/networks/{0}/connect", network.id),
+											data={"Container": new_container.id, "EndpointConfig": endpoint_config})
+				api._raise_for_status(response)
+			else:
+				network.connect(new_container.id, **connect_kwargs)
 			debug_func(f"[EXTRA_NETWORKS] Reattached to network {network_name} ({connect_kwargs or 'no endpoint settings'})")
 		except Exception as connect_error:
 			error_func(f"[EXTRA_NETWORKS] Could not reattach to network {network_name}: {connect_error}")
 			raise Exception(f"Failed to reattach network {network_name}: {connect_error}")
+
+
+# HostConfig fields copied verbatim into the new container's request: GPUs
+# (`--gpus`, compose's device reservations) and OCI annotations.
+HOST_CONFIG_PASSTHROUGH = ('DeviceRequests', 'Annotations')
+
+
+def _create_container(client, stop_timeout, exposed_ports, image, host_config_extra=None, **kwargs):
+	"""
+	containers.create(), plus what it has no argument for.
+
+	The SDK's create() does not forward a stop timeout; it derives the exposed
+	ports from the published ones, so a port that was only exposed has no way
+	in; and some HostConfig fields it either does not know (Annotations) or
+	only takes in a shape of its own (DeviceRequests, the GPUs of compose's
+	`deploy.resources.reservations.devices`). Those are copied into the
+	request as the daemon reported them. When the container has none of it,
+	this is create() itself; otherwise it does what create() does inside,
+	with all of that added.
+	"""
+	if not stop_timeout and not exposed_ports and not host_config_extra:
+		return client.containers.create(image, **kwargs)
+	from docker.models.containers import _create_container_args
+	kwargs['image'] = image
+	kwargs.setdefault('command', None)
+	kwargs['version'] = client.api._version
+	create_kwargs = _create_container_args(kwargs)
+	if stop_timeout:
+		create_kwargs['stop_timeout'] = stop_timeout
+	if exposed_ports:
+		ports = list(create_kwargs.get('ports') or [])
+		for port in exposed_ports:
+			number, _, protocol = str(port).partition('/')
+			entry = (number, protocol or 'tcp')
+			if entry not in ports:
+				ports.append(entry)
+		create_kwargs['ports'] = ports
+	for key, value in (host_config_extra or {}).items():
+		create_kwargs['host_config'][key] = copy.deepcopy(value)
+	response = client.api.create_container(**create_kwargs)
+	return client.containers.get(response['Id'])
 
 
 def extract_container_config(container, tag=None):
@@ -234,36 +408,82 @@ def extract_container_config(container, tag=None):
 	# Drop values inherited from the old image so the new image's defaults apply
 	_strip_old_image_defaults(config, container_attrs, container)
 
+	# compose's `stop_grace_period`. An image cannot set it, so it is always
+	# the user's — and stop_container reads it on the next update.
+	config['stop_timeout'] = _get_val(container_attrs, 'StopTimeout')
+
 	# Volumes and mounts
 	config['volumes'] = _get_list(host_config, 'Binds')
 	config['ports'] = _get_dict(host_config, 'PortBindings')
-	# `--tmpfs` and compose's `tmpfs:` land here...
+	# `-P`: every exposed port published on a random one.
+	config['publish_all_ports'] = _get_val(host_config, 'PublishAllPorts', False)
+	# compose's `expose:` (or `--expose`): exposed without being published. The
+	# ones the old image exposed are left to the new image, the same as its
+	# other defaults, and the published ones are already in `ports`.
+	image_exposed = set(_get_dict(_get_old_image_config(container), 'ExposedPorts'))
+	config['exposed_ports'] = sorted(
+		port for port in _get_dict(container_attrs, 'ExposedPorts')
+		if port not in image_exposed and port not in config['ports'])
+	# `--tmpfs` and compose's short `tmpfs:` land here; `--mount` and compose's
+	# long syntax in HostConfig.Mounts, which is handed back to Docker exactly
+	# as Docker gave it. It used to be rebuilt field by field through the SDK's
+	# Mount type, which knows a subset of the spec: read-only was read under
+	# the wrong name and came back writable, and a volume's `subpath`, a
+	# bind's `create_host_path` and a tmpfs's `mode` were dropped. Passing the
+	# spec through keeps whatever the daemon knows about, including what is
+	# added to it later.
 	config['tmpfs_mounts'] = dict(_get_dict(host_config, 'Tmpfs'))
-	config['mounts_list'] = []
+	config['mounts_list'] = [copy.deepcopy(mount) for mount in _get_list(host_config, 'Mounts')
+							if isinstance(mount, dict) and mount.get('Target')]
 
-	mounts_list_raw = _get_list(host_config, 'Mounts')
-	for mount in mounts_list_raw:
-		mount_type = _get_val(mount, 'Type', '')
-		target = _get_val(mount, 'Target', '')
-
-		if mount_type == 'tmpfs':
-			# ...and `--mount type=tmpfs` here. Both forms are merged.
-			tmpfs_options = _get_dict(mount, 'TmpfsOptions')
-			size_bytes = _get_val(tmpfs_options, 'SizeBytes', 0)
-			config['tmpfs_mounts'][target] = f"size={size_bytes}" if size_bytes else ''
-		else:
-			try:
-				mount_obj = docker.types.Mount(
-					target=target,
-					source=_get_val(mount, 'Source', ''),
-					type=mount_type,
-					read_only=_get_val(mount, 'RW', True) == False,
-					propagation=_get_val(mount, 'Propagation'),
-					labels=_get_val(mount, 'Labels')
-				)
-				config['mounts_list'].append(mount_obj)
-			except Exception:
-				pass
+	# Anonymous volumes: `-v /data`, or a VOLUME in the image nobody mapped —
+	# the database directory of postgres, mariadb or mongo, more often than
+	# not. They appear in neither Binds nor HostConfig.Mounts, so the new
+	# container got a fresh, empty one and the data stayed behind in a volume
+	# nothing used any more. `docker compose up` carries them over to the
+	# recreated container; so does this, by name.
+	#
+	# Kept apart from `volumes`: the update adds them to the new container,
+	# and the compose generator only declares the ones the user asked for —
+	# a volume the image declares is the image's to create, and a random
+	# 64-character name is no use in a docker-compose.
+	claimed = {target for target in (_bind_target(bind) for bind in config['volumes']) if target}
+	claimed |= {mount['Target'] for mount in config['mounts_list']}
+	claimed |= set(config['tmpfs_mounts'])
+	# `volumes_from`. What it brings in is in the Mounts list too, unmarked,
+	# and is the other container's: claimed here, or it would be bound a
+	# second time and /compose would declare it as a volume of this one.
+	#
+	# Compose records the donor by id, and an update gives the donor a new
+	# one: the next update of this container failed on a container that no
+	# longer existed, every time. So a donor that is there is referred to by
+	# name, which a recreation keeps; one that is gone is dropped, and the
+	# volumes it lent — still mounted here — are carried over by name below
+	# like any other, which is the same data.
+	config['volumes_from'] = []
+	for source in _get_list(host_config, 'VolumesFrom'):
+		reference, _, mode = str(source).partition(':')
+		try:
+			donor = container.client.containers.get(reference)
+		except docker.errors.NotFound:
+			continue
+		except Exception:
+			config['volumes_from'].append(source)
+			continue
+		claimed |= {_get_val(m, 'Destination') for m in _get_list(donor.attrs, 'Mounts')}
+		config['volumes_from'].append(f"{donor.name}:{mode}" if mode else donor.name)
+	image_volumes = set(_get_dict(_get_old_image_config(container), 'Volumes'))
+	config['anonymous_volumes'] = []
+	config['anonymous_targets'] = []
+	for mount in _get_list(container.attrs, 'Mounts'):
+		destination = _get_val(mount, 'Destination')
+		name = _get_val(mount, 'Name')
+		if _get_val(mount, 'Type') != 'volume' or not name or not destination or destination in claimed:
+			continue
+		mode = 'rw' if _get_val(mount, 'RW', True) else 'ro'
+		config['anonymous_volumes'].append(f"{name}:{destination}:{mode}")
+		if destination not in image_volumes:
+			config['anonymous_targets'].append(destination)
 
 	# Network configuration
 	config['network_mode'] = _get_val(host_config, 'NetworkMode')
@@ -319,7 +539,7 @@ def extract_container_config(container, tag=None):
 			if aliases:
 				aliases = [a for a in aliases if a != _old_short_id]
 			network_aliases = aliases if aliases else None
-			links = _get_val(network_config, 'Links')
+			links = _link_pairs(_get_val(network_config, 'Links'))
 			network_links = links if links else None
 			driver_opts = _get_val(network_config, 'DriverOpts')
 			network_driver_opts = driver_opts if driver_opts else None
@@ -344,7 +564,11 @@ def extract_container_config(container, tag=None):
 		_aliases = [a for a in (_get_val(_net_config, 'Aliases') or []) if a != _old_short_id]
 		if _aliases:
 			_endpoint['aliases'] = _aliases
-		for _key, _api_key in (('link_local_ips', 'LinkLocalIPs'), ('links', 'Links'), ('driver_opts', 'DriverOpts')):
+		_links = _link_pairs(_get_val(_net_config, 'Links'))
+		if _links:
+			_endpoint['links'] = _links
+		for _key, _api_key in (('link_local_ips', 'LinkLocalIPs'), ('driver_opts', 'DriverOpts'),
+								('gw_priority', 'GwPriority'), ('mac_address', 'MacAddress')):
 			_value = _get_val(_net_config, _api_key)
 			if _value:
 				_endpoint[_key] = _value
@@ -428,19 +652,35 @@ def extract_container_config(container, tag=None):
 	config['sysctls'] = _get_dict(host_config, 'Sysctls')
 	config['ulimits'] = _get_list(host_config, 'Ulimits')
 	config['group_add'] = _get_list(host_config, 'GroupAdd')
-	config['links'] = _get_list(host_config, 'Links')
-	config['volumes_from'] = _get_list(host_config, 'VolumesFrom')
+	config['links'] = _link_pairs(_get_list(host_config, 'Links'))
+	# Handed back to the daemon untouched; see _create_container.
+	config['host_config_extra'] = {key: copy.deepcopy(host_config[key])
+									for key in HOST_CONFIG_PASSTHROUGH if host_config.get(key)}
+	# `--security-opt systempaths=unconfined` is the CLI's: the daemon is
+	# handed empty MaskedPaths and ReadonlyPaths instead, and that is all the
+	# inspect output shows. Recreated without them, /proc came back masked —
+	# and the option itself is refused by the API. Empty, not missing: missing
+	# means Docker's defaults.
+	for key in ('MaskedPaths', 'ReadonlyPaths'):
+		if host_config.get(key) == [] and not config['privileged']:
+			config['host_config_extra'][key] = []
 	config['runtime'] = _get_val(host_config, 'Runtime')
 
 	# Image
 	image_with_tag = _get_val(container_attrs, 'Image', '')
 	if tag:
-		image_with_tag = f'{image_with_tag.split(":")[0]}:{tag}'
+		image_with_tag = f'{image_repository(image_with_tag)}:{tag}'
 	config['image'] = image_with_tag
+	config['platform'] = container_platform(container)
 
 	# Status
-	STATES_TO_STOP = ['running', 'restarting', 'paused', 'created']
+	# Not 'created': a container that was never started is not started by
+	# updating it either.
+	STATES_TO_STOP = ['running', 'restarting', 'paused']
 	config['is_running'] = container.status in STATES_TO_STOP
+	# Comes back paused: it has to run for the update to be verified, and is
+	# paused again once it is.
+	config['was_paused'] = container.status == 'paused'
 
 	return config
 
@@ -515,6 +755,13 @@ def _perform_update_locked(client, container, config, container_name, message, e
 		error_func(f"[UPDATE_START] ❌ {old_container_name} already exists (ID: {leftover.id[:container_id_length]}); not touching {container_name}")
 		return get_text_func("error_update_leftover_old", container_name, old_container_name)
 
+	# `--rm`: Docker deletes the container the moment it stops, so the stop
+	# below would destroy the original and leave nothing to roll back to — a
+	# failed update would lose it for good. Measured: that is what happened.
+	if _get_dict(container.attrs, 'HostConfig').get('AutoRemove'):
+		error_func(f"[UPDATE_START] ❌ {container_name} was started with --rm; not touching it")
+		return get_text_func("error_update_auto_remove", container_name)
+
 	# Whether the original was renamed to _old, so the rollback knows if there
 	# is a name to give back.
 	renamed = False
@@ -530,7 +777,10 @@ def _perform_update_locked(client, container, config, container_name, message, e
 
 			try:
 				debug_func(f"[PULL_IMAGE] Starting pull of {config['image']}")
-				pulled_image = client.images.pull(config['image'])
+				if config.get('platform'):
+					pulled_image = client.images.pull(config['image'], platform=config['platform'])
+				else:
+					pulled_image = client.images.pull(config['image'])
 				if not pulled_image or not pulled_image.id:
 					raise Exception("Image pull returned invalid image object")
 				debug_func(f"[PULL_IMAGE] Image pulled successfully: {pulled_image.id[:container_id_length]}")
@@ -594,6 +844,12 @@ def _perform_update_locked(client, container, config, container_name, message, e
 					endpoint_kwargs['mac_address'] = config['network_mac_address']
 
 				endpoint_config = EndpointConfig(**endpoint_kwargs)
+				# Which network the default route goes through, when there are
+				# several (compose's `gw_priority`). The SDK has no argument
+				# for it, and EndpointConfig is the API's dict underneath.
+				gw_priority = (config.get('networks') or {}).get(config['network_mode'], {}).get('gw_priority')
+				if gw_priority:
+					endpoint_config['GwPriority'] = gw_priority
 				networking_config = {config['network_mode']: endpoint_config}
 				debug_func(f"[CREATE_CONTAINER] Network config: IPv4={config['ipv4_address']}, IPv6={config['ipv6_address']}, MAC={config['network_mac_address']}, aliases={config['network_aliases']}")
 			else:
@@ -603,15 +859,20 @@ def _perform_update_locked(client, container, config, container_name, message, e
 					debug_func(f"[CREATE_CONTAINER] Container MAC address: {effective_mac}")
 
 			debug_func(f"[CREATE_CONTAINER] Creating new container with name: {container_name}")
-			new_container = client.containers.create(
+			new_container = _create_container(
+				client,
+				config.get('stop_timeout'),
+				config.get('exposed_ports'),
 				config['image'],
+				host_config_extra=config.get('host_config_extra'),
+				platform=config.get('platform'),
 				name=container_name,
 				command=config['command'] if config['command'] else None,
 				entrypoint=config['entrypoint'],
 				environment=config['environment'],
 				working_dir=config['working_dir'],
 				user=config['user'],
-				volumes=config['volumes'],
+				volumes=list(config['volumes'] or []) + list(config.get('anonymous_volumes') or []),
 				mounts=config['mounts_list'] if config['mounts_list'] else None,
 				# docker-py only applies networking_config when `network` is also
 				# passed (_create_container_args drops it silently otherwise, losing
@@ -682,6 +943,7 @@ def _perform_update_locked(client, container, config, container_name, message, e
 				runtime=config['runtime'],
 				tmpfs=config['tmpfs_mounts'] if config['tmpfs_mounts'] else None,
 				ports=config['ports'] if config['ports'] else None,
+				publish_all_ports=bool(config.get('publish_all_ports')),
 			)
 			new_container_id = new_container.id
 			debug_func(f"[CREATE_CONTAINER] New container created successfully (ID: {new_container.id[:container_id_length]})")
@@ -711,43 +973,19 @@ def _perform_update_locked(client, container, config, container_name, message, e
 		debug_func(f"[VERIFY_CONTAINER] Starting verification of new container {container_name} (ID: {new_container.id[:container_id_length]})")
 
 		if config['is_running']:
-			# Container should be running - verify it starts correctly
-			max_retries = 5
-			retry_count = 0
-			while retry_count < max_retries:
-				try:
-					debug_func(f"[VERIFY_CONTAINER] Attempt {retry_count + 1}/{max_retries}: Reloading container state")
-					try:
-						new_container.reload()
-					except docker.errors.NotFound:
-						raise Exception("Container was removed by external process during verification")
-
-					debug_func(f"[VERIFY_CONTAINER] Container status: {new_container.status}")
-					if new_container.status == 'running':
-						debug_func(f"[VERIFY_CONTAINER] ✅ Container {container_name} is running successfully")
-						break
-					elif new_container.status in ['exited', 'dead']:
-						debug_func(f"[VERIFY_CONTAINER] ❌ Container exited with status: {new_container.status}")
-						try:
-							debug_func(f"[VERIFY_CONTAINER] Attempting to retrieve logs...")
-							logs = new_container.logs(tail=50).decode('utf-8', errors='ignore')
-							debug_func(f"[VERIFY_CONTAINER] Logs retrieved successfully")
-						except Exception as log_error:
-							debug_func(f"[VERIFY_CONTAINER] Could not retrieve logs: {log_error}")
-							logs = f"[Could not retrieve logs: {log_error}]"
-						raise Exception(f"Container exited immediately. Last logs: {logs}")
-					retry_count += 1
-					if retry_count < max_retries:
-						debug_func(f"[VERIFY_CONTAINER] Container not ready yet, waiting 1 second...")
-						time.sleep(1)
-				except Exception as e:
-					if retry_count >= max_retries - 1:
-						debug_func(f"[VERIFY_CONTAINER] ❌ Max retries reached. Raising exception: {e}")
-						raise Exception(f"Container failed to reach running state: {e}")
-					debug_func(f"[VERIFY_CONTAINER] Exception on attempt {retry_count + 1}: {e}. Retrying...")
-					retry_count += 1
-					time.sleep(1)
+			# Container should be running - verify it stays up. Running at the
+			# first look is not enough: a process that dies a moment after
+			# starting was seen running, the original was deleted, and there
+			# was nothing left to roll back to. It has to stay up for
+			# VERIFY_STABLE_SECONDS in a row, without Docker restarting it.
+			_verify_stays_up(new_container, container_name, debug_func)
 			debug_func(f"[DELETE_OLD] New container verified and running. Now safe to delete old container {old_container_name}")
+			if config.get('was_paused'):
+				try:
+					new_container.pause()
+					debug_func(f"[VERIFY_CONTAINER] Paused again, as the original was")
+				except Exception as pause_error:
+					debug_func(f"[VERIFY_CONTAINER] Could not pause the new container: {pause_error}")
 		else:
 			# Container was stopped - just verify it exists
 			try:
