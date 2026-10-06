@@ -3,7 +3,7 @@ ARG BASE_IMAGE=alpine:3.24.2
 FROM ${BASE_IMAGE}
 ARG BASE_IMAGE
 
-ARG VERSION=5.0.0_RC9a
+ARG VERSION=5.0.0_RC9b
 
 # Standard OCI labels. The version comes from the same VERSION that picks the
 # source tag below, so it cannot say one thing and contain another; it is
@@ -47,7 +47,6 @@ RUN apk add --no-cache python3 py3-pip tzdata curl unzip py3-paramiko openssh-cl
     mv /tmp/docker-controller-bot-${VERSION}/port_manager.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/logger.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/message_queue.py /app && \
-    mv /tmp/docker-controller-bot-${VERSION}/telemetry.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/locale /app && \
     mv /tmp/docker-controller-bot-${VERSION}/requirements.txt /app && \
     rm -rf /tmp/app.zip /tmp/docker-controller-bot-${VERSION}/ && \

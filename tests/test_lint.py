@@ -751,7 +751,7 @@ def test_no_text_is_handed_more_values_than_it_shows():
 def test_no_module_defines_a_function_twice():
 	"""is_valid_cron was written twice in core.py, and only the second one ever ran."""
 	problems = []
-	for filename in SOURCES + ("schedule_manager.py", "docker_update.py", "telemetry.py"):
+	for filename in SOURCES + ("schedule_manager.py", "docker_update.py"):
 		tree = ast.parse(io.open(os.path.join(harness.REPO, filename), encoding="utf-8").read())
 		seen = {}
 		for node in tree.body:

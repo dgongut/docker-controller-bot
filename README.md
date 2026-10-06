@@ -748,7 +748,6 @@ docker-controller-bot/
     ├── port_manager.py
     ├── schedule_manager.py
     ├── message_queue.py
-    ├── telemetry.py               # estadísticas anónimas (copia de dgongut/telemetry)
     ├── logger.py
     ├── tests
     │   ├── run_all.py
