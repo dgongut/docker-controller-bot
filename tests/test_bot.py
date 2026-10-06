@@ -5026,12 +5026,13 @@ def test_the_cron_examples_survive_in_every_language():
 			f"{locale}: los asteriscos del cron se han vuelto <b> otra vez")
 
 
-def _batch_stubs(results, extended=False, own=()):
+def _batch_stubs(results, extended=False, own=(), current=()):
 	"""
 	Stands in for everything an update batch touches, and records it.
 
 	`results` maps a container name to whether its update succeeds; `own`
-	names the ones that count as the bot itself.
+	names the ones that count as the bot itself, and `current` the ones
+	already running their newest image.
 	"""
 	calls, sent, edited, deleted = [], [], [], []
 
@@ -5050,7 +5051,8 @@ def _batch_stubs(results, extended=False, own=()):
 
 	originals = {name: getattr(dcb, name) for name in (
 		"perform_container_update", "send_message", "edit_message_text",
-		"delete_message", "is_own_container")}
+		"delete_message", "is_own_container", "runs_latest_image")}
+	dcb.runs_latest_image = lambda ref, name: name in current
 	dcb.perform_container_update = perform
 	dcb.send_message = send
 	dcb.edit_message_text = lambda text, chat_id, message_id, **kw: edited.append(text)
@@ -5105,6 +5107,85 @@ def test_a_batch_where_everything_worked_says_nothing_failed():
 		assert sent[-1] == i18n.get_text("updated_batch", 2, 2) + "\n🐳 <b>nginx</b>\n🐳 <b>plex</b>", sent[-1]
 	finally:
 		restore()
+
+
+def test_a_batch_accounts_for_what_was_up_to_date_or_gone():
+	"""
+	Three ticked, one of them updated from outside the bot in the meantime:
+	the summary said "2/2" and a loose "8189d does not exist" sat apart.
+	"""
+	calls, sent, edited, deleted, restore = _batch_stubs({})
+	try:
+		dcb.update_containers(_targets("nginx", "plex"),
+			up_to_date=[("h_local", "sonarr")], missing=[("h_local", "radarr")])
+		assert [c[0] for c in calls] == ["nginx", "plex"], calls
+		assert sent[-1] == (i18n.get_text("updated_batch", 2, 4) + "\n🐳 <b>nginx</b>\n🐳 <b>plex</b>"
+			+ i18n.get_text("updated_batch_failed") + "\n🐳 <b>radarr</b>"
+			+ i18n.get_text("updated_batch_up_to_date") + "\n🐳 <b>sonarr</b>"), sent[-1]
+
+		# Nothing left to update at all: no progress message, still a result.
+		sent.clear()
+		dcb.update_containers([], up_to_date=[("h_local", "sonarr")])
+		assert sent == [i18n.get_text("updated_one_up_to_date") + "\n🐳 <b>sonarr</b>"], sent
+	finally:
+		restore()
+
+
+def test_a_container_already_on_its_newest_image_is_not_updated_again():
+	"""
+	Updated from outside the bot, it still read as pending until the next
+	check, hours away, and the batch pulled nothing new and recreated it.
+	"""
+	calls, sent, edited, deleted, restore = _batch_stubs({}, current=("plex",))
+	try:
+		dcb.update_containers(_targets("nginx", "plex"))
+		assert [c[0] for c in calls] == ["nginx"], calls
+		assert sent[-1] == (i18n.get_text("updated_batch", 1, 2) + "\n🐳 <b>nginx</b>"
+			+ i18n.get_text("updated_batch_up_to_date") + "\n🐳 <b>plex</b>"), sent[-1]
+
+		# The same on its own, from the button of a single update.
+		sent.clear(); calls.clear()
+		dcb.update_container(*_targets("plex")[0])
+		assert calls == [] and sent == [i18n.get_text("updated_one_up_to_date") + "\n🐳 <b>plex</b>"], sent
+
+		# A new tag is another image: what the old one runs says nothing.
+		sent.clear()
+		dcb.update_container(*_targets("plex")[0], tag="2.0")
+		assert [c[0] for c in calls] == ["plex"], calls
+	finally:
+		restore()
+
+
+def test_runs_latest_image_compares_with_what_the_tag_points_at_here():
+	"""The check pulls what it finds, so the local tag is the newest image known."""
+	saved = []
+	container = MagicMock()
+	container.name = "plex"
+	container.attrs = {"Config": {"Image": "plexinc/pms:latest"}}
+	container.image.id = "sha256:new"
+	owner = MagicMock(host_id="h_local")
+	owner.client.images.get = lambda image: MagicMock(id="sha256:new" if image == "plexinc/pms:latest" else "x")
+	original = (dcb.find_live_container, dcb.save_container_update_status)
+	dcb.find_live_container = lambda ref, name: (owner, container)
+	dcb.save_container_update_status = lambda image, name, has_update, host_id=None, versions=None: (
+		saved.append((image, name, has_update, host_id)))
+	ref = dcb.make_ref("h_local", "aaaaa")
+	try:
+		assert dcb.runs_latest_image(ref, "plex")
+		assert saved == [("plexinc/pms:latest", "plex", False, "h_local")], saved
+
+		saved.clear()
+		container.image.id = "sha256:old"
+		assert not dcb.runs_latest_image(ref, "plex")
+		assert saved == [], "se marcó al día uno con la imagen vieja"
+
+		owner.client.images.get = MagicMock(side_effect=Exception("no such image"))
+		assert not dcb.runs_latest_image(ref, "plex")
+
+		dcb.find_live_container = lambda ref, name: (None, None)
+		assert not dcb.runs_latest_image(ref, "plex")
+	finally:
+		(dcb.find_live_container, dcb.save_container_update_status) = original
 
 
 def test_extended_messages_keep_the_step_by_step_updates():
@@ -5261,7 +5342,7 @@ def test_a_double_tap_on_confirm_updates_once():
 	found = MagicMock(host_id="h_local")
 	plex = _container("plex", "running")
 	plex.id = "aaaaa" + "0" * 59
-	dcb.update_containers = batches.append
+	dcb.update_containers = lambda targets, **kw: batches.append(targets)
 	dcb.find_container = lambda ref: (found, plex)
 	dcb.update_available = lambda container, host_id: True
 	sent = []
@@ -5275,6 +5356,33 @@ def test_a_double_tap_on_confirm_updates_once():
 	finally:
 		(dcb.update_containers, dcb.find_container, dcb.update_available, dcb.send_message) = original
 		dcb.clear_update_data(5, 50)
+
+
+def test_confirming_finds_a_container_recreated_since_the_list_was_sent():
+	"""
+	The list keeps IDs. Updated from outside the bot, a container comes back
+	with another one, and was reported as not existing. Looked up by name,
+	it is found, and said to be up to date; only what is really gone fails.
+	"""
+	pairs = [[dcb.make_ref("h_local", "aaaaa"), "plex"], [dcb.make_ref("h_local", "bbbbb"), "sonarr"],
+				[dcb.make_ref("h_local", "ccccc"), "radarr"]]
+	plex, sonarr = _container("plex", "running"), _container("sonarr", "running")
+	plex.id, sonarr.id = "aaaaa" + "0" * 59, "zzzzz" + "0" * 59
+	batches = []
+	original = (dcb.update_containers, dcb.find_container, dcb.find_container_id_on_host, dcb.update_available)
+	live = {dcb.make_ref("h_local", "aaaaa"): plex, dcb.make_ref("h_local", "zzzzz"): sonarr}
+	dcb.update_containers = lambda targets, **kw: batches.append((targets, kw))
+	dcb.find_container = lambda ref: (MagicMock(host_id="h_local"), live[ref]) if ref in live else (None, None)
+	dcb.find_container_id_on_host = lambda host_id, name: "zzzzz" if name == "sonarr" else None
+	dcb.update_available = lambda container, host_id: container is plex
+	try:
+		dcb.save_update_data(7, 70, pairs, {ref for ref, _ in pairs})
+		callbacks.cb_updateSelected(_update_ctx("updateSelected", 7, 71, originalMessageId="70"))
+		assert batches == [([(pairs[0][0], "plex")],
+			{"up_to_date": [("h_local", "sonarr")], "missing": [("h_local", "radarr")]})], batches
+	finally:
+		(dcb.update_containers, dcb.find_container, dcb.find_container_id_on_host, dcb.update_available) = original
+		dcb.clear_update_data(7, 70)
 
 
 def test_an_update_list_that_expired_says_so():

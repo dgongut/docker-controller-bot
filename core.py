@@ -41,7 +41,7 @@ from i18n import get_text, language
 from logger import debug, error, warning
 from message_queue import MessageQueue
 
-VERSION = "5.0.0_RC9"
+VERSION = "5.0.0_RC9a"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -4836,15 +4836,25 @@ def update_container(ref, name, tag=None, send=None):
 	"""
 	if send is None:
 		send = lambda msg: send_message(message=msg)
+	# A new tag is a different image: what the old one runs says nothing.
+	if tag is None and runs_latest_image(ref, name):
+		send(update_result_text(ref_host(ref), name, up_to_date=True))
+		return
 	if store.get("bot.extended_messages") or is_own_container(ref_host(ref), ref_id(ref), name):
 		perform_container_update(ref, name, tag=tag, send_fn=send)
 		return
 	_update_containers_quietly([(ref, name)], tag=tag, send=send)
 
 
-def update_containers(targets):
+def update_containers(targets, up_to_date=(), missing=()):
 	"""
 	Updates several containers, as (reference, name) pairs, in the order given.
+
+	`up_to_date` and `missing`, as (host_id, name) pairs, are what was ticked
+	but had nothing left to update, or could no longer be found. They are not
+	updated, only reported with the rest, so the result accounts for every
+	container that was asked for. A target already running its newest image
+	joins `up_to_date` here, whichever way it got into the batch.
 
 	With extended messages every step is reported as it happens, the same as
 	updating one by one. Without them — the default — a batch across several
@@ -4857,14 +4867,21 @@ def update_containers(targets):
 	messages: updating it recreates the bot, which would cut the batch short
 	and leave the summary unsent.
 	"""
+	current = [t for t in targets if runs_latest_image(*t)]
+	up_to_date = list(up_to_date) + [(ref_host(ref), name) for ref, name in current]
+	targets = [t for t in targets if t not in current]
 	own = [t for t in targets if is_own_container(ref_host(t[0]), ref_id(t[0]), t[1])]
 	others = [t for t in targets if t not in own]
 
 	if store.get("bot.extended_messages"):
 		for ref, name in others:
 			perform_container_update(ref, name)
-	elif others:
-		_update_containers_quietly(others)
+		for host_id, name in up_to_date:
+			send_message(message=update_result_text(host_id, name, up_to_date=True))
+		for host_id, name in missing:
+			send_message(message=update_result_text(host_id, name, ok=False))
+	elif others or up_to_date or missing:
+		_update_containers_quietly(others, up_to_date=up_to_date, missing=missing)
 
 	for ref, name in own:
 		perform_container_update(ref, name)
@@ -4884,7 +4901,7 @@ def _batch_progress_text(index, total, host_id, name):
 	return "\n".join(lines)
 
 
-def update_result_text(host_id, name, old=None, new=None, ok=True):
+def update_result_text(host_id, name, old=None, new=None, ok=True, up_to_date=False):
 	"""
 	How the update of one container is reported, wherever it is reported
 	from: the summary of an update, its result with extended messages on,
@@ -4894,11 +4911,14 @@ def update_result_text(host_id, name, old=None, new=None, ok=True):
 	No counts — it worked or it did not —, laid out like every other list of
 	updates: under its host, with its versions below.
 	"""
-	head = get_text("updated_one") if ok else get_text("updated_one_failed")
+	if up_to_date:
+		head = get_text("updated_one_up_to_date")
+	else:
+		head = get_text("updated_one") if ok else get_text("updated_one_failed")
 	return f"{head}\n{by_host([(host_id, container_line(name, old, new))])}"
 
 
-def _update_containers_quietly(targets, tag=None, send=None):
+def _update_containers_quietly(targets, tag=None, send=None, up_to_date=(), missing=()):
 	"""
 	The summarised form of update_containers, and of update_container.
 
@@ -4906,12 +4926,15 @@ def _update_containers_quietly(targets, tag=None, send=None):
 	"""
 	if send is None:
 		send = lambda msg: send_message(message=msg)
-	total = len(targets)
-	updated, failed = [], []
+	updated, failed = [], [(h, n, (None, None)) for h, n in missing]
+	current = [(h, n, (None, None)) for h, n in up_to_date]
+	# The count is of what was asked for: something already up to date is
+	# not an update made, and leaving it out of the total hid it.
+	total = len(targets) + len(failed) + len(current)
 	progress = None
 	for index, (ref, name) in enumerate(targets, start=1):
 		host_id = ref_host(ref)
-		text = _batch_progress_text(index, total, host_id, name)
+		text = _batch_progress_text(index, len(targets), host_id, name)
 		if progress:
 			edit_message_text(text, progress.chat.id, progress.message_id)
 		else:
@@ -4933,14 +4956,16 @@ def _update_containers_quietly(targets, tag=None, send=None):
 	# The count alone left the chat asking which ones, so they are listed too.
 	lines = lambda entries: by_host([(h, container_line(n, *v)) for h, n, v in entries])
 	if total == 1:
-		host_id, name, versions = (updated + failed)[0]
-		summary = update_result_text(host_id, name, *versions, ok=bool(updated))
+		host_id, name, versions = (updated + failed + current)[0]
+		summary = update_result_text(host_id, name, *versions, ok=bool(updated), up_to_date=bool(current))
 	else:
 		summary = get_text("updated_batch", len(updated), total)
 		if updated:
 			summary += "\n" + lines(updated)
 		if failed:
 			summary += get_text("updated_batch_failed") + "\n" + lines(failed)
+		if current:
+			summary += get_text("updated_batch_up_to_date") + "\n" + lines(current)
 	send(summary)
 
 def run_compose_project(project_name, host_id=None):
@@ -7471,6 +7496,48 @@ def find_container(ref):
 	except Exception as e:
 		debug(f"Container {ref} not found: {e}")
 		return None, None
+
+
+def find_live_container(ref, name):
+	"""
+	find_container, for a reference that may be older than the container.
+
+	Updated from outside the bot, a container comes back with another ID and
+	the same name. A list of updates can be days old, so what it holds is
+	looked up by name when the ID is gone — on its own host only, as the
+	buttons are.
+	"""
+	owner, container = find_container(ref)
+	if container is None:
+		current_id = find_container_id_on_host(ref_host(ref), name)
+		if current_id:
+			owner, container = find_container(make_ref(ref_host(ref), current_id))
+	return owner, container
+
+
+def runs_latest_image(ref, name):
+	"""
+	Whether a container already runs the newest image its tag has here.
+
+	The pending-update cache is only rewritten by the next check, hours away.
+	A container updated from outside the bot in between still read as
+	pending, and updating it pulled nothing new and recreated it for nothing.
+	The check pulls the image when it finds an update, so locally the tag
+	already points at it: a container running that image is up to date, and
+	the cache is told so.
+	"""
+	owner, container = find_live_container(ref, name)
+	if container is None:
+		return False
+	try:
+		image_with_tag = container.attrs['Config']['Image']
+		if container.image.id != owner.client.images.get(image_with_tag).id:
+			return False
+	except Exception as e:
+		debug(f"Could not compare the image of {name}: {e}")
+		return False
+	save_container_update_status(image_with_tag, container.name, False, owner.host_id)
+	return True
 
 
 def project_info_or_none(host_id, project_name):

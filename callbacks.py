@@ -321,19 +321,24 @@ def cb_updateSelected(ctx):
 	if not containers or not selected:
 		core.send_message(message=get_text("update_list_expired"))
 		return
-	targets = []
+	# Everything ticked ends up in the summary. What was not found or had
+	# nothing left to update used to be dropped before the batch, with at most
+	# a loose "does not exist" naming an ID, and the count left it out.
+	names = {entry[0]: entry[1] for entry in containers}
+	targets, up_to_date, missing = [], [], []
 	for ref in core.selected_in_order(containers, selected):
 		# Each selection carries its own host: an /updateall list can span
 		# machines, so they cannot all be looked up on the local one.
-		owner, container = core.find_container(ref)
+		host_id, name = core.ref_host(ref), names[ref]
+		_owner, container = core.find_live_container(ref, name)
 		if container is None:
-			core.send_message(message=f'{get_text("container_does_not_exist", core.ref_id(ref))}'
-										f'{core.host_suffix(core.ref_host(ref))}')
-			core.debug(f"Container {ref} not found")
-			continue
-		if core.update_available(container, owner.host_id):
-			targets.append((core.container_ref(owner.host_id, container), container.name))
-	core.update_containers(targets)
+			core.debug(f"Container {ref} ({name}) not found")
+			missing.append((host_id, name))
+		elif core.update_available(container, host_id):
+			targets.append((core.container_ref(host_id, container), container.name))
+		else:
+			up_to_date.append((host_id, container.name))
+	core.update_containers(targets, up_to_date=up_to_date, missing=missing)
 
 @callback(
 	name='restartWholeProject',
