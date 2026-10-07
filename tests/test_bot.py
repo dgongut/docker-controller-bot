@@ -626,6 +626,72 @@ def test_several_hosts_get_a_section_each():
 		_restore_hosts()
 
 
+def test_twelve_hosts_are_listed_in_several_messages():
+	"""
+	/list sent the whole fleet as one message, and past 4096 characters
+	Telegram refuses it: with a dozen hosts the command answered nothing at
+	all. Every piece has to fit, keep its <pre> balanced, and between them
+	carry every container; the close button goes on the last one only.
+	"""
+	hosts = [{"id": "h_local", "alias": "host0", "url": "unix:///var/run/docker.sock", "local": True}]
+	hosts += [{"id": f"h_{n:02d}", "alias": f"host{n}", "url": f"tcp://host{n}:2375"} for n in range(1, 12)]
+	_with_hosts(hosts, unreachable=())
+	original = (dcb.DockerManager.list_containers, dcb.send_message, dcb.delete_message)
+	dcb.DockerManager.list_containers = lambda self, comando="": [
+		_container(f"{self.host_id}-servicio-{n:02d}", "running" if n % 3 else "exited") for n in range(25)]
+	sent, deleted = [], []
+
+	def send(message=None, reply_markup=None, **_):
+		sent.append((message, reply_markup))
+		return MagicMock(message_id=900 + len(sent), chat=MagicMock(id=9))
+
+	dcb.send_message = send
+	dcb.delete_message = lambda message_id, chat_id=None: deleted.append(message_id)
+	try:
+		commands.cmd_list()
+		assert len(sent) > 1, sent
+		for message, _ in sent:
+			assert len(message) <= dcb.MESSAGE_SPLIT_BUDGET, len(message)
+			assert message.count("<pre>") == message.count("</pre>"), message
+		assert [markup is not None for _, markup in sent] == [False] * (len(sent) - 1) + [True]
+		# Every piece after the first starts with a host's heading: a cut
+		# between the counts and the list left the heading on its own.
+		for message, _ in sent[1:]:
+			assert message.startswith("🖥️"), message[:80]
+		everything = "\n".join(message for message, _ in sent)
+		for host in hosts:
+			for n in range(25):
+				assert f"{host['id']}-servicio-{n:02d}" in everything, (host, n)
+		# Closing the last piece takes the earlier ones with it: the close
+		# button only deleted the message it was on.
+		last = 900 + len(sent)
+		dcb.delete_companions(9, last)
+		assert deleted == list(range(901, last)), deleted
+		dcb.delete_companions(9, last)
+		assert deleted == list(range(901, last)), "solo una vez"
+	finally:
+		dcb.DockerManager.list_containers, dcb.send_message, dcb.delete_message = original
+		_restore_hosts()
+
+
+def test_a_message_that_fits_is_not_split():
+	text = "🖥️ <b>casa</b>\n<pre>🐳 🟢 nginx\n</pre>"
+	assert dcb.split_for_telegram(text) == [text]
+
+
+def test_a_split_prefers_a_blank_line_and_reopens_the_pre():
+	block = "\n".join(f"  🟢 servicio-{n:03d}" for n in range(30))
+	text = f"📊 <b>Contenedores:</b> 90\n\n<pre>{block}\n\n{block}\n\n{block}\n</pre>"
+	pieces = dcb.split_for_telegram(text, budget=1000)
+	assert len(pieces) == 3, pieces
+	for piece in pieces:
+		assert len(piece) <= 1000, len(piece)
+		assert piece.count("<pre>") == piece.count("</pre>") == 1, piece
+	# Cut on the blank lines, so each project stays in one piece.
+	assert pieces[1].startswith("<pre>  🟢 servicio-000"), pieces[1]
+	assert pieces[1].endswith("servicio-029</pre>"), pieces[1]
+
+
 def test_a_host_that_is_down_is_reported_not_hidden():
 	"""
 	Quietly showing fewer containers than the user has is worse than saying a
@@ -5655,3 +5721,68 @@ def test_the_preview_fits_in_one_message():
 		text, _ = dcb.build_telemetry_preview()
 		assert len(text) < 4096, len(text)
 		assert "275" in text, "dice cuántos contadores no caben"
+
+
+def test_a_long_update_list_is_paginated():
+	"""
+	Telegram refuses a keyboard of more than about a hundred buttons, and the
+	message with it: a big release day across a dozen hosts lost the whole
+	announcement. Past a page the list is shown a page at a time; the selection
+	and "update all" still cover all of it, and a short list is untouched.
+	"""
+	size = dcb.UPDATE_KEYBOARD_PAGE_SIZE
+	pairs = [[dcb.make_ref(f"h_{n % 12:02d}", f"{n:05x}"), f"servicio-{n:03d}"] for n in range(size + 32)]
+
+	def buttons(markup):
+		return [b for row in markup.keyboard for b in row]
+
+	def toggles(markup):
+		return [b for b in buttons(markup) if b.callback_data.startswith("toggleUpdate|")]
+
+	short = dcb.build_generic_keyboard(pairs[:size], set(), None, "Update", "u", "ua")
+	assert len(toggles(short)) == size
+	assert not [b for b in buttons(short) if b.callback_data.startswith("pageUpdate|")]
+
+	first = dcb.build_generic_keyboard(pairs, set(), None, "Update", "u", "ua")
+	assert len(buttons(first)) < 100, len(buttons(first))
+	assert len(toggles(first)) == size
+	assert [b.text for b in first.keyboard[-2]] == ["1/2", "▶️"], first.keyboard[-2]
+	assert first.keyboard[-1][0].callback_data == "toggleUpdateAll"
+
+	second = dcb.build_generic_keyboard(pairs, {pairs[0][0]}, None, "Update", "u", "ua", page=1)
+	assert len(toggles(second)) == 32
+	assert [b.text for b in second.keyboard[-2]] == ["◀️", "2/2"], second.keyboard[-2]
+	# Something selected on another page still offers to confirm it.
+	assert second.keyboard[-1][0].callback_data.startswith("confirmUpdateSelected|")
+	# A page that no longer exists shows the last one rather than nothing.
+	assert len(toggles(dcb.build_generic_keyboard(pairs, set(), None, "Update", "u", "ua", page=9))) == 32
+
+	painted = []
+	original = (dcb.edit_message_reply_markup_sync, dcb.answer_callback_quietly)
+	dcb.edit_message_reply_markup_sync = lambda chat, message, reply_markup=None: painted.append(reply_markup)
+	dcb.answer_callback_quietly = lambda *a, **k: None
+	try:
+		dcb.save_update_data(8, 80, pairs, set())
+		callbacks.cb_pageUpdate(_update_ctx("pageUpdate", 8, 80, value="1"))
+		assert len(toggles(painted[-1])) == 32
+		# Toggling on the second page keeps the second page on screen...
+		last = pairs[-1]
+		callbacks.cb_toggleUpdate(_update_ctx("toggleUpdate", 8, 80, containerId=last[0], containerName=last[1]))
+		assert len(toggles(painted[-1])) == 32
+		assert dcb.load_update_data(8, 80)[1] == {last[0]}
+		# ...and so does selecting everything, which selects every page.
+		callbacks.cb_toggleUpdateAll(_update_ctx("toggleUpdateAll", 8, 80))
+		assert len(toggles(painted[-1])) == 32
+		assert dcb.load_update_data(8, 80)[1] == {ref for ref, _ in pairs}
+	finally:
+		dcb.edit_message_reply_markup_sync, dcb.answer_callback_quietly = original
+		dcb.clear_update_data(8, 80)
+
+
+def test_a_long_confirmation_keeps_its_bold_across_the_cut():
+	names = "\n".join(f"· <b>servicio-{n:03d}</b> · nas" for n in range(150))
+	pieces = dcb.split_for_telegram(i18n.get_text("confirm_update_all", names))
+	assert len(pieces) > 1
+	for piece in pieces:
+		assert len(piece) <= dcb.MESSAGE_SPLIT_BUDGET
+		assert piece.count("<b>") == piece.count("</b>"), piece

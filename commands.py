@@ -21,7 +21,7 @@ from core import (
 	VERSION, ask_command, ask_text_input,
 	build_generic_keyboard, change_tag_container,
 	compose, confirm_delete, create_simple_keyboard,
-	delete_message_later, display_all_hosts,
+	delete_message_later, display_all_hosts, send_split_message,
 	info, log_file, logs,
 	mute, print_donors, restart,
 	run, save_container_refs, save_update_data,
@@ -40,8 +40,10 @@ from core import (
 # container, which is always the case for a button press.
 
 def cmd_list(user_id=None, chat_id=None, container_id=None, container_name=None, argument=None):
-	send_message(message=display_all_hosts(comando="/list"),
-				reply_markup=create_simple_keyboard("button_close"))
+	# Twelve hosts' worth of containers do not fit one message. The close
+	# button goes on the last piece, and takes the others with it.
+	send_split_message(display_all_hosts(comando="/list"),
+					reply_markup=create_simple_keyboard("button_close"))
 
 def cmd_run(user_id=None, chat_id=None, container_id=None, container_name=None, argument=None):
 	if container_id:

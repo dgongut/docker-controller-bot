@@ -4074,6 +4074,7 @@ def button_controller(call):
 		# replaced by whatever the handler opens, so it goes away first.
 		if not spec.keeps_message and not ctx.multiAction:
 			delete_message(messageId)
+			delete_companions(chatId, messageId)
 
 		spec.handler(ctx)
 	except Exception as e:
@@ -5908,13 +5909,41 @@ def confirm_update_selected(chatId, messageId):
 		# different updates: the confirmation has to say which is which.
 		containersToUpdate += f"· <b>{id_to_name.get(cid, cid)}</b>{host_suffix(ref_host(cid))}\n"
 	markup = create_confirm_cancel_keyboard(f"updateSelected|{messageId}", "button_confirm_update")
-	send_message(message=get_text("confirm_update_all", containersToUpdate), reply_markup=markup)
+	# A selection across a dozen hosts can name more than fits one message.
+	send_split_message(get_text("confirm_update_all", containersToUpdate), reply_markup=markup)
 
-def build_generic_keyboard(container_available, selected_containers, originalMessageId, action_type, button_text, button_text_all=None):
+# Telegram refuses a keyboard of more than about a hundred buttons, and with it
+# the whole message: a big release day across a dozen hosts lost the
+# announcement. A longer list is shown a page at a time, with room to spare for
+# the navigation and the fixed rows.
+UPDATE_KEYBOARD_PAGE_SIZE = 80
+
+
+def update_keyboard_page(container_available, page):
+	"""`page` held inside the pages the list has, so a stale one still shows something."""
+	pages = max(1, -(-len(container_available) // UPDATE_KEYBOARD_PAGE_SIZE))
+	try:
+		page = int(page)
+	except (TypeError, ValueError):
+		page = 0
+	return min(max(page, 0), pages - 1), pages
+
+
+def page_of(container_available, reference):
+	"""The page a reference is on, for repainting the one that was just tapped."""
+	for index, (cid, _cname) in enumerate(container_available):
+		if cid == reference:
+			return index // UPDATE_KEYBOARD_PAGE_SIZE
+	return 0
+
+
+def build_generic_keyboard(container_available, selected_containers, originalMessageId, action_type, button_text, button_text_all=None, page=0):
 	"""Generic keyboard builder for the multi-select update flow.
 
 	container_available: list of [id, name] pairs.
 	selected_containers: set of container IDs.
+	page: which page to show when the list does not fit one keyboard. The
+	selection and the fixed buttons always cover the whole list.
 	"""
 	# The host earns a place on the button only when the list spans machines:
 	# /updateall gathers the whole fleet and two hosts can hold the same
@@ -5927,8 +5956,10 @@ def build_generic_keyboard(container_available, selected_containers, originalMes
 	# across hosts gets one column, whatever the setting says; with one host
 	# the names are short again and the setting applies.
 	markup = InlineKeyboardMarkup(row_width=1 if spans_hosts else button_columns())
+	page, pages = update_keyboard_page(container_available, page)
+	start = page * UPDATE_KEYBOARD_PAGE_SIZE
 	botones = []
-	for cid, cname in container_available:
+	for cid, cname in container_available[start:start + UPDATE_KEYBOARD_PAGE_SIZE]:
 		icono = ICON_CONTAINER_MARKED_FOR_UPDATE if cid in selected_containers else ICON_CONTAINER_MARK_FOR_UPDATE
 		# A button caption is plain text, so the alias goes in unescaped: the
 		# bold markup host_label() uses would show as literal tags here.
@@ -5937,6 +5968,18 @@ def build_generic_keyboard(container_available, selected_containers, originalMes
 			InlineKeyboardButton(f"{icono} {etiqueta}", callback_data=f"toggle{action_type}|{cid}")
 		)
 	markup.add(*botones)
+
+	# Only when there is more than one page, so an ordinary list reads as it
+	# always has. The counter repaints the page it is on, which is harmless and
+	# spares a callback that does nothing.
+	if pages > 1:
+		navigation = []
+		if page > 0:
+			navigation.append(InlineKeyboardButton("◀️", callback_data=f"page{action_type}|{page - 1}"))
+		navigation.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data=f"page{action_type}|{page}"))
+		if page < pages - 1:
+			navigation.append(InlineKeyboardButton("▶️", callback_data=f"page{action_type}|{page + 1}"))
+		markup.row(*navigation)
 
 	fixed_buttons = []
 	if selected_containers:
@@ -7345,12 +7388,18 @@ def show_container_ports(host_id=None):
 	if current_lines:
 		chunks.append(current_lines)
 
-	# Send each chunk: header only on the first, keyboard only on the last
+	# Send each chunk: header only on the first, keyboard only on the last,
+	# which takes the others with it when closed.
+	earlier = []
 	for i, chunk_lines in enumerate(chunks):
 		prefix = header if i == 0 else ""
 		message = f"{prefix}{pre_open}" + "\n".join(chunk_lines) + pre_close
 		is_last = (i == len(chunks) - 1)
-		send_message(message=message, reply_markup=markup if is_last else None)
+		sent = send_message(message=message, reply_markup=markup if is_last else None)
+		if not is_last and sent:
+			earlier.append(sent.message_id)
+	if sent and earlier:
+		write_cache_item(f"companions_{sent.chat.id}_{sent.message_id}", earlier)
 
 def ask_port_to_check(userId, host_id=None):
 	"""
@@ -7584,6 +7633,116 @@ def project_info_or_none(host_id, project_name):
 		warning(f"Could not read project {project_name} on {host_alias(host_id)}: {e}")
 		disconnect_host(host_id)
 		return None
+
+
+# Telegram refuses a message over 4096 characters, counted after the markup is
+# parsed. The raw text is held well under that, tags included.
+MESSAGE_SPLIT_BUDGET = 3500
+
+# The tags split_for_telegram keeps balanced across a cut, outermost first.
+SPLIT_KEPT_TAGS = ("pre", "b", "i", "code")
+
+
+def split_for_telegram(text, budget=MESSAGE_SPLIT_BUDGET):
+	"""
+	Splits an HTML message into pieces Telegram will take, in order.
+
+	Cuts fall on a blank line where there is one, so a group is not torn
+	across two messages: first one outside a <pre> — between hosts —, then one
+	inside — between Compose projects —, and on any line otherwise. Never on
+	the blank line just before a <pre> opens, which would leave a host's
+	heading and counts in one message and its containers in the next.
+
+	A tag cut in two — the <pre> of a listing, the <b> around a list of names —
+	is closed at the end of one piece and opened again at the start of the
+	next, or the second half would lose its format and the first be refused
+	for an unclosed tag.
+
+	A text that fits comes back whole, so a short message is unchanged.
+	"""
+	if len(text) <= budget:
+		return [text]
+
+	pieces = []
+	carried = dict.fromkeys(SPLIT_KEPT_TAGS, 0)
+	current = []
+
+	def emit(lines):
+		while lines and not lines[-1].strip():
+			lines = lines[:-1]
+		if not lines:
+			return
+		body = "\n".join(lines)
+		reopen = "".join(f"<{tag}>" * carried[tag] for tag in SPLIT_KEPT_TAGS)
+		for tag in SPLIT_KEPT_TAGS:
+			carried[tag] = max(0, carried[tag] + body.count(f"<{tag}>") - body.count(f"</{tag}>"))
+		close = "".join(f"</{tag}>" * carried[tag] for tag in reversed(SPLIT_KEPT_TAGS))
+		pieces.append(reopen + body + close)
+
+	# Room kept for the tags reopened at the start and closed at the end.
+	room = budget - 100
+	for line in text.split("\n"):
+		# A loop, not an if: what is left after cutting at a blank line can
+		# still be too long with this line on it.
+		while current and len("\n".join(current + [line])) > room:
+			cut = _split_point(current, line, carried["pre"] > 0)
+			emit(current[:cut])
+			current = current[cut:]
+			while current and not current[0].strip():
+				current = current[1:]
+		current.append(line)
+	emit(current)
+	return pieces
+
+
+def _split_point(lines, following, in_pre):
+	"""
+	Where split_for_telegram cuts `lines`: the index of the blank line it
+	starts the next piece at, or len(lines) to cut after all of them.
+	`following` is the line about to be added, and `in_pre` whether the first
+	of `lines` is inside a <pre>.
+	"""
+	outside, inside = [], []
+	depth = 1 if in_pre else 0
+	for index, existing in enumerate(lines):
+		after = lines[index + 1] if index + 1 < len(lines) else following
+		if index > 0 and not existing.strip() and not after.lstrip().startswith("<pre>"):
+			(inside if depth > 0 else outside).append(index)
+		depth += existing.count("<pre>") - existing.count("</pre>")
+	candidates = outside or inside
+	return candidates[-1] if candidates else len(lines)
+
+
+def send_split_message(text, reply_markup=None):
+	"""
+	Sends `text` in as many messages as it takes, the keyboard on the last.
+
+	The earlier pieces are noted against the last one, so that its buttons —
+	close, cancel, confirm — take the whole of it away and not only the piece
+	they are on. Returns the last message sent.
+	"""
+	pieces = split_for_telegram(text)
+	earlier = []
+	sent = None
+	for index, piece in enumerate(pieces):
+		last = index == len(pieces) - 1
+		sent = send_message(message=piece, reply_markup=reply_markup if last else None)
+		if not last and sent:
+			earlier.append(sent.message_id)
+	if sent and earlier:
+		write_cache_item(f"companions_{sent.chat.id}_{sent.message_id}", earlier)
+	return sent
+
+
+def delete_companions(chat_id, message_id):
+	"""Deletes the earlier pieces of a message send_split_message sent in several."""
+	key = f"companions_{chat_id}_{message_id}"
+	earlier = read_cache_item(key)
+	if not earlier:
+		return
+	delete_cache_item(key)
+	for companion in earlier:
+		delete_message(companion, chat_id)
 
 
 def display_all_hosts(comando=""):
@@ -8000,14 +8159,20 @@ def update_status_text(has_update):
 		return get_text("UPDATED_CONTAINER_TEXT")
 	return ""
 
-def save_update_data(chat_id, message_id, containers, selected=None):
+def save_update_data(chat_id, message_id, containers, selected=None, page=0):
 	if selected is None:
 		selected = set()
 	data = {
 		"containers": containers,
-		"selected": selected
+		"selected": selected,
+		"page": page,
 	}
 	write_cache_item(f"update_data_{chat_id}_{message_id}", data)
+
+def load_update_page(chat_id, message_id):
+	"""The page an update list is showing, 0 for one saved before there were pages."""
+	data = read_cache_item(f"update_data_{chat_id}_{message_id}")
+	return data.get("page", 0) if isinstance(data, dict) else 0
 
 def load_update_data(chat_id, message_id):
 	data = read_cache_item(f"update_data_{chat_id}_{message_id}")

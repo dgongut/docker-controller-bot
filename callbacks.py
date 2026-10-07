@@ -249,9 +249,11 @@ def cb_toggleUpdate(ctx):
 			selected.remove(reference)
 		else:
 			selected.add(reference)
-		core.save_update_data(ctx.chatId, ctx.messageId, containers, selected)
+		# The page the tapped button is on, which is the one being looked at.
+		page = core.page_of(containers, reference)
+		core.save_update_data(ctx.chatId, ctx.messageId, containers, selected, page)
 
-	markup = core.build_generic_keyboard(containers, selected, ctx.messageId, "Update", get_text("button_update"), get_text("button_update_all"))
+	markup = core.build_generic_keyboard(containers, selected, ctx.messageId, "Update", get_text("button_update"), get_text("button_update_all"), page)
 
 	# Use synchronous edit for immediate feedback
 	try:
@@ -291,9 +293,10 @@ def cb_toggleUpdateAll(ctx):
 			core.expire_update_list(ctx.call.id, ctx.chatId, ctx.messageId)
 			return
 		selected.update(cid for cid, _cname in containers)
-		core.save_update_data(ctx.chatId, ctx.messageId, containers, selected)
+		page = core.load_update_page(ctx.chatId, ctx.messageId)
+		core.save_update_data(ctx.chatId, ctx.messageId, containers, selected, page)
 
-	markup = core.build_generic_keyboard(containers, selected, ctx.messageId, "Update", get_text("button_update"), get_text("button_update_all"))
+	markup = core.build_generic_keyboard(containers, selected, ctx.messageId, "Update", get_text("button_update"), get_text("button_update_all"), page)
 
 	# Use synchronous edit for immediate feedback
 	try:
@@ -303,6 +306,31 @@ def cb_toggleUpdateAll(ctx):
 	except Exception as e:
 		core.error(f"Error updating toggle all: {e}")
 		core.answer_callback_quietly(ctx.call.id)
+
+@callback(
+	name='pageUpdate',
+	params=('value',),
+	keeps_message=True,
+	answer_immediately=False,
+)
+def cb_pageUpdate(ctx):
+	"""Shows another page of an update list too long for one keyboard."""
+	with core.update_data_lock:
+		containers, selected = core.load_update_data(ctx.chatId, ctx.messageId)
+		if not containers:
+			core.expire_update_list(ctx.call.id, ctx.chatId, ctx.messageId)
+			return
+		page, _pages = core.update_keyboard_page(containers, ctx.value)
+		core.save_update_data(ctx.chatId, ctx.messageId, containers, selected, page)
+
+	markup = core.build_generic_keyboard(containers, selected, ctx.messageId, "Update", get_text("button_update"), get_text("button_update_all"), page)
+	try:
+		core.edit_message_reply_markup_sync(ctx.chatId, ctx.messageId, reply_markup=markup)
+	except Exception as e:
+		# Tapping the counter repaints the same keyboard, which Telegram
+		# answers with "message is not modified". Nothing to report.
+		core.debug(f"Could not change the update list page: {e}")
+	core.answer_callback_quietly(ctx.call.id)
 
 @callback(
 	name='confirmUpdateSelected',
