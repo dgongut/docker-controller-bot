@@ -5786,3 +5786,42 @@ def test_a_long_confirmation_keeps_its_bold_across_the_cut():
 	for piece in pieces:
 		assert len(piece) <= dcb.MESSAGE_SPLIT_BUDGET
 		assert piece.count("<b>") == piece.count("</b>"), piece
+
+
+def test_a_host_list_has_a_way_back_to_the_choice_of_host():
+	"""
+	Tapping the wrong host meant cancelling and typing the command again. With
+	several hosts the list offers going back, next to cancel; with one there is
+	no choice to go back to, and the menu reads as it always did.
+	"""
+	containers = [_container("nginx", "exited"), _container("plex", "exited")]
+	original = (dcb.DockerManager.list_containers, dcb.edit_message_text)
+	dcb.DockerManager.list_containers = lambda self, comando="": containers
+	edits = []
+	dcb.edit_message_text = lambda text, chat_id, message_id, reply_markup=None, **_: edits.append((text, reply_markup))
+	try:
+		_with_hosts([HOST_FIXTURE[0]], unreachable=())
+		markup, _ = dcb.build_hierarchical_keyboard(containers, "Run", host_id="h_local")
+		assert not [c for c in harness.keyboard_callbacks(markup) if c.startswith("pickHosts|")]
+		_restore_hosts()
+
+		_with_hosts(HOST_FIXTURE, unreachable=())
+		# Reached by choosing a host: the list offers going back...
+		callbacks.cb_pickHost(_update_ctx("pickHost", 5, 50, action="Run", value="h_nas"))
+		last_row = [b.callback_data for b in edits[-1][1].keyboard[-1]]
+		assert last_row == ["pickHosts|Run", "cerrar"], last_row
+		# ...and keeps it when rebuilt, after a project or an action.
+		markup, _ = dcb.build_back_to_level1_keyboard("Run", 5, 50, host_id="h_nas")
+		assert [b.callback_data for b in markup.keyboard[-1]] == ["pickHosts|Run", "cerrar"]
+		# A list for which the choice of host was skipped has nothing to go back to.
+		markup, _ = dcb.build_back_to_level1_keyboard("Run", 5, 51, host_id="h_nas")
+		assert [b.callback_data for b in markup.keyboard[-1]] == ["cerrar"]
+
+		callbacks.cb_pickHosts(_update_ctx("pickHosts", 5, 50, action="Run"))
+		text, hosts = edits[-1]
+		assert text == dcb.host_question("Run"), text
+		assert harness.keyboard_callbacks(hosts) == ["pickHost|Run|h_local", "pickHost|Run|h_nas", "cerrar"]
+	finally:
+		dcb.DockerManager.list_containers, dcb.edit_message_text = original
+		dcb.delete_cache_item(dcb.host_level_key(5, 50))
+		_restore_hosts()

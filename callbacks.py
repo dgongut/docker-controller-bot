@@ -1329,6 +1329,11 @@ def _back_to_compose_level1(ctx):
 register_callback("backToComposeLevel1", _back_to_compose_level1, keeps_message=True)
 
 
+@callback(name="pickHosts", params=("action",), keeps_message=True)
+def cb_pickHosts(ctx):
+	"""Back from one host's list to the choice of host."""
+	core.render_host_picker(ctx.chatId, ctx.messageId, ctx.action)
+
 @callback(name="pickHost", params=("action", "value"), keeps_message=True)
 def cb_pickHost(ctx):
 	"""Steps into one host from a picker that offered several."""

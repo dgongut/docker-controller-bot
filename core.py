@@ -6005,7 +6005,7 @@ def count_actionable_buttons(markup):
 	rows = markup.keyboard or []
 	return sum(len(row) for row in rows[:-1])
 
-def build_hierarchical_keyboard(containers, action_type, exclude_own=False, filter_standalone_status=None, filter_projects_with_all_status=None, marked_names=None, host_id=None):
+def build_hierarchical_keyboard(containers, action_type, exclude_own=False, filter_standalone_status=None, filter_projects_with_all_status=None, marked_names=None, host_id=None, back_to_hosts=False):
 	"""
 	Build hierarchical keyboard with Compose projects and standalone containers.
 	Level 1: Shows projects (📦) and standalone containers (🐳)
@@ -6018,6 +6018,8 @@ def build_hierarchical_keyboard(containers, action_type, exclude_own=False, filt
 		filter_projects_with_all_status: Optional list of statuses - hide projects where ALL containers have these statuses
 		marked_names: Optional set of container names already acted upon in a
 			multi-action session; they show a check instead of their status emoji
+		back_to_hosts: Whether the list was reached by choosing a host, and
+			so offers going back to that choice
 
 	Returns:
 		InlineKeyboardMarkup: Keyboard with projects and standalone containers
@@ -6135,7 +6137,14 @@ def build_hierarchical_keyboard(containers, action_type, exclude_own=False, filt
 
 	# Add cancel button. Once something has been acted upon there is nothing
 	# left to cancel, only to close
-	markup.add(InlineKeyboardButton(get_text("button_close" if marked_names else "button_cancel"), callback_data="cerrar"))
+	close = InlineKeyboardButton(get_text("button_close" if marked_names else "button_cancel"), callback_data="cerrar")
+	# A way back to choosing the host: tapping the wrong one meant cancelling
+	# and typing the command again. In the same row as the cancel button,
+	# which is where the fixed buttons are expected to be.
+	if back_to_hosts and action_type in PICKER_ACTIONS:
+		markup.row(InlineKeyboardButton(get_text("button_back"), callback_data=f"pickHosts|{action_type}"), close)
+	else:
+		markup.add(close)
 
 	return markup, standalone_containers
 
@@ -6451,16 +6460,51 @@ def send_container_picker(action_type, prompt_key, empty_key, comando="",
 			name_host=not host_registry.is_single_host())
 
 	# More than one host has something: offer the hosts first.
+	# No session yet: which host the menu is showing is only decided once one
+	# is picked, and that is where the session is opened.
+	return send_message(message=host_question(action_type),
+						reply_markup=_host_picker_markup(action_type, sections))
+
+
+def _picker_sections(action_type):
+	"""The hosts that have something to offer for a picker action, as (entry, owner, containers)."""
+	spec = PICKER_ACTIONS[action_type]
+	return [(entry, owner, containers)
+			for entry, owner, containers in hosts_with_containers(spec.get("comando", ""))
+			if _picker_has_anything(containers, spec.get("exclude_own", False),
+									spec.get("filter_standalone_status"),
+									spec.get("filter_projects_with_all_status"), owner, entry["id"])]
+
+
+def _host_picker_markup(action_type, sections):
+	"""One button per host, then cancel."""
 	markup = InlineKeyboardMarkup(row_width=1)
 	for entry, _, containers in sections:
 		markup.add(InlineKeyboardButton(
 			f'🖥️ {entry.get("alias", entry["id"])}',
 			callback_data=f'pickHost|{action_type}|{entry["id"]}'))
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+	return markup
 
-	# No session yet: which host the menu is showing is only decided once one
-	# is picked, and that is where the session is opened.
-	return send_message(message=host_question(action_type), reply_markup=markup)
+
+def render_host_picker(chat_id, message_id, action_type):
+	"""
+	Repaints a host's container list as the choice of host it came from.
+
+	Asked again rather than remembered: what each host has to offer may have
+	changed since, and a host with nothing left would be a button to nowhere.
+	The session the host's list opened is closed, since no host is chosen now.
+	"""
+	if action_type not in PICKER_ACTIONS:
+		warning(f"Unknown picker action: {action_type}")
+		return
+	clear_multi_action(chat_id, message_id)
+	sections = _picker_sections(action_type)
+	if not sections:
+		edit_message_text(get_text(PICKER_ACTIONS[action_type]["empty_key"]), chat_id, message_id)
+		return
+	edit_message_text(host_question(action_type), chat_id, message_id,
+					reply_markup=_host_picker_markup(action_type, sections))
 
 
 def _send_picker_for_host(entry, containers, action_type, prompt_key, exclude_own,
@@ -6483,6 +6527,11 @@ def _send_picker_for_host(entry, containers, action_type, prompt_key, exclude_ow
 	if sent and multi_action and store.get("bot.multi_selection"):
 		save_multi_action(sent.chat.id, sent.message_id, multi_action, host_id=entry["id"])
 	return sent
+
+
+def host_level_key(chat_id, message_id):
+	"""Cache key marking a picker that was reached by choosing a host."""
+	return f"host_level_{chat_id}_{message_id}"
 
 
 def render_picker_for_host(chat_id, message_id, action_type, host_id):
@@ -6517,7 +6566,11 @@ def render_picker_for_host(chat_id, message_id, action_type, host_id):
 		containers, action_type, spec.get("exclude_own", False),
 		filter_standalone_status=spec.get("filter_standalone_status"),
 		filter_projects_with_all_status=spec.get("filter_projects_with_all_status"),
-		host_id=host_id)
+		host_id=host_id, back_to_hosts=True)
+	# Remembered on the message, so the list rebuilt after entering a project
+	# or acting on a container keeps its way back. A picker that skipped the
+	# choice of host, because only one had anything, has no choice to go back to.
+	write_cache_item(host_level_key(chat_id, message_id), True)
 
 	if standalone:
 		save_container_cache(chat_id, message_id, standalone, host_id)
@@ -6861,7 +6914,8 @@ def build_back_to_level1_keyboard(action_type, chatId, messageId, exclude_own=Tr
 		filter_standalone_status=config['filter_standalone_status'],
 		filter_projects_with_all_status=config['filter_projects_with_all_status'],
 		marked_names=marked_names,
-		host_id=host_id
+		host_id=host_id,
+		back_to_hosts=bool(read_cache_item(host_level_key(chatId, messageId)))
 	)
 
 	# Save container cache for standalone containers
@@ -6882,6 +6936,8 @@ def build_compose_project_level2_keyboard(project_info, project_name, action_typ
 		filter_status: Optional list of statuses to keep (see PROJECT_LEVEL2_STATUS_FILTERS)
 		marked_names: Optional set of container names already acted upon in a
 			multi-action session; they show a check instead of their status emoji
+		back_to_hosts: Whether the list was reached by choosing a host, and
+			so offers going back to that choice
 
 	Returns:
 		InlineKeyboardMarkup: Configured keyboard
