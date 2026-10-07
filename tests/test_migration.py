@@ -205,3 +205,43 @@ def test_a_mute_task_is_not_pinned_to_a_host():
 	assert again["silencio"]["host"] is None
 	assert again["limpieza"]["host"] == result.host_id
 	shutil.rmtree(root, ignore_errors=True)
+
+
+def test_the_import_and_the_ignored_variables_are_reported():
+	"""
+	The start message tells the user what happened to their compose. Imported
+	is said once, on the start that did it; ignored only while the compose says
+	something other than what is in force, because a variable that matches is
+	harmless and a warning on every start would teach people to skip it.
+	"""
+	store_, root = harness.temp_storage(env={"LANGUAGE": "IT", "CHECK_UPDATE_EVERY_HOURS": "6"})
+	first = migration.run()
+	assert first.imported == ["LANGUAGE", "CHECK_UPDATE_EVERY_HOURS"]
+	assert first.ignored == []
+
+	store_.reload()
+	second = migration.run()
+	assert second.imported == []
+	assert second.ignored == [], "los valores coinciden: no hay nada que avisar"
+
+	store_.set("bot.language", "GL")
+	store_.reload()
+	third = migration.run()
+	assert third.imported == []
+	assert third.ignored == ["LANGUAGE"]
+	shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_variable_that_does_not_parse_counts_as_ignored():
+	store_, root = harness.temp_storage(env={"BUTTON_COLUMNS": "tres"})
+	migration.run()
+	store_.reload()
+	assert migration.run().ignored == ["BUTTON_COLUMNS"]
+	shutil.rmtree(root, ignore_errors=True)
+
+
+def test_nothing_is_reported_without_variables():
+	store_, root = harness.temp_storage()
+	result = migration.run()
+	assert result.imported == [] and result.ignored == []
+	shutil.rmtree(root, ignore_errors=True)

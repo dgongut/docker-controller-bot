@@ -41,7 +41,7 @@ from i18n import get_text, language
 from logger import debug, error, warning
 from message_queue import MessageQueue
 
-VERSION = "5.0.0_RC9b"
+VERSION = "5.0.0_RC9c"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -3702,14 +3702,7 @@ def build_starting_message():
 				lines.append(get_text("starting_host_down", host_alias(entry["id"])))
 
 	lines.append("")
-	# The one thing the bot cannot do for the user. Said here and not only in
-	# the log because it needs an edit to the docker-compose: with only
-	# /app/schedule mapped, /app/config is inside the image, so copying the
-	# files there would put them somewhere the next recreate deletes. The
-	# volume mapping is the migration, and only its owner can change it.
-	if store.uses_legacy_root():
-		lines.append(get_text("starting_legacy_volume", store.LEGACY_ROOT, store.CONFIG_ROOT))
-		lines.append("")
+	lines.extend(_migration_notices())
 
 	# Said here because the bot has just come up with the user's hosts and
 	# choices missing, and the log is not where anyone looks for why.
@@ -3730,6 +3723,38 @@ def build_starting_message():
 		lines.append(get_text("starting_updates_off"))
 	lines.append(get_text("channel"))
 	return "\n".join(lines)
+
+
+def _migration_notices():
+	"""
+	What the user has to do to their docker-compose, as paragraphs of the
+	start message, each followed by its blank line.
+
+	Said here and not only in the log, because every one of them needs an edit
+	only the compose's owner can make, and the log is not where anyone looks.
+	The path comes first: it is the edit that matters, and cleaning up the
+	variables can go in the same one.
+	"""
+	notices = []
+	if not store.is_persistent():
+		# Nothing survives a recreate, so this is the only thing worth saying:
+		# the old path would not help either, and the settings file is seeded
+		# again on every start, so "imported" would repeat on every one.
+		notices.append(get_text("starting_not_persistent", store.CONFIG_ROOT))
+	else:
+		# With only /app/schedule mapped, /app/config is inside the image, so
+		# copying the files there would put them somewhere the next recreate
+		# deletes. The volume mapping is the migration.
+		if store.uses_legacy_root():
+			notices.append(get_text("starting_legacy_volume", store.LEGACY_ROOT, store.CONFIG_ROOT))
+		if _migration.imported:
+			notices.append(get_text("starting_env_imported"))
+		ignored = [f"<code>{name}</code>" for name in _migration.ignored]
+		if len(ignored) == 1:
+			notices.append(get_text("starting_env_ignored", ignored[0]))
+		elif ignored:
+			notices.append(get_text("starting_env_ignored_many", ", ".join(ignored)))
+	return [line for notice in notices for line in (notice, "")]
 
 
 def _start_summary():

@@ -35,7 +35,12 @@ LOCAL_SOCKET_URL = "unix:///var/run/docker.sock"
 # `ask_for_language` is true only on a genuinely new install: one where there
 # were no settings to read, no LANGUAGE to import and nothing left by 4.x, so
 # the bot has no way of knowing which language to speak and may as well ask.
-MigrationResult = namedtuple("MigrationResult", ["host_id", "ask_for_language"])
+#
+# `imported` lists the variables this start copied into the settings file, and
+# `ignored` the ones still in the compose whose value is no longer the one in
+# force. The start message tells the user about both, because the log is not
+# where anyone looks after an upgrade.
+MigrationResult = namedtuple("MigrationResult", ["host_id", "ask_for_language", "imported", "ignored"])
 
 
 def run():
@@ -57,12 +62,15 @@ def run():
 	upgrading = store.uses_legacy_root() or os.path.isfile(store.schedules_path())
 	seeded = _seed_settings_from_env()
 	host_id = _ensure_local_host()
+	imported = _present_env() if seeded else []
+	ignored = [] if seeded else _overridden_env()
 	_warn_deprecated_env(seeded)
 	_migrate_mute_file()
 	_migrate_schedules(host_id)
 	_discard_legacy_cache()
 	ask_for_language = seeded and not upgrading and not os.environ.get("LANGUAGE")
-	return MigrationResult(host_id=host_id, ask_for_language=ask_for_language)
+	return MigrationResult(host_id=host_id, ask_for_language=ask_for_language,
+							imported=imported, ignored=ignored)
 
 
 def _seed_settings_from_env():
@@ -129,6 +137,32 @@ def _generate_host_id(hosts):
 			return candidate
 
 
+def _present_env():
+	"""The settings variables the compose sets, in the order they are documented."""
+	return [name for name in SETTINGS_FROM_ENV if os.environ.get(name) not in (None, "")]
+
+
+def _overridden_env():
+	"""
+	The settings variables the compose sets to something other than what is in
+	force.
+
+	One that matches is harmless and is left alone: the trap is the user who
+	edits the compose, restarts, and sees nothing change. A value that does not
+	even parse counts as not matching, since it is not applied either.
+	"""
+	overridden = []
+	for name in _present_env():
+		key, parse = SETTINGS_FROM_ENV[name]
+		try:
+			matches = parse(os.environ[name]) == store.get(key)
+		except (TypeError, ValueError):
+			matches = False
+		if not matches:
+			overridden.append(name)
+	return overridden
+
+
 def _warn_deprecated_env(seeded):
 	"""
 	Reports variables that no longer do anything.
@@ -137,7 +171,7 @@ def _warn_deprecated_env(seeded):
 	restarts, sees no change, and has no way of knowing the value is now read
 	from somewhere else.
 	"""
-	present = [name for name in SETTINGS_FROM_ENV if os.environ.get(name) not in (None, "")]
+	present = _present_env()
 	if not present:
 		return
 	if seeded:

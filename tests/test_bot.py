@@ -1705,8 +1705,13 @@ def test_the_starting_message_says_when_a_file_could_not_be_read():
 		dcb.DockerManager.list_containers = original
 		_restore_hosts()
 
-	message = dcb.build_starting_message()
-	assert "⚠️" not in message, message
+	previous = store._persistent
+	store._persistent = True
+	try:
+		message = dcb.build_starting_message()
+		assert "⚠️" not in message, message
+	finally:
+		store._persistent = previous
 
 
 def test_a_dead_host_does_not_hold_the_starting_message():
@@ -1991,10 +1996,11 @@ def test_the_old_volume_is_pointed_out_where_it_will_be_read():
 	saying "when convenient" — which is what this was — is a line nobody reads
 	and a change nobody makes.
 	"""
-	previous = store._legacy_root_in_use
+	previous = store._legacy_root_in_use, store._persistent
 	original = dcb.DockerManager.list_containers
 	dcb.DockerManager.list_containers = lambda self, comando="": [_container("nginx", "running")]
 	try:
+		store._persistent = True
 		store._legacy_root_in_use = False
 		assert store.LEGACY_ROOT not in dcb.build_starting_message()
 
@@ -2003,7 +2009,48 @@ def test_the_old_volume_is_pointed_out_where_it_will_be_read():
 		assert store.LEGACY_ROOT in message, message
 		assert store.CONFIG_ROOT in message, message
 	finally:
-		store._legacy_root_in_use = previous
+		store._legacy_root_in_use, store._persistent = previous
+		dcb.DockerManager.list_containers = original
+
+
+def test_the_starting_message_says_what_to_change_in_the_compose():
+	"""
+	Each edit only the compose's owner can make is asked for where it will be
+	read. Without a volume that is the only thing said: the old path would not
+	help, and the settings are seeded again on every start, so "imported" would
+	come back on every one.
+	"""
+	previous = (store._legacy_root_in_use, store._persistent, dcb._migration)
+	original = dcb.DockerManager.list_containers
+	dcb.DockerManager.list_containers = lambda self, comando="": [_container("nginx", "running")]
+	try:
+		store._legacy_root_in_use = True
+		dcb._migration = previous[2]._replace(imported=["LANGUAGE"], ignored=["LANGUAGE", "BUTTON_COLUMNS"])
+
+		store._persistent = False
+		message = dcb.build_starting_message()
+		assert i18n.get_text("starting_not_persistent", store.CONFIG_ROOT) in message, message
+		assert store.LEGACY_ROOT not in message, message
+		assert i18n.get_text("starting_env_imported") not in message, message
+		assert "BUTTON_COLUMNS" not in message, message
+
+		store._persistent = True
+		message = dcb.build_starting_message()
+		assert "starting_not_persistent" not in message
+		legacy = i18n.get_text("starting_legacy_volume", store.LEGACY_ROOT, store.CONFIG_ROOT)
+		imported = i18n.get_text("starting_env_imported")
+		assert legacy in message and imported in message, message
+		# The path first: it is the edit that matters.
+		assert message.index(legacy) < message.index(imported), message
+		assert i18n.get_text("starting_env_ignored_many",
+								"<code>LANGUAGE</code>, <code>BUTTON_COLUMNS</code>") in message, message
+
+		dcb._migration = previous[2]._replace(imported=[], ignored=["LANGUAGE"])
+		message = dcb.build_starting_message()
+		assert i18n.get_text("starting_env_ignored", "<code>LANGUAGE</code>") in message, message
+		assert imported not in message, message
+	finally:
+		store._legacy_root_in_use, store._persistent, dcb._migration = previous
 		dcb.DockerManager.list_containers = original
 
 
