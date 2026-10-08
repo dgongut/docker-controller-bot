@@ -316,3 +316,13 @@ def test_image_metadata_labels_are_left_to_the_new_image():
 		"traefik.enable": "true"}}, "HostConfig": {}}
 	labels = docker_update.extract_container_config(container)["labels"]
 	assert labels == {"traefik.enable": "true"}, labels
+
+
+def test_a_dcb_label_set_to_false_is_off():
+	from config import label_enabled, LABEL_AUTO_UPDATE
+	assert label_enabled({LABEL_AUTO_UPDATE: ""}, LABEL_AUTO_UPDATE)
+	assert label_enabled({LABEL_AUTO_UPDATE: "true"}, LABEL_AUTO_UPDATE)
+	for off in ("false", "False", " no ", "0", "off"):
+		assert not label_enabled({LABEL_AUTO_UPDATE: off}, LABEL_AUTO_UPDATE), off
+	assert not label_enabled({}, LABEL_AUTO_UPDATE)
+	assert not label_enabled(None, LABEL_AUTO_UPDATE)

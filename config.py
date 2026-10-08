@@ -103,6 +103,20 @@ ICON_CONTAINER_ACTION_DONE = "✅"
 LABEL_IGNORE_CHECK_UPDATES = "DCB-Ignore-Check-Updates"
 LABEL_AUTO_UPDATE = "DCB-Auto-Update"
 
+
+def label_enabled(labels, name):
+    """
+    Whether a DCB-* label is switched on in a container's labels.
+
+    Written bare (`- "DCB-Auto-Update"`) it carries an empty value, and that
+    means on. Only looking for the key turned `DCB-Auto-Update=false` into an
+    auto-update — the opposite of what it says — so an explicit no is read
+    as no.
+    """
+    if not labels or name not in labels:
+        return False
+    return str(labels[name]).strip().lower() not in ("false", "0", "no", "off")
+
 docker_architectures = {
     "x86_64": "amd64",
     "i386": "i386",

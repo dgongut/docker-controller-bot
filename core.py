@@ -41,7 +41,7 @@ from i18n import get_text, language
 from logger import debug, error, warning
 from message_queue import MessageQueue
 
-VERSION = "5.0.0_RC9c"
+VERSION = "5.0.0"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -1810,7 +1810,7 @@ class DockerUpdateMonitor:
 				continue
 
 			labels = container.labels
-			if LABEL_IGNORE_CHECK_UPDATES in labels:
+			if label_enabled(labels, LABEL_IGNORE_CHECK_UPDATES):
 				debug(f"Ignoring update check for container {container.name} (label)")
 				continue
 
@@ -1832,14 +1832,14 @@ class DockerUpdateMonitor:
 					raise remote_image
 				debug(f"Checking update: {container.name} ({image_with_tag}): LOCAL IMAGE [{local_image.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}] - REMOTE IMAGE [{remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}]")
 				if local_image != remote_image.id:
-					if LABEL_AUTO_UPDATE in labels and is_own_container(host_id, container.id, container.name):
+					if label_enabled(labels, LABEL_AUTO_UPDATE) and is_own_container(host_id, container.id, container.name):
 						# Updating the bot recreates it, which would end this
 						# pass halfway, with the hosts after this one unchecked.
 						# So it waits for the end of the pass.
 						debug(f"Auto-update of the bot itself deferred to the end of the pass")
 						self._deferred_self_update = (container_ref(host_id, container), container.name)
 						continue
-					if LABEL_AUTO_UPDATE in labels:
+					if label_enabled(labels, LABEL_AUTO_UPDATE):
 						self._auto_update(host_id, container_ref(host_id, container), container.name)
 						continue
 					old_has_update = read_container_update_status(image_with_tag, container.name, host_id)
@@ -3085,8 +3085,8 @@ def collect_telemetry_metrics():
 				for container in containers:
 					labels = container.labels or {}
 					total += 1
-					auto_update += LABEL_AUTO_UPDATE in labels
-					ignore_updates += LABEL_IGNORE_CHECK_UPDATES in labels
+					auto_update += label_enabled(labels, LABEL_AUTO_UPDATE)
+					ignore_updates += label_enabled(labels, LABEL_IGNORE_CHECK_UPDATES)
 			metrics["containers"] = _containers_bucket(total)
 			metrics["containers_auto_update"] = auto_update
 			metrics["containers_ignore_updates"] = ignore_updates
@@ -5312,8 +5312,8 @@ def gather_container_info(owner, container):
 	# Updates, and how the bot treats it.
 	info["has_update"] = read_container_update_status(info["image"], container.name, host_id)
 	info["update_versions"] = store.update_versions(host_id, container.name)
-	info["auto_update"] = LABEL_AUTO_UPDATE in labels
-	info["ignore_checks"] = LABEL_IGNORE_CHECK_UPDATES in labels
+	info["auto_update"] = label_enabled(labels, LABEL_AUTO_UPDATE)
+	info["ignore_checks"] = label_enabled(labels, LABEL_IGNORE_CHECK_UPDATES)
 	checked = store.update_checked_at(host_id, container.name)
 	if checked:
 		try:
