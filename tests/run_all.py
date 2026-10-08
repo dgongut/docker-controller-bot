@@ -21,7 +21,7 @@ REPO = os.path.dirname(HERE)
 
 # test_store and test_migration expect a clean import; test_bot loads the bot
 # module, which is global state, so it goes last.
-MODULES = ("test_lint", "test_store", "test_migration", "test_identity", "test_hosts", "test_update", "test_bot", "test_monitors")
+MODULES = ("test_lint", "test_store", "test_migration", "test_identity", "test_hosts", "test_update", "test_bot", "test_monitors", "test_listing")
 
 # Against the real daemon, so not by default: they need Docker running, create
 # and update containers, and take minutes. `--docker` runs these and nothing

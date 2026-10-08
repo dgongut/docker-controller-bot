@@ -294,6 +294,8 @@ def _build_client(entry, verify=False, timeout=None):
 		built = docker.DockerClient(**kwargs)
 	except Exception as e:
 		raise HostUnavailable(host_id, str(e))
+	if url.startswith("ssh://"):
+		_reuse_ssh_connections(built, host_id)
 	if verify:
 		try:
 			built.ping()
@@ -303,6 +305,112 @@ def _build_client(entry, verify=False, timeout=None):
 			_close((("", built),), host_id)
 			raise HostUnavailable(host_id, str(e))
 	return built
+
+
+def _reuse_ssh_connections(client, host_id):
+	"""
+	Makes an ssh:// client keep its connection between requests.
+
+	With use_ssh_client the SDK's ssh adapter builds a new connection pool on
+	every request and keeps none of them: its get_connection only stores the
+	pool when paramiko dials (docker/transport/sshconn.py, the same in 7.1.0
+	and 7.2.0). Every API call therefore spawned another `ssh … docker system
+	dial-stdio`: a TCP connection, a full ssh handshake and a docker CLI
+	start-up, more than half a second over a VPN, before the request itself
+	was even sent. Listing fourteen containers the SDK's way was fifteen of
+	those, nine seconds, and every one of them leaked its process and a file
+	descriptor until garbage collection.
+
+	The adapter is handed the one pool per client it would have had with
+	paramiko. The ssh process behind a pooled connection stays up between
+	requests, so a request after the first costs a round-trip and not a
+	handshake, and the adapter's close() —what drop() and _close() end up
+	calling— ends it as it always did. A connection whose ssh process has
+	exited —the host rebooted, its daemon restarted, the link dropped— is
+	replaced rather than written to.
+
+	Returns whether the client was changed; False for a client that does not
+	dial through the ssh binary, which the SDK already pools.
+	"""
+	adapter = getattr(getattr(client, "api", None), "_custom_adapter", None)
+	try:
+		from docker.transport.sshconn import SSHConnection, SSHConnectionPool, SSHHTTPAdapter, SSHSocket
+	except ImportError:
+		return False
+	if not isinstance(adapter, SSHHTTPAdapter) or adapter.ssh_client is not None:
+		return False
+
+	class Stdout:
+		"""
+		The ssh process's stdout as http.client reads responses from it,
+		minus close().
+
+		http.client closes the file it read a response from once the
+		response is consumed. The SDK's socket hands it the process's own
+		stdout, so the first response closed the pipe and the connection
+		was good for exactly one request. The pool owns the process, and
+		ends it when the connection is closed.
+		"""
+		def __init__(self, stdout, channel):
+			self._stdout = stdout
+			# What the SDK reads an exec's or attach's raw stream from.
+			self.channel = channel
+
+		def close(self):
+			pass
+
+		def __getattr__(self, name):
+			return getattr(self._stdout, name)
+
+	class ReusableSocket(SSHSocket):
+		def makefile(self, mode):
+			if not self.proc:
+				self.connect()
+			self.proc.stdout.channel = self
+			return Stdout(self.proc.stdout, self)
+
+		def close(self):
+			try:
+				super().close()
+			except Exception:
+				# Already gone: nothing left to say goodbye to.
+				pass
+
+	class ReusableConnection(SSHConnection):
+		def connect(self):
+			sock = ReusableSocket(self.ssh_host)
+			sock.settimeout(self.timeout)
+			sock.connect()
+			self.sock = sock
+
+	class PersistentPool(SSHConnectionPool):
+		def _new_conn(self):
+			return ReusableConnection(None, self.timeout, self.ssh_host)
+
+		def _get_conn(self, timeout):
+			conn = super()._get_conn(timeout)
+			process = getattr(getattr(conn, "sock", None), "proc", None)
+			if process is not None and process.poll() is not None:
+				debug(f"The ssh connection to host {host_id} had ended; opening another")
+				try:
+					conn.close()
+				except Exception:
+					pass
+				conn = self._new_conn()
+			return conn
+
+	try:
+		pool = PersistentPool(timeout=adapter.timeout, maxsize=adapter.max_pool_size, host=adapter.ssh_host)
+		# Where the adapter keeps the pools it closes.
+		adapter.pools[adapter.ssh_host] = pool
+		adapter.get_connection = lambda url, proxies=None: pool
+	except Exception as e:
+		# Never a reason not to reach the host: without it, every request
+		# merely pays the handshake, as it did before.
+		warning(f"Could not keep the ssh connection to host {host_id} open: {e}")
+		return False
+	debug(f"Host {host_id}: ssh connection kept open between requests")
+	return True
 
 
 def _cached_client(cache, entry, timeout=None, announce=False):

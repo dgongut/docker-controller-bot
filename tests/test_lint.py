@@ -21,7 +21,8 @@ import harness
 # Every module of the bot, and what each may legitimately read from elsewhere.
 SOURCES = ("core.py", "commands.py", "callbacks.py", "i18n.py",
 			"store.py", "migration.py", "callback_registry.py",
-			"host_registry.py", "formatting.py", "docker-controller-bot.py")
+			"host_registry.py", "container_listing.py", "formatting.py",
+			"docker-controller-bot.py")
 
 
 def _module_globals(tree, extra):

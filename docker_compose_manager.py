@@ -5,6 +5,8 @@ Manages containers that are part of Docker Compose projects
 import docker
 from typing import Dict, List, Optional
 
+from container_listing import list_containers
+
 # Standard Docker Compose labels
 COMPOSE_PROJECT_LABEL = 'com.docker.compose.project'
 COMPOSE_SERVICE_LABEL = 'com.docker.compose.service'
@@ -128,8 +130,10 @@ class ComposeDetector:
 class ComposeProjectManager:
     """Manages operations on entire Docker Compose projects"""
 
-    def __init__(self, client=None):
+    def __init__(self, client=None, where=""):
         self.client = client or docker.from_env()
+        # The host, for the listing's log line.
+        self.where = where
 
     def get_all_projects(self) -> Dict[str, ComposeProjectInfo]:
         """
@@ -138,7 +142,9 @@ class ComposeProjectManager:
         Returns:
             dict: Dictionary {project_name: ComposeProjectInfo}
         """
-        all_containers = self.client.containers.list(all=True)
+        # From the list in one request: a project is its labels and names,
+        # which the list carries. See container_listing.
+        all_containers = list_containers(self.client, all=True, where=self.where)
         projects = {}
 
         for container in all_containers:
@@ -168,7 +174,7 @@ class ComposeProjectManager:
         filters = {
             'label': f'{COMPOSE_PROJECT_LABEL}={project_name}'
         }
-        return self.client.containers.list(all=True, filters=filters)
+        return list_containers(self.client, all=True, filters=filters, where=self.where)
 
     def get_project_info(self, project_name: str) -> Optional[ComposeProjectInfo]:
         """

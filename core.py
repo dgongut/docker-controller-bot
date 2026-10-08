@@ -36,6 +36,7 @@ from schedule_manager import ScheduleManager
 from own_container import candidates as own_container_ids
 from port_manager import PortManager
 import callback_registry
+import container_listing
 import host_registry
 from i18n import get_text, language
 from logger import debug, error, warning
@@ -208,29 +209,37 @@ class DockerManager:
 	def __init__(self, host_id=None, client=None):
 		self.host_id = host_id or host_registry.local_host_id()
 		self.client = client or host_registry.client(self.host_id)
-		self.compose_manager = ComposeProjectManager(self.client)
+		self.compose_manager = ComposeProjectManager(self.client, where=self.alias)
 
 	@property
 	def alias(self):
 		"""The host's display name, for messages that have to say where."""
 		return host_registry.alias(self.host_id)
 
-	def list_containers(self, comando=""):
+	def list_containers(self, comando="", inspect=False):
+		"""
+		This host's containers: the bot first, then by state, then by name.
+
+		Built from the daemon's list in one request —see container_listing—
+		because what the menus, /list and the caches read is in the list
+		itself. The SDK's list() is that request plus an inspect per
+		container, and over ssh:// each of those is a round-trip to another
+		machine. `inspect` asks for the full objects anyway, for the callers
+		that read what only an inspect carries: /ports and its PortBindings.
+		"""
 		comando = comando.split('@', 1)[0]
 		if comando == "/run":
-			status = ['paused', 'exited', 'created', 'dead']
-			filters = {'status': status}
-			containers = self.client.containers.list(filters=filters)
+			query = {"filters": {'status': ['paused', 'exited', 'created', 'dead']}}
 		elif comando == "/stop" or comando == "/restart":
-			status = ['running', 'restarting']
-			filters = {'status': status}
-			containers = self.client.containers.list(filters=filters)
+			query = {"filters": {'status': ['running', 'restarting']}}
 		elif comando == "/exec":
-			status = ['running']
-			filters = {'status': status}
-			containers = self.client.containers.list(filters=filters)
+			query = {"filters": {'status': ['running']}}
 		else:
-			containers = self.client.containers.list(all=True)
+			query = {"all": True}
+		if inspect:
+			containers = self.client.containers.list(**query)
+		else:
+			containers = container_listing.list_containers(self.client, where=self.alias, **query)
 		status_order = {'running': 0, 'restarting': 1, 'paused': 2, 'exited': 3, 'created': 4, 'dead': 5}
 		sorted_containers = sorted(containers, key=lambda x: (
 			0 if is_own_container(self.host_id, x.id, x.name) else 1,
@@ -245,9 +254,11 @@ class DockerManager:
 		every button press, and over ssh pulling the whole list to discard all
 		but one is a round-trip the size of the machine instead of the size of
 		the answer. Docker's name filter matches by substring, hence the exact
-		comparison afterwards.
+		comparison afterwards. From the list alone, without an inspect for
+		each substring match: the callers want the id, and the update emoji
+		the image, both of which the list says.
 		"""
-		for container in self.client.containers.list(all=True, filters={"name": name}):
+		for container in container_listing.list_containers(self.client, all=True, filters={"name": name}, where=self.alias):
 			if container.name == name:
 				return container
 		return None
@@ -1814,6 +1825,12 @@ class DockerUpdateMonitor:
 				debug(f"Ignoring update check for container {container.name} (label)")
 				continue
 
+			# Listed, not inspected: the platform the pull has to ask for is
+			# only in the inspect (ImageManifestDescriptor), so it is fetched
+			# here, after the containers skipped above that the list could
+			# answer for.
+			if getattr(container, "listed", False):
+				container.reload()
 			container_attrs = container.attrs['Config']
 			image_with_tag = container_attrs['Image']
 			versions = None
@@ -7300,12 +7317,12 @@ def get_update_emoji(containerName, host_id=None):
 	status = "✅"
 	host_id = host_id or host_registry.local_host_id()
 
-	container_id = find_container_id_on_host(host_id, containerName)
-	if not container_id:
-		return status
-
 	try:
-		container = manager(host_id).client.containers.get(container_id)
+		# By name from the list, which says the image too: one request
+		# instead of a name lookup and an inspect for every service shown.
+		container = manager(host_id).container_named(containerName)
+		if container is None:
+			return status
 		image_with_tag = container.attrs['Config']['Image']
 		if read_container_update_status(image_with_tag, container.name, host_id) is True:
 			status = "⬆️"
@@ -7345,7 +7362,10 @@ def show_container_ports(host_id=None):
 	"""
 	host_id = host_id or host_registry.local_host_id()
 	try:
-		containers = manager(host_id).list_containers()
+		# Inspected, not just listed: the bindings come from
+		# HostConfig.PortBindings, which only the inspect carries, and a
+		# stopped container's ports are nowhere else.
+		containers = manager(host_id).list_containers(inspect=True)
 	except host_registry.HostUnavailable as e:
 		send_message(message=get_text("host_unreachable", host_alias(host_id), html.escape(str(e.reason))))
 		return

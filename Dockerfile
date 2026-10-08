@@ -37,6 +37,7 @@ RUN apk add --no-cache python3 py3-pip tzdata curl unzip py3-paramiko openssh-cl
     mv /tmp/docker-controller-bot-${VERSION}/migration.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/callback_registry.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/host_registry.py /app && \
+    mv /tmp/docker-controller-bot-${VERSION}/container_listing.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/i18n.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/docker_update.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/docker_compose_manager.py /app && \

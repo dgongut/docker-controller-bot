@@ -117,7 +117,10 @@ class PortManager:
         host while the user is looking at a remote one is simply a wrong
         answer. Defaults to the host the bot runs on.
         """
-        containers = (manager or self.default_manager()).list_containers()
+        # Inspected, not just listed: the bindings are HostConfig.PortBindings,
+        # which only the inspect carries, and a stopped container holds its
+        # port nowhere else.
+        containers = (manager or self.default_manager()).list_containers(inspect=True)
 
         for container in containers:
             try:
@@ -171,8 +174,9 @@ class PortManager:
             Available port number or None if no port found
         """
         # Get all ports used by containers, on the host being asked about:
-        # a port free here says nothing about any other machine.
-        containers = (manager or self.default_manager()).list_containers()
+        # a port free here says nothing about any other machine. Inspected,
+        # because the bindings are only in the inspect.
+        containers = (manager or self.default_manager()).list_containers(inspect=True)
         used_ports = set()
 
         for container in containers:

@@ -2517,7 +2517,7 @@ def test_the_ports_screen_asks_about_the_host_you_are_looking_at():
 										"PortBindings": {"32400/tcp": [{"HostPort": "8080"}]}}}
 	fake = {"h_local": [], "h_nas": [occupied]}
 	original = dcb.DockerManager.list_containers
-	dcb.DockerManager.list_containers = lambda self, comando="": fake[self.host_id]
+	dcb.DockerManager.list_containers = lambda self, comando="", inspect=False: fake[self.host_id]
 	try:
 		taken_on_nas, _ = dcb.check_specific_port(8080, "h_nas")
 		free_locally, _ = dcb.check_specific_port(8080, "h_local")
@@ -4485,6 +4485,7 @@ def _with_hosts(hosts, unreachable=("nas",)):
 			fake.info.side_effect = down
 			fake.containers.get.side_effect = down
 			fake.containers.list.side_effect = down
+			fake.api.containers.side_effect = down
 		return fake
 
 	docker.DockerClient = sdk
