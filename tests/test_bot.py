@@ -5826,3 +5826,66 @@ def test_a_host_list_has_a_way_back_to_the_choice_of_host():
 		dcb.DockerManager.list_containers, dcb.edit_message_text = original
 		dcb.delete_cache_item(dcb.host_level_key(5, 50))
 		_restore_hosts()
+
+
+def test_the_queue_says_when_everything_queued_has_gone_out():
+	"""What a stop waits for: the messages, not a fixed sleep."""
+	import message_queue as mq
+
+	queue = mq.MessageQueue(delay_between_messages=0)
+	try:
+		sent = []
+		queue.add_message(lambda: (time.sleep(0.3), sent.append(1)))
+		assert queue.drain(5), "no se ha vaciado"
+		assert sent == [1], sent
+		assert queue.drain(0), "vacía tiene que estar vacía al instante"
+
+		queue.add_message(lambda: time.sleep(1))
+		assert not queue.drain(0.1), "ha dicho que se vació con un mensaje en marcha"
+	finally:
+		queue.shutdown()
+
+
+def test_a_stop_signal_lets_an_update_finish_and_the_messages_go_out_first():
+	"""
+	Python as a container's first process ignores SIGTERM unless something
+	handles it, so `docker stop` waited out the grace period and killed the
+	bot. Now it stops at once, but not halfway through updating something
+	else, which would leave `<name>_old` behind, and not before the last
+	message reaches Telegram.
+	"""
+	import signal
+	import threading
+	import docker_update
+	import message_queue as mq
+
+	original_queue = dcb.message_queue
+	dcb.message_queue = mq.MessageQueue(delay_between_messages=0)
+	dcb._stopping = False
+	order = []
+	docker_update._start_updating("c" * 64)
+
+	def finish_update():
+		time.sleep(0.4)
+		order.append("update")
+		docker_update._done_updating("c" * 64)
+
+	try:
+		dcb.message_queue.add_message(lambda: order.append("message"))
+		threading.Thread(target=finish_update, daemon=True).start()
+		started = time.monotonic()
+		try:
+			dcb._stop_on_signal(signal.SIGTERM, None)
+			raise AssertionError("no ha salido")
+		except SystemExit as stop:
+			assert stop.code == 0, stop.code
+		assert time.monotonic() - started >= 0.4, "no ha esperado a la actualización"
+		assert order == ["message", "update"], order
+		assert docker_update.updates_in_progress() == 0
+		# A second signal while stopping does not start it all over again.
+		dcb._stop_on_signal(signal.SIGTERM, None)
+	finally:
+		docker_update._done_updating("c" * 64)
+		dcb.message_queue.shutdown()
+		dcb.message_queue = original_queue
+		dcb._stopping = False

@@ -31,6 +31,11 @@ def _done_updating(container_id):
 	with _updating_lock:
 		_updating.discard(container_id)
 
+def updates_in_progress():
+	"""How many containers are being updated right now."""
+	with _updating_lock:
+		return len(_updating)
+
 
 # What Docker waits before killing a container that set no stop_grace_period.
 DEFAULT_STOP_SECONDS = 10

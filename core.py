@@ -8,6 +8,7 @@ import os
 import re
 import requests
 import shlex
+import signal
 import sys
 import telebot
 import threading
@@ -27,7 +28,7 @@ from compose_generator import ComposeGenerator
 from formatting import (
 	EVENT_LOG_LINES, by_host, render_container_info, comparison_version_change, comparison_version_line, comparison_version_notes, container_line, describe_exit_code, log_excerpt, release_notes_url, version_lines,
 )
-from docker_update import container_platform, extract_container_config, image_repository, image_version, perform_update, stop_container
+from docker_update import container_platform, extract_container_config, image_repository, image_version, perform_update, stop_container, updates_in_progress
 from docker_compose_manager import (
     ComposeDetector,
     ComposeProjectManager
@@ -9141,6 +9142,43 @@ def register_bot_commands():
 		])
 
 
+# How long a stop waits for the messages still queued, so the last thing the
+# bot said reaches Telegram. Docker's default grace period is 10 s.
+STOP_MESSAGES_SECONDS = 5
+
+_stopping = False
+
+
+def _stop_on_signal(signum, frame):
+	"""
+	What `docker stop` sends. Python running as a container's first process
+	ignores SIGTERM unless something handles it, so the bot kept running until
+	Docker killed it at the end of the grace period: every restart, every
+	recreation and every self-update waited ten seconds for nothing.
+
+	An update of another container that is halfway through is let finish: cut
+	short, it leaves `<name>_old` behind. Docker still kills the bot if it
+	takes longer than the grace period, which is what happened before anyway.
+	Then whatever is queued for Telegram goes out, and the bot exits.
+
+	Raises instead of asking the poller to stop: that would wait for the
+	current long poll, up to a minute.
+	"""
+	global _stopping
+	if _stopping:
+		return
+	_stopping = True
+	debug(f"Received {signal.Signals(signum).name}, stopping")
+	if updates_in_progress():
+		debug(f"Waiting for {updates_in_progress()} update(s) in progress to finish before stopping")
+		while updates_in_progress():
+			time.sleep(0.5)
+	if not message_queue.drain(STOP_MESSAGES_SECONDS):
+		warning(f"Stopping with messages still queued after {STOP_MESSAGES_SECONDS}s")
+	debug("Stopped")
+	raise SystemExit(0)
+
+
 def main():
 	"""
 	Starts the daemons, publishes the command menu and begins polling.
@@ -9150,6 +9188,7 @@ def main():
 	the first message arrives.
 	"""
 	debug(f"Starting bot version {VERSION}")
+	signal.signal(signal.SIGTERM, _stop_on_signal)
 
 	# One event stream per host, kept in step with what is configured.
 	event_monitors = EventMonitorSupervisor()

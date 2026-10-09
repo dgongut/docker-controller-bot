@@ -80,15 +80,18 @@ class MessageQueue:
 			try:
 				# Get the next message from the queue (timeout to allow shutdown)
 				message_data = self.queue.get(timeout=1)
+			except queue.Empty:
+				continue
+			try:
 				if message_data is None:  # Stop signal
 					break
 
 				self._execute_message(message_data)
 				time.sleep(self.delay_between_messages)
-			except queue.Empty:
-				continue
 			except Exception as e:
 				error(f"Error processing message queue: {str(e)}")
+			finally:
+				self.queue.task_done()
 
 	def _execute_message(self, message_data):
 		"""Executes a message with retries and exponential backoff"""
@@ -167,6 +170,21 @@ class MessageQueue:
 				error("Error processing message queue: Timeout waiting for message result")
 				return None
 		return None
+
+	def drain(self, timeout):
+		"""
+		Waits for everything queued so far to go out, up to `timeout` seconds.
+		True when it did.
+
+		For stopping: the last thing the bot says — that it is updating itself,
+		say — is usually still in the queue when the stop arrives.
+		"""
+		deadline = time.monotonic() + timeout
+		while self.queue.unfinished_tasks:
+			if time.monotonic() >= deadline:
+				return False
+			time.sleep(0.05)
+		return True
 
 	def shutdown(self):
 		"""Stops the message queue"""
