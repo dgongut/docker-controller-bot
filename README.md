@@ -71,6 +71,9 @@ Abre Telegram, busca tu bot y envíale `/start`. Verás el menú principal con b
 > [!WARNING]
 > Es obligatorio mapear un volumen en `/app/config`: ahí se guardan los ajustes, las programaciones y la caché de actualizaciones. Sin ese volumen lo pierdes todo al recrear el contenedor.
 
+> [!NOTE]
+> El bot envía una vez al día unas [estadísticas anónimas](#-estadísticas-anónimas) de uso. Son opcionales: puedes desactivarlas desde `/settings` → *Estadísticas anónimas* en los 10 minutos que el bot espera antes del primer envío, o fijarlo en el compose con `TELEMETRY=false`.
+
 <details>
 <summary>🔄 ¿Vienes de la 4.x? No tienes que cambiar nada</summary>
 
@@ -212,7 +215,7 @@ Todo lo demás se configura desde el propio bot y se guarda en `settings.json`, 
 |Contenedores parados| Si comprueba también las actualizaciones de los contenedores detenidos. Por defecto activado |
 |Canal de notificaciones| Canal donde se publicarán exclusivamente los cambios de estado de los contenedores (arranque, parada, creación y actualizaciones automáticas). La gestión se sigue haciendo desde el chat privado con el bot o desde TELEGRAM_GROUP. El bot comprueba que puede publicar ahí antes de guardarlo |
 |Hosts de Docker| Las máquinas que gestiona el bot. Se añaden, se prueban, se renombran y se quitan desde aquí. Ver desplegable de hosts remotos |
-|Estadísticas anónimas| Una vez al día envía cifras anónimas de uso. Por defecto activado. Ver desplegable de estadísticas |
+|Estadísticas anónimas| Una vez al día envía cifras anónimas de uso. Por defecto activado. Ver [Estadísticas anónimas](#-estadísticas-anónimas) |
 
 Los cambios hechos desde `/settings` se aplican al momento, sin reiniciar el contenedor.
 
@@ -460,18 +463,27 @@ Ver ejemplo completo en la FAQ: *«He visto que se pueden añadir labels…»*.
 
 </details>
 
-<details>
-<summary>📊 Estadísticas anónimas</summary>
+## 📊 Estadísticas anónimas
 
 Desde la 5.0.0 el bot envía una vez al día unas cifras anónimas para saber cuánta gente lo usa, en cuántos hosts y qué funciones se usan más. Así sé dónde poner el esfuerzo. Las estadísticas son públicas: [stats.dgongut.com/docker-controller-bot](https://stats.dgongut.com/docker-controller-bot).
 
-**Qué se envía:** cuántos hosts y contenedores hay (los contenedores, por tramos), qué ajustes están activados, la versión del bot y de Docker, la arquitectura, y cuántas veces al día se ha usado cada comando y cada botón. La lista completa, campo a campo, está en [la página de privacidad](https://stats.dgongut.com/docker-controller-bot/privacy). El servidor descarta cualquier dato que no esté en ella.
+**Son opcionales.** Vienen activadas por defecto y se desactivan de dos formas:
+
+- Desde el bot: `/settings` → *Estadísticas anónimas*. Al desactivarlas se borra también el identificador de la instalación.
+- Desde el compose: `TELEMETRY=false`.
+
+Nada se envía hasta que el bot lleva al menos 10 minutos en marcha, así que da tiempo de sobra a desactivarlas desde `/settings` antes del primer envío.
+
+<details>
+<summary>Qué se envía y qué no</summary>
+
+**Qué se envía:** cuántos hosts y contenedores hay (los contenedores, por tramos), qué ajustes están activados, la versión del bot y de Docker, la arquitectura, y cuántas veces al día se ha usado cada comando y cada botón. En `/settings` → *Estadísticas anónimas* → *Qué se envía* puedes ver el envío exacto que saldría ahora mismo. La lista completa, campo a campo, está en [la página de privacidad](https://stats.dgongut.com/docker-controller-bot/privacy). El servidor descarta cualquier dato que no esté en ella.
 
 **Qué no se envía nunca:** nombres de contenedores, imágenes, hosts o proyectos, direcciones, IDs de Telegram, rutas ni nada de lo que escribes. Tu IP no se guarda.
 
-**Cómo se desactiva:** desde `/settings` → *Estadísticas anónimas*. Al desactivarlas se borra también el identificador de la instalación.
+**El código es abierto:** el [cliente que envía los datos](https://github.com/dgongut/telemetry/tree/main/clients/python) y el [servidor que los recibe](https://github.com/dgongut/telemetry).
 
-Están activadas por defecto. Nada se envía hasta que el bot lleva al menos 10 minutos en marcha. Tampoco se envía si la configuración no está en un volumen, porque sin él cada vez que se recreara el contenedor contaría como una instalación nueva.
+Tampoco se envía nada si la configuración no está en un volumen, porque sin él cada vez que se recreara el contenedor contaría como una instalación nueva.
 
 </details>
 

@@ -71,6 +71,9 @@ Open Telegram, find your bot and send it `/start`. You will see the button-based
 > [!WARNING]
 > Mapping a volume to `/app/config` is required: settings, schedules and the update cache live there. Without it you lose everything when the container is recreated.
 
+> [!NOTE]
+> Once a day the bot sends some [anonymous usage statistics](#-anonymous-statistics). They are optional: you can turn them off from `/settings` → *Anonymous statistics* during the 10 minutes the bot waits before the first report, or pin it in the compose file with `TELEMETRY=false`.
+
 <details>
 <summary>🔄 Coming from 4.x? You don't need to change anything</summary>
 
@@ -212,7 +215,7 @@ Everything else is configured from the bot itself and stored in `settings.json`,
 |Stopped containers| Whether stopped containers are checked for updates too. Enabled by default |
 |Notification channel| Channel where container status changes are exclusively published (start, stop, creation and automatic updates). Management still happens in the private chat with the bot or in TELEGRAM_GROUP. The bot verifies it can post there before saving it |
 |Docker hosts| The machines the bot manages. Added, tested, renamed and removed from here. See the remote hosts dropdown |
-|Anonymous statistics| Once a day it sends anonymous usage figures. Enabled by default. See the statistics dropdown |
+|Anonymous statistics| Once a day it sends anonymous usage figures. Enabled by default. See [Anonymous statistics](#-anonymous-statistics) |
 
 Changes made from `/settings` apply immediately, without restarting the container.
 
@@ -460,18 +463,27 @@ See the full example in the FAQ: *"I've seen that you can add labels…"*.
 
 </details>
 
-<details>
-<summary>📊 Anonymous statistics</summary>
+## 📊 Anonymous statistics
 
 Since 5.0.0 the bot sends a few anonymous figures once a day, to know how many people use it, on how many hosts and which features are used most. That way I know where to put the effort. The statistics are public: [stats.dgongut.com/docker-controller-bot](https://stats.dgongut.com/docker-controller-bot).
 
-**What is sent:** how many hosts and containers there are (containers in ranges), which settings are on, the bot and Docker versions, the architecture, and how many times a day each command and button was used. The complete list, field by field, is on [the privacy page](https://stats.dgongut.com/docker-controller-bot/privacy). The server discards anything that is not on it.
+**They are optional.** They are on by default and there are two ways to turn them off:
+
+- From the bot: `/settings` → *Anonymous statistics*. Turning them off also deletes the installation's identifier.
+- From the compose file: `TELEMETRY=false`.
+
+Nothing is sent until the bot has been running for at least 10 minutes, so there is plenty of time to turn them off from `/settings` before the first report.
+
+<details>
+<summary>What is sent and what is not</summary>
+
+**What is sent:** how many hosts and containers there are (containers in ranges), which settings are on, the bot and Docker versions, the architecture, and how many times a day each command and button was used. In `/settings` → *Anonymous statistics* → *What is sent* you can see the exact report that would go out right now. The complete list, field by field, is on [the privacy page](https://stats.dgongut.com/docker-controller-bot/privacy). The server discards anything that is not on it.
 
 **What is never sent:** container, image, host or project names, addresses, Telegram IDs, paths or anything you type. Your IP is not stored.
 
-**How to turn it off:** from `/settings` → *Anonymous statistics*. Turning them off also deletes the installation's identifier.
+**The code is open:** the [client that sends the data](https://github.com/dgongut/telemetry/tree/main/clients/python) and the [server that receives it](https://github.com/dgongut/telemetry).
 
-They are on by default. Nothing is sent until the bot has been running for at least 10 minutes. Nor is anything sent when the configuration is not on a volume, because without one every time the container was recreated it would count as a new installation.
+Nor is anything sent when the configuration is not on a volume, because without one every time the container was recreated it would count as a new installation.
 
 </details>
 
