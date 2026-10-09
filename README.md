@@ -491,39 +491,21 @@ Están activadas por defecto. Nada se envía hasta que el bot lleva al menos 10 
 > Pulsa cada pregunta para ver la respuesta.
 
 <details>
-<summary>🧭 ¿Puede el programa decirme de qué versión a qué versión se actualizó una imagen?</summary>
+<summary>🧭 ¿Puede el bot decirme de qué versión a qué versión se actualiza una imagen?</summary>
 
-**Respuesta corta:** No, eso no es posible de forma automática.
+**Sí, siempre que la imagen lo diga.** El aviso de actualización, la lista de `/updateall`, la comparativa antes de confirmar y el resumen final muestran el salto de versión, por ejemplo `1.43.3 → 1.43.4`. `/info` también enseña la versión de cada contenedor y la actualización pendiente.
 
-**Respuesta explicada:**
+**De dónde la saca.** No del tag, porque `latest` puede apuntar a cualquier cosa, sino de la propia imagen y sin peticiones extra:
 
-El programa no se basa en "versiones", sino en comprobar si una imagen Docker ha cambiado.  
-Esto se hace comparando el **hash (identificador único)** de la imagen local con el hash remoto.
+- La etiqueta estándar `org.opencontainers.image.version` (o la antigua `org.label-schema.version`), que llevan la mayoría de imágenes modernas, como las de linuxserver.
+- En las imágenes oficiales de Docker (nginx, postgres, redis…), que no llevan esa etiqueta, su variable de entorno con la versión: `NGINX_VERSION`, `PG_VERSION`…
 
-- En Docker, el **tag** (como `latest`, `v1.2`, etc.) es solo una etiqueta.
-- Esa etiqueta **no siempre representa una versión real** del software dentro de la imagen.
-- Algunos desarrolladores usan etiquetas que coinciden con la versión (como `v1.2.3`), pero no es obligatorio ni automático.
-- Por ejemplo, el tag `latest` puede apuntar a una imagen completamente distinta en cualquier momento.
+**Si la imagen no declara su versión**, la actualización se detecta igual, porque el bot compara la imagen local con la del registro, pero no puede ponerle números: verás la fecha y el identificador (digest) de cada imagen.
 
-🔍 Por eso, aunque sepamos que una imagen cambió, **no podemos decir automáticamente "pasaste de la versión X a la Y"**.
+**Además:**
 
-**¿Por qué no se muestra el changelog o la lista de cambios?**
-
-Mostrar un changelog requeriría:
-
-- Saber de qué versión venías y a cuál fuiste (lo cual no es posible automáticamente).
-- Que el desarrollador del contenedor publique esa información en un lugar conocido (como GitHub o Docker Hub).
-- Que haya una forma estándar de obtenerlo, cosa que no siempre ocurre.
-
-📦 Cada contenedor es diferente, y no todos publican cambios de forma clara o accesible.
-
-**Entonces, ¿cómo puedo saber qué cambió?**
-
-Puedes hacerlo manualmente:
-
-1. El programa puede mostrarte el **hash anterior** y el **nuevo hash** de la imagen.
-2. Con esos datos, puedes ir al repositorio del contenedor (GitHub, Docker Hub, etc.).
-3. Busca allí el historial de versiones, el changelog o las notas de lanzamiento si están disponibles.
+- Si sube el primer número (`1.x → 2.0`), la comparativa avisa de que puede traer cambios incompatibles. Las versiones con fecha, como `2026.10.1`, no cuentan como salto mayor.
+- Si la imagen indica su repositorio de GitHub (etiqueta `org.opencontainers.image.source`), la comparativa enlaza a las novedades de esa versión, o a la lista de versiones si no encuentra su página.
 
 </details>
 

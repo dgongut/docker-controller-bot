@@ -491,39 +491,21 @@ They are on by default. Nothing is sent until the bot has been running for at le
 > Click each question to see the answer.
 
 <details>
-<summary>🧭 Can the bot tell me from which version to which version an image was updated?</summary>
+<summary>🧭 Can the bot tell me from which version to which version an image is updated?</summary>
 
-**Short answer:** No, that's not possible automatically.
+**Yes, as long as the image says so.** The update notice, the `/updateall` list, the comparison before confirming and the final summary show the version step, for example `1.43.3 → 1.43.4`. `/info` also shows each container's version and its pending update.
 
-**Detailed explanation:**
+**Where it comes from.** Not from the tag, since `latest` can point to anything, but from the image itself, with no extra requests:
 
-The bot doesn't rely on "versions", but rather checks whether a Docker image has changed.
-This is done by comparing the **hash (unique identifier)** of the local image with the remote hash.
+- The standard `org.opencontainers.image.version` label (or the older `org.label-schema.version`), which most modern images carry, such as linuxserver's.
+- For Docker's official images (nginx, postgres, redis…), which don't carry that label, their version environment variable: `NGINX_VERSION`, `PG_VERSION`…
 
-- In Docker, the **tag** (like latest, v1.2, etc.) is just a label.
-- That label **doesn't always represent a real version** of the software inside the image.
-- Some developers use tags that match the version (like v1.2.3), but that's neither required nor automatic.
-- For example, the tag `latest` can point to a completely different image at any time.
+**If the image doesn't declare its version**, the update is still detected, because the bot compares the local image with the registry's, but it can't put numbers on it: you'll see each image's date and identifier (digest).
 
-🔍 That's why, even if we know an image has changed, **we can't automatically say "you went from version X to version Y."**
+**Also:**
 
-**Why isn’t the changelog or list of changes shown?**
-
-Showing a changelog would require:
-
-- Knowing which version you had and which one you updated to (which isn't possible automatically).
-- The container's developer to publish that information somewhere accessible (like GitHub or Docker Hub).
-- A standardized way to retrieve it — which doesn't always exist.
-
-📦 Each container is different, and not all of them publish clear or accessible change logs.
-
-**So, how can I find out what changed?**
-
-You can do it manually:
-
-1. The bot can show you the **previous hash** and the **new hash** of the image.
-2. With that information, you can visit the container's repository (GitHub, Docker Hub, etc.).
-3. Look for version history, changelogs, or release notes if they're available there.
+- If the first number goes up (`1.x → 2.0`), the comparison warns that it may bring breaking changes. Date-based versions, such as `2026.10.1`, don't count as a major jump.
+- If the image names its GitHub repository (the `org.opencontainers.image.source` label), the comparison links to that version's release notes, or to the list of releases if it can't find its page.
 
 </details>
 
