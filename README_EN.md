@@ -51,6 +51,7 @@ services:
             - TZ=Europe/Madrid
             #- TELEGRAM_GROUP=
             #- TELEGRAM_THREAD=1
+            #- TELEMETRY=false # Uncomment to turn anonymous statistics off
         volumes:
             - /var/run/docker.sock:/var/run/docker.sock # DON'T CHANGE
             - /path/to/save/the/config:/app/config # CHANGE THE LEFT PATH
@@ -72,7 +73,7 @@ Open Telegram, find your bot and send it `/start`. You will see the button-based
 > Mapping a volume to `/app/config` is required: settings, schedules and the update cache live there. Without it you lose everything when the container is recreated.
 
 > [!NOTE]
-> Once a day the bot sends some [anonymous usage statistics](#-anonymous-statistics). They are optional: you can turn them off from `/settings` → *Anonymous statistics* during the 10 minutes the bot waits before the first report, or pin it in the compose file with `TELEMETRY=false`.
+> Once a day the bot sends some [anonymous usage statistics](#-anonymous-statistics). They are optional: uncomment `TELEMETRY=false` in the compose file, or turn them off from `/settings` → *Anonymous statistics* during the 10 minutes the bot waits before the first report.
 
 <details>
 <summary>🔄 Coming from 4.x? You don't need to change anything</summary>

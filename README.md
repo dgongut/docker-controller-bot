@@ -51,6 +51,7 @@ services:
             - TZ=Europe/Madrid
             #- TELEGRAM_GROUP=
             #- TELEGRAM_THREAD=1
+            #- TELEMETRY=false # Descomenta para desactivar las estadísticas anónimas
         volumes:
             - /var/run/docker.sock:/var/run/docker.sock # NO CAMBIAR
             - /ruta/para/guardar/la/configuracion:/app/config # CAMBIAR LA PARTE IZQUIERDA
@@ -72,7 +73,7 @@ Abre Telegram, busca tu bot y envíale `/start`. Verás el menú principal con b
 > Es obligatorio mapear un volumen en `/app/config`: ahí se guardan los ajustes, las programaciones y la caché de actualizaciones. Sin ese volumen lo pierdes todo al recrear el contenedor.
 
 > [!NOTE]
-> El bot envía una vez al día unas [estadísticas anónimas](#-estadísticas-anónimas) de uso. Son opcionales: puedes desactivarlas desde `/settings` → *Estadísticas anónimas* en los 10 minutos que el bot espera antes del primer envío, o fijarlo en el compose con `TELEMETRY=false`.
+> El bot envía una vez al día unas [estadísticas anónimas](#-estadísticas-anónimas) de uso. Son opcionales: descomenta `TELEMETRY=false` en el compose, o desactívalas desde `/settings` → *Estadísticas anónimas* en los 10 minutos que el bot espera antes del primer envío.
 
 <details>
 <summary>🔄 ¿Vienes de la 4.x? No tienes que cambiar nada</summary>

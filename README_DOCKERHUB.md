@@ -38,6 +38,7 @@ services:
             - TZ=Europe/Madrid
             #- TELEGRAM_GROUP=
             #- TELEGRAM_THREAD=1
+            #- TELEMETRY=false # Descomenta para desactivar las estadísticas anónimas
         volumes:
             - /var/run/docker.sock:/var/run/docker.sock # NO CAMBIAR
             - /ruta/para/guardar/la/configuracion:/app/config # CAMBIAR LA PARTE IZQUIERDA
