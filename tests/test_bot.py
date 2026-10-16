@@ -4085,7 +4085,13 @@ def test_reboot_tasks_run_in_the_daemon_not_when_it_is_built():
 
 
 def test_the_user_hears_when_a_host_whose_schedules_were_skipped_is_back():
-	"""Checked every minute: a daily task would otherwise say so up to a day late."""
+	"""
+	Checked every minute: a daily task would otherwise say so up to a day late.
+
+	Here only for the local host. A remote one's return is told by
+	HostAvailability, for every host, and saying it here too would be the same
+	news twice; it is still noted, so its next outage is told again.
+	"""
 	import host_registry
 	from datetime import datetime
 	_with_hosts(HOST_FIXTURE)   # nas no responde
@@ -4096,13 +4102,15 @@ def test_the_user_hears_when_a_host_whose_schedules_were_skipped_is_back():
 	try:
 		monitor = dcb.DockerScheduleMonitor()
 		monitor._down_hosts["h_nas"] = True
+		monitor._down_hosts["h_local"] = True
 		host_registry.status_snapshot = lambda entries=None, **kw: {e["id"]: (False, "down") for e in entries}
 		monitor._tick(datetime(2026, 10, 2, 3, 0))
-		assert messages == [] and "h_nas" in monitor._down_hosts, messages
+		assert messages == [] and set(monitor._down_hosts) == {"h_nas", "h_local"}, messages
 		host_registry.status_snapshot = lambda entries=None, **kw: {e["id"]: (True, "") for e in entries}
 		monitor._tick(datetime(2026, 10, 2, 3, 1))
 		monitor._tick(datetime(2026, 10, 2, 3, 2))
-		assert messages == [i18n.get_text("schedule_host_back", "nas")], messages
+		assert messages == [i18n.get_text("schedule_host_back", "casa")], messages
+		assert monitor._down_hosts == {}, monitor._down_hosts
 	finally:
 		(dcb.send_message, dcb.schedule_manager.get_all_schedules, host_registry.status_snapshot) = original
 		_restore_hosts()
@@ -6175,3 +6183,163 @@ def test_a_host_that_will_not_add_leaves_a_line_in_the_log():
 	assert any("tcp://10.0.0.5:2375" in line and "connection refused" in line for line in logged), logged
 	assert any("tcp://10.0.0.5:2375" in line and "duplicate" in line for line in logged), logged
 	assert len(logged) == 3, logged
+
+
+def test_a_remote_host_that_stops_answering_is_announced_and_so_is_its_return():
+	"""
+	A machine that went down took its notifications with it and nothing said
+	so: its event stream only wrote to the log. Two minutes first, so a Docker
+	restart or a blip in the network is not news; and its return only when its
+	fall was told.
+	"""
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	sent = []
+	original = (dcb.send_message_to_notification_channel, dcb.is_muted)
+	dcb.send_message_to_notification_channel = lambda message=None, **kw: sent.append(message)
+	muted = [False]
+	dcb.is_muted = lambda: muted[0]
+	try:
+		availability = dcb.HostAvailability()
+		down = {"h_nas": (False, "connection refused")}
+		up = {"h_nas": (True, "")}
+
+		availability.update(down, now=1000)
+		availability.update(down, now=1090)
+		assert sent == [], "avisó antes de los dos minutos"
+		availability.update(down, now=1120)
+		assert sent == [i18n.get_text("host_down", "nas", i18n.get_text("info_minutes", 2), "connection refused")], sent
+		availability.update(down, now=1150)
+		assert len(sent) == 1, "lo repitió"
+
+		availability.update(up, now=1000 + 7800)
+		assert sent[1] == i18n.get_text("host_back", "nas", i18n.get_text("info_hours", 2)), sent
+
+		# A blip shorter than the threshold says nothing, either way.
+		sent.clear()
+		availability.update(down, now=20000)
+		availability.update(up, now=20060)
+		assert sent == [], sent
+
+		# Muted: the fall waits for the mute to end, if it is still down then,
+		# and so does a return that comes while muted.
+		availability.update(down, now=30000)
+		muted[0] = True
+		availability.update(down, now=30200)
+		assert sent == [], sent
+		muted[0] = False
+		availability.update(down, now=30230)
+		assert sent == [i18n.get_text("host_down", "nas", i18n.get_text("info_minutes", 3), "connection refused")], sent
+		muted[0] = True
+		availability.update(up, now=30600)
+		assert len(sent) == 1, sent
+		muted[0] = False
+		availability.update(up, now=31000)
+		assert sent[1] == i18n.get_text("host_back", "nas", i18n.get_text("info_minutes", 10)), sent
+
+		# Paused or removed while down: forgotten without a word.
+		sent.clear()
+		availability.update(down, now=40000)
+		availability.update(down, now=40200)
+		assert len(sent) == 1
+		availability.update({}, now=40230)
+		availability.update(up, now=40260)
+		assert len(sent) == 1, sent
+
+		# What reason Docker gave is shown as text, never as markup.
+		sent.clear()
+		availability.update({"h_nas": (False, "<b>no</b>")}, now=50000)
+		availability.update({"h_nas": (False, "<b>no</b>")}, now=50200)
+		assert "&lt;b&gt;no&lt;/b&gt;" in sent[0], sent
+
+		# And the bot's own "no answer in 5s" goes in the user's language,
+		# while the log keeps reading it in English.
+		import host_registry
+		availability.update(up, now=50300)
+		sent.clear()
+		silent = host_registry.NoAnswer(5)
+		assert str(silent) == "no answer in 5s"
+		availability.update({"h_nas": (False, silent)}, now=60000)
+		availability.update({"h_nas": (False, silent)}, now=60200)
+		assert sent == [i18n.get_text("host_down", "nas", i18n.get_text("info_minutes", 3),
+										i18n.get_text("host_no_answer", 5))], sent
+	finally:
+		dcb.send_message_to_notification_channel, dcb.is_muted = original
+		_restore_hosts()
+
+
+def test_only_remote_hosts_that_are_not_paused_are_watched():
+	"""
+	The local socket is the daemon the bot runs on: without live-restore a
+	daemon that stops takes the bot with it, and with it a restart is seconds.
+	"""
+	watched = dcb.HostAvailability.watched
+	assert not watched({"id": "h_local", "url": "unix:///var/run/docker.sock"})
+	assert not watched({"id": "h_local"})
+	assert watched({"id": "h_nas", "url": "tcp://nas:2375"})
+	assert watched({"id": "h_pi", "url": "ssh://pi@pi"})
+	assert not watched({"id": "h_pi", "url": "ssh://pi@pi", "paused": True})
+
+
+def test_the_supervisor_feeds_the_availability_and_wakes_a_monitor_whose_host_is_back():
+	"""
+	After a long outage a monitor waits up to five minutes before trying again,
+	and the host's notifications would come that much after the news that it
+	is back.
+	"""
+	import host_registry
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	original = host_registry.status_snapshot
+	host_registry.status_snapshot = lambda entries=None, **kw: {e["id"]: (True, "") for e in entries}
+	try:
+		supervisor = dcb.EventMonitorSupervisor()
+		fed = []
+		supervisor.availability = MagicMock(update=lambda statuses: fed.append(statuses))
+		waiting, listening = MagicMock(host_id="h_nas", listening=False), MagicMock(host_id="h_local", listening=True)
+		supervisor._check_hosts([waiting, listening])
+		waiting.retry_now.assert_called_once()
+		listening.retry_now.assert_not_called()
+		listening.reset_stream.assert_not_called()
+		# Only the remote host is handed over.
+		assert fed == [{"h_nas": (True, "")}], fed
+
+		host_registry.status_snapshot = lambda entries=None, **kw: {e["id"]: (False, "down") for e in entries}
+		supervisor._check_hosts([listening])
+		listening.reset_stream.assert_called_once()
+	finally:
+		host_registry.status_snapshot = original
+		_restore_hosts()
+
+
+def test_a_monitor_told_to_retry_stops_waiting():
+	"""The loop waits out its backoff unless the host is known to be back."""
+	import host_registry
+	_with_hosts(HOST_FIXTURE, unreachable=())
+	monitor = dcb.DockerEventMonitor("h_nas")
+	attempts = []
+
+	def connecting():
+		attempts.append(time.time())
+		raise Exception("connection refused")
+
+	monitor.detectar_eventos_contenedores = connecting
+	original_drop = host_registry.drop
+	host_registry.drop = lambda host_id: None
+	try:
+		monitor.demonio_event()
+		deadline = time.time() + 2
+		while not attempts and time.time() < deadline:
+			time.sleep(0.01)
+		assert len(attempts) == 1, attempts
+		time.sleep(0.3)
+		assert len(attempts) == 1, "no esperó el backoff"
+		monitor.retry_now()
+		deadline = time.time() + 2
+		while len(attempts) < 2 and time.time() < deadline:
+			time.sleep(0.01)
+		assert len(attempts) == 2, "siguió esperando con el host de vuelta"
+	finally:
+		monitor.stop()
+		monitor.thread.join(2)
+		host_registry.drop = original_drop
+		_restore_hosts()
+	assert not monitor.thread.is_alive()

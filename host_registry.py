@@ -48,6 +48,21 @@ PROBE_TIMEOUT_SECONDS = 5
 SLOW_TIMEOUT_SECONDS = 600
 
 
+class NoAnswer(str):
+	"""
+	The reason status_snapshot gives a host that did not answer in time.
+
+	A string, so logs and every caller read it as before, but one the
+	interface can recognise: it is the bot's own wording, not Docker's, and
+	so the one reason it can say in the user's language.
+	"""
+
+	def __new__(cls, seconds):
+		reason = super().__new__(cls, f"no answer in {seconds}s")
+		reason.seconds = seconds
+		return reason
+
+
 class HostRejected(Exception):
 	"""
 	Raised when a host is not worth even trying to reach.
@@ -714,7 +729,7 @@ def status_snapshot(deadline_seconds=PROBE_TIMEOUT_SECONDS, entries=None):
 	for thread in threads:
 		thread.join(max(0, deadline - time.monotonic()))
 
-	missing = (False, f"no answer in {deadline_seconds}s")
+	missing = (False, NoAnswer(deadline_seconds))
 	with _probe_lock:
 		report = {}
 		for entry in configured:

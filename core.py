@@ -27,7 +27,7 @@ from telebot.types import InlineKeyboardButton
 from telebot.types import InlineKeyboardMarkup
 from compose_generator import ComposeGenerator
 from formatting import (
-	EVENT_LOG_LINES, by_host, render_container_info, comparison_version_change, comparison_version_line, comparison_version_notes, container_line, describe_exit_code, log_excerpt, release_notes_url, version_lines,
+	EVENT_LOG_LINES, by_host, render_container_info, comparison_version_change, comparison_version_line, comparison_version_notes, container_line, describe_exit_code, human_duration, log_excerpt, release_notes_url, version_lines,
 )
 from docker_update import container_platform, extract_container_config, image_repository, image_version, perform_update, stop_container, updates_in_progress
 from docker_compose_manager import (
@@ -44,7 +44,7 @@ from i18n import get_text, language
 from logger import debug, error, warning
 from message_queue import MessageQueue
 
-VERSION = "5.0.1"
+VERSION = "5.1.0"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -1290,6 +1290,8 @@ class DockerEventMonitor:
 	def __init__(self, host_id):
 		self.host_id = host_id
 		self._stop = threading.Event()
+		# Set to cut the wait before the next reconnection short.
+		self._retry_now = threading.Event()
 		self._stream = None
 		self._stream_lock = threading.Lock()
 		# The newest event seen, in nanoseconds, so a reconnection can ask
@@ -1326,8 +1328,17 @@ class DockerEventMonitor:
 		for a connection left open, and over ssh that is a process.
 		"""
 		self._stop.set()
+		self._retry_now.set()
 		self.reset_stream()
 		host_registry.drop(self.host_id)
+
+	def retry_now(self):
+		"""
+		Reconnects without waiting out the backoff, because the host answers
+		again. After a long outage the wait is five minutes, and the host's
+		notifications would arrive that much after the news that it is back.
+		"""
+		self._retry_now.set()
 
 	def reset_stream(self):
 		"""
@@ -1569,7 +1580,9 @@ class DockerEventMonitor:
 			# Force a fresh connection on the next attempt.
 			host_registry.drop(self.host_id)
 			backoff = min(5 * (2 ** min(failures, 6)), self.MAX_BACKOFF_SECONDS) if failures else 5
-			if self._stop.wait(backoff):
+			self._retry_now.wait(backoff)
+			self._retry_now.clear()
+			if self._stop.is_set():
 				break
 		debug(f"Event monitor ({self.alias}) stopped")
 
@@ -1579,6 +1592,94 @@ class DockerEventMonitor:
 		self.thread.start()
 		debug(f"Event monitor daemon started for {self.alias}")
 		return self.thread
+
+
+class HostAvailability:
+	"""
+	Says when a remote host stops answering, and when it answers again.
+
+	Without it a machine that went down took its notifications with it and
+	nothing said so: its event stream only wrote to the log, and the user found
+	out the next time they tried to do something there.
+
+	Remote hosts only. The one behind the local socket is the daemon the bot
+	itself runs on: without Docker's live-restore, a daemon that stops takes
+	the bot down with it and there is nobody left to say so, and with it, a
+	restart is over in seconds.
+
+	Fed by the event monitor supervisor, which already asks every host whether
+	it answers every RECONCILE_SECONDS.
+	"""
+
+	# How long a host has to go without answering before it is announced. A
+	# Docker restart or a blip in the network is over well before this.
+	DOWN_AFTER_SECONDS = 120
+
+	def __init__(self):
+		# {host_id: (since, reason)} for every watched host failing right now.
+		self._failing = {}
+		# {host_id: since} for the ones announced as down.
+		self._announced = {}
+		# {host_id: seconds it was down} for recoveries that came while muted.
+		# Said once the mute ends: the user heard it go down, and silence
+		# afterwards would read as still down.
+		self._pending_back = {}
+
+	@staticmethod
+	def watched(entry):
+		"""Whether a host's outages are announced: remote and not paused."""
+		url = entry.get("url") or host_registry.LOCAL_SOCKET_URL
+		return not entry.get("paused") and not url.startswith("unix://")
+
+	def update(self, statuses, now=None):
+		"""
+		Takes one round of answers, as {host_id: (ok, reason)} for the watched
+		hosts, and announces what changed.
+
+		A host missing from the round —removed, paused— is forgotten without
+		a word: whoever did that knows.
+		"""
+		now = time.time() if now is None else now
+		for book in (self._failing, self._announced, self._pending_back):
+			for host_id in [h for h in book if h not in statuses]:
+				book.pop(host_id)
+		muted = is_muted()
+		for host_id, (ok, reason) in statuses.items():
+			if ok:
+				self._failing.pop(host_id, None)
+				since = self._announced.pop(host_id, None)
+				if since is not None:
+					self._pending_back[host_id] = now - since
+				continue
+			# Down again before its recovery could be told: that is old news.
+			self._pending_back.pop(host_id, None)
+			since = self._failing.get(host_id, (now, ""))[0]
+			self._failing[host_id] = (since, reason)
+			if host_id in self._announced or now - since < self.DOWN_AFTER_SECONDS or muted:
+				continue
+			self._announced[host_id] = since
+			debug(f"Host {host_registry.alias(host_id)} has not answered for {int(now - since)} s ({reason}): announcing it")
+			self._send(get_text("host_down", host_alias(host_id),
+								human_duration(now - since), self._reason(reason)))
+		if muted:
+			return
+		for host_id, downtime in list(self._pending_back.items()):
+			debug(f"Host {host_registry.alias(host_id)} answers again after {int(downtime)} s: announcing it")
+			self._send(get_text("host_back", host_alias(host_id), human_duration(downtime)))
+		self._pending_back.clear()
+
+	@staticmethod
+	def _reason(reason):
+		"""Why it failed, as text: in the user's language when the words are the bot's own."""
+		if isinstance(reason, host_registry.NoAnswer):
+			return get_text("host_no_answer", reason.seconds)
+		return html.escape(str(reason or "?"))
+
+	def _send(self, message):
+		try:
+			send_message_to_notification_channel(message=message)
+		except Exception as e:
+			error(f"Could not send notification [{message}]. Error: [{e}]")
 
 
 class EventMonitorSupervisor:
@@ -1596,6 +1697,7 @@ class EventMonitorSupervisor:
 	def __init__(self):
 		self._monitors = {}
 		self._lock = threading.Lock()
+		self.availability = HostAvailability()
 
 	def reconcile(self):
 		"""
@@ -1620,27 +1722,38 @@ class EventMonitorSupervisor:
 					replacement._last_event_ns = monitor._last_event_ns
 					self._monitors[host_id] = replacement
 					replacement.demonio_event()
-			listening = [m for m in self._monitors.values() if m.listening]
-		self._check_streams(listening)
+			monitors = list(self._monitors.values())
+		self._check_hosts(monitors)
 
-	def _check_streams(self, monitors):
+	def _check_hosts(self, monitors):
 		"""
-		Reconnects every stream whose host no longer answers.
+		Asks every host whether it answers, and acts on it.
 
 		A stream over tcp that the other end dropped without closing —a reboot,
 		a power cut— looks exactly like a quiet one: nothing arrives either
-		way. Asking the daemon tells them apart. ssh needs this less, its own
-		keepalive ends the connection, but asking costs the same.
+		way. Asking the daemon tells them apart, and the stream is reconnected.
+		ssh needs this less, its own keepalive ends the connection, but asking
+		costs the same.
+
+		A monitor waiting to reconnect to a host that answers again stops
+		waiting. And the answers go to the availability, which says when a
+		remote host goes down and comes back.
 		"""
 		if not monitors:
+			self.availability.update({})
 			return
-		entries = [host_registry.host(m.host_id) for m in monitors]
-		statuses = host_registry.status_snapshot(entries=[e for e in entries if e])
+		entries = {m.host_id: host_registry.host(m.host_id) for m in monitors}
+		statuses = host_registry.status_snapshot(entries=[e for e in entries.values() if e])
 		for monitor in monitors:
 			ok, reason = statuses.get(monitor.host_id, (True, ""))
-			if not ok:
+			listening = monitor.listening
+			if listening and not ok:
 				debug(f"Event monitor ({monitor.alias}): host not answering ({reason}), reconnecting")
 				monitor.reset_stream()
+			elif ok and not listening:
+				monitor.retry_now()
+		self.availability.update({host_id: statuses[host_id] for host_id, entry in entries.items()
+									if entry and host_id in statuses and HostAvailability.watched(entry)})
 
 	def _supervise(self):
 		while True:
@@ -2220,6 +2333,11 @@ class DockerScheduleMonitor:
 		daily task would otherwise announce the host back up to a day late.
 		Only the hosts that are down are asked, so a healthy fleet costs
 		nothing here.
+
+		A remote host's return is told by HostAvailability, for every host and
+		not only the ones with tasks, so here it is only noted: saying it twice
+		would be one message too many. What is left to say here is the local
+		host, which that one does not watch.
 		"""
 		if not self._down_hosts:
 			return
@@ -2228,8 +2346,9 @@ class DockerScheduleMonitor:
 			# Removed meanwhile: nothing will come back.
 			self._down_hosts.pop(host_id, None)
 		statuses = host_registry.status_snapshot(entries=[e for e in entries if e])
+		watched = {e["id"] for e in entries if e and HostAvailability.watched(e)}
 		for host_id, (ok, _reason) in statuses.items():
-			if ok and self._down_hosts.pop(host_id, None):
+			if ok and self._down_hosts.pop(host_id, None) and host_id not in watched:
 				self._notify(get_text("schedule_host_back", host_alias(host_id)))
 
 	def _tick(self, now):
