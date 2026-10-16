@@ -357,6 +357,7 @@
   "waiting_for_healthy": "⏳ Ожидание готовности <b>$1</b> (healthy)...",
   "healthy_ready": "✅ <b>$1</b> готов (healthy), продолжаем",
   "recreating_namespace_dependent": "♻️ Пересоздание <b>$1</b> (общий namespace с обновлённым родителем)...",
+  "reply_to_answer": "↩️ <i>Ответьте на это сообщение: в этой группе я получаю только ответы на свои сообщения.</i>",
   "error_recreating_namespace_dependent": "❌ Ошибка пересоздания <b>$1</b>",
   "update_list_expired": "⌛ Этот список больше недействителен: он устарел или уже был использован. Запросите новый с помощью /updateall.",
   "update_current_image": "Текущий образ",

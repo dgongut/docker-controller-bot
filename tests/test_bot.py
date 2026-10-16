@@ -6047,3 +6047,131 @@ def test_a_stop_signal_lets_an_update_finish_and_the_messages_go_out_first():
 		dcb.message_queue.shutdown()
 		dcb.message_queue = original_queue
 		dcb._stopping = False
+
+
+def test_a_typed_question_asks_for_a_reply_where_loose_text_does_not_arrive():
+	"""
+	With BotFather's privacy mode on and the bot not an administrator, a group
+	only delivers it commands, buttons and replies to its own messages. A host
+	URL typed as a plain message was lost without a trace, and the person was
+	left waiting for an answer to something the bot never saw.
+	"""
+	statuses, asked = {}, []
+
+	def member(chat_id, user_id):
+		asked.append(chat_id)
+		if chat_id not in statuses:
+			raise Exception("chat not found")
+		return MagicMock(status=statuses[chat_id])
+
+	original = (dcb._bot_identity, dcb.bot.get_chat_member, dict(dcb._reads_group_text))
+	dcb._bot_identity = MagicMock(id=999, can_read_all_group_messages=False)
+	dcb.bot.get_chat_member = member
+	dcb._reads_group_text.clear()
+	hint = i18n.get_text("reply_to_answer")
+	try:
+		# A private chat always gets the text, and nobody is asked.
+		assert dcb.reads_loose_text(12345) and asked == []
+
+		statuses.update({-100: "member", -200: "administrator", -300: "creator"})
+		assert not dcb.reads_loose_text(-100)
+		assert dcb.reads_loose_text(-200) and dcb.reads_loose_text(-300)
+		# Remembered for a while: a question is not a round trip to Telegram.
+		assert not dcb.reads_loose_text(-100)
+		assert asked.count(-100) == 1, asked
+
+		# Not knowing leaves the question as it was.
+		assert dcb.reads_loose_text(-400)
+
+		# Privacy mode off: everything arrives, admin or not.
+		dcb._reads_group_text.clear()
+		dcb._bot_identity = MagicMock(id=999, can_read_all_group_messages=True)
+		assert dcb.reads_loose_text(-100)
+		dcb._bot_identity = MagicMock(id=999, can_read_all_group_messages=False)
+		dcb._reads_group_text.clear()
+
+		dcb.set_reply_context(-100)
+		assert dcb.typed_prompt("settings_host_ask").endswith(hint)
+		assert dcb.typed_prompt("prompt_enter_command", "nginx").endswith(hint)
+		dcb.set_reply_context(-200)
+		assert hint not in dcb.typed_prompt("settings_host_ask")
+		dcb.set_reply_context(12345)
+		assert dcb.typed_prompt("settings_host_ask") == i18n.get_text("settings_host_ask")
+
+		# And the settings question goes out with it, Cancel button included.
+		sent = []
+		original_send = (dcb.send_message, dcb.save_text_input_state)
+		dcb.send_message = lambda **kw: sent.append(kw) or MagicMock(message_id=7)
+		dcb.save_text_input_state = lambda *a, **k: None
+		try:
+			dcb.set_reply_context(-100)
+			dcb.ask_text_input(1, "host_add", "settings_host_ask", back_to="hosts")
+		finally:
+			dcb.send_message, dcb.save_text_input_state = original_send
+		assert sent[0]["message"].endswith(hint), sent
+		assert harness.keyboard_callbacks(sent[0]["reply_markup"]) == ["cancelTextInput"]
+	finally:
+		dcb.clear_reply_context()
+		dcb._bot_identity, dcb.bot.get_chat_member = original[0], original[1]
+		dcb._reads_group_text.clear()
+		dcb._reads_group_text.update(original[2])
+
+
+def test_every_question_answered_by_typing_goes_through_typed_prompt():
+	"""
+	The note only helps where it is added, and the flows that ask for typed
+	text are spread over two files: a new one built with get_text would drop it
+	without anything failing.
+	"""
+	typed = ("schedule_ask_name", "schedule_ask_cron", "schedule_ask_minutes",
+			"schedule_ask_command", "prompt_enter_command", "ports_ask_port")
+	for filename in ("core.py", "callbacks.py"):
+		source = io.open(os.path.join(harness.REPO, filename), encoding="utf-8").read()
+		for key in typed:
+			assert not re.search(r"get_text\(\s*['\"]" + key + r"['\"]", source), (filename, key)
+
+
+def test_a_log_line_is_written_in_one_go():
+	"""
+	print() writes the text and the newline separately, and two threads logging
+	at once came out as one line glued to the next and an empty one after them:
+	"starting event listener...2026-10-15 19:24:46 - DEBUG: Event monitor..."
+	"""
+	import logger
+	writes = []
+	original = sys.stdout
+	sys.stdout = MagicMock(write=lambda text: writes.append(text))
+	try:
+		logger.debug("uno")
+		logger.warning("dos")
+		logger.error("tres")
+	finally:
+		sys.stdout = original
+	assert len(writes) == 3, writes
+	for text, level in zip(writes, ("DEBUG", "WARNING", "ERROR")):
+		assert text.endswith("\n") and text.count("\n") == 1 and f" - {level}: " in text, text
+
+
+def test_a_host_that_will_not_add_leaves_a_line_in_the_log():
+	"""
+	The refusal went to the chat and nowhere else, so the /logfile sent to ask
+	for help showed nothing about the host that would not add.
+	"""
+	import host_registry
+	logged, sent = [], []
+	original = (dcb.debug, dcb.send_message, host_registry.add_host)
+	dcb.debug = lambda text: logged.append(text)
+	dcb.send_message = lambda **kw: sent.append(kw.get("message"))
+	try:
+		host_registry.add_host = lambda alias, url: (_ for _ in ()).throw(
+			host_registry.HostUnavailable("h_x", "connection refused"))
+		assert dcb.apply_settings_text_value("host_add", "nas tcp://10.0.0.5:2375") is None
+		host_registry.add_host = lambda alias, url: (_ for _ in ()).throw(host_registry.HostRejected("duplicate"))
+		assert dcb.apply_settings_text_value("host_add", "nas tcp://10.0.0.5:2375") is None
+		assert dcb.apply_settings_text_value("host_add", "   ") is None
+	finally:
+		dcb.debug, dcb.send_message, host_registry.add_host = original
+	assert len(sent) == 3, sent
+	assert any("tcp://10.0.0.5:2375" in line and "connection refused" in line for line in logged), logged
+	assert any("tcp://10.0.0.5:2375" in line and "duplicate" in line for line in logged), logged
+	assert len(logged) == 3, logged

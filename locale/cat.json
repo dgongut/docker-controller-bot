@@ -357,6 +357,7 @@
   "waiting_for_healthy": "⏳ Esperant que <b>$1</b> estigui saludable...",
   "healthy_ready": "✅ <b>$1</b> està saludable, continuant",
   "recreating_namespace_dependent": "♻️ Recreant <b>$1</b> (comparteix namespace amb el pare actualitzat)...",
+  "reply_to_answer": "↩️ <i>Contesta responent a aquest missatge: en aquest grup només em arriben les respostes als meus missatges.</i>",
   "error_recreating_namespace_dependent": "❌ Error en recrear <b>$1</b>",
   "update_list_expired": "⌛ Aquesta llista ja no serveix: ha caducat o ja s'ha fet servir. Demana'n una de nova amb /updateall.",
   "update_current_image": "Imatge actual",

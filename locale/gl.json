@@ -357,6 +357,7 @@
   "waiting_for_healthy": "⏳ Agardando a que <b>$1</b> estea saudable...",
   "healthy_ready": "✅ <b>$1</b> está saudable, continuando",
   "recreating_namespace_dependent": "♻️ Recreando <b>$1</b> (comparte namespace co pai actualizado)...",
+  "reply_to_answer": "↩️ <i>Contesta respondendo a esta mensaxe: neste grupo só me chegan as respostas ás miñas mensaxes.</i>",
   "error_recreating_namespace_dependent": "❌ Erro ao recrear <b>$1</b>",
   "update_list_expired": "⌛ Esta lista xa non serve: caducou ou xa se usou. Pide unha nova con /updateall.",
   "update_current_image": "Imaxe actual",

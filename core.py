@@ -663,7 +663,8 @@ class DockerManager:
 				has_update = False
 				send_message(message=f'{get_text("already_updated", container.name)}{host_suffix(self.host_id)}')
 		except Exception as e:
-			error(f"Could not check update: [{e}]")
+			error(f"Could not check update for {getattr(container, 'name', container_id)} "
+				  f"({image_with_tag or '?'}) on {self.alias}: [{e}]")
 			has_update = None
 			if loading_msg:
 				try:
@@ -1915,7 +1916,10 @@ class DockerUpdateMonitor:
 				# —a Docker Hub rate limit, a registry down for the night— made
 				# the next pass that worked take an update it had already
 				# announced for a new one, and announce it again.
-				error(f"Could not check update: [{e}]")
+				# Named, because the error alone —a registry that does not
+				# resolve, say— does not always say which container it was.
+				error(f"Could not check update for {container.name} ({image_with_tag}) "
+					  f"on {host_registry.alias(host_id)}: [{e}]")
 				continue
 			save_container_update_status(image_with_tag, container.name, has_update, host_id, versions)
 
@@ -2558,7 +2562,7 @@ def show_schedule_edit_options(user_id: int, schedule_name: str):
 def ask_schedule_name(user_id: int):
 	"""Ask user for schedule name"""
 	state = init_add_schedule_state()
-	message_text = get_text("schedule_ask_name")
+	message_text = typed_prompt("schedule_ask_name")
 	msg = send_message(message=message_text, reply_markup=create_simple_keyboard("button_cancel"))
 	state["last_message_id"] = msg.message_id if msg else None
 	save_schedule_state(user_id, state)
@@ -2754,7 +2758,7 @@ def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: in
 				send_message(message=get_text("schedule_name_exists"))
 				# Re-ask for name
 				message_text = f"<b>{get_text('schedule_edit_name')}</b>\n\n"
-				message_text += f"{get_text('schedule_ask_name')}\n"
+				message_text += f"{typed_prompt('schedule_ask_name')}\n"
 				message_text += f"<i>{get_text('current_value')}: {html.escape(schedule_name)}</i>"
 				markup = InlineKeyboardMarkup(row_width=1)
 				markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
@@ -2782,7 +2786,7 @@ def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: in
 				current_cron = schedule.get('cron', '* * * * *')
 				message_text = f"❌ <b>{get_text('schedule_invalid_cron')}</b>\n\n"
 				message_text += f"<b>{get_text('schedule_edit_cron')}</b>\n\n"
-				message_text += f"{get_text('schedule_ask_cron')}\n"
+				message_text += f"{typed_prompt('schedule_ask_cron')}\n"
 				message_text += f"<i>{get_text('current_value')}: {current_cron}</i>"
 				markup = InlineKeyboardMarkup(row_width=1)
 				markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
@@ -2824,7 +2828,7 @@ def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: in
 					current_minutes = schedule.get('minutes', '')
 					message_text = f"❌ <b>{get_text('schedule_invalid_minutes')}</b>\n\n"
 					message_text += f"<b>{get_text('schedule_edit_minutes')}</b>\n\n"
-					message_text += f"{get_text('schedule_ask_minutes')}\n"
+					message_text += f"{typed_prompt('schedule_ask_minutes')}\n"
 					message_text += f"<i>{get_text('current_value')}: {current_minutes}</i>"
 					markup = InlineKeyboardMarkup(row_width=1)
 					markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
@@ -2845,7 +2849,7 @@ def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: in
 				current_minutes = schedule.get('minutes', '')
 				message_text = f"❌ <b>{get_text('schedule_invalid_minutes')}</b>\n\n"
 				message_text += f"<b>{get_text('schedule_edit_minutes')}</b>\n\n"
-				message_text += f"{get_text('schedule_ask_minutes')}\n"
+				message_text += f"{typed_prompt('schedule_ask_minutes')}\n"
 				message_text += f"<i>{get_text('current_value')}: {current_minutes}</i>"
 				markup = InlineKeyboardMarkup(row_width=1)
 				markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
@@ -2871,7 +2875,7 @@ def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: in
 
 			# Show error message with re-ask for name in the same message
 			message_text = f"❌ <b>{get_text('schedule_name_exists')}</b>\n\n"
-			message_text += get_text("schedule_ask_name")
+			message_text += typed_prompt("schedule_ask_name")
 
 			markup = InlineKeyboardMarkup(row_width=1)
 			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
@@ -2892,7 +2896,7 @@ def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: in
 
 		# Build message with summary
 		message_text = f"<b>{get_text('schedule_label_name')}:</b> {html.escape(user_input)}\n\n"
-		message_text += get_text("schedule_ask_cron")
+		message_text += typed_prompt("schedule_ask_cron")
 
 		markup = InlineKeyboardMarkup(row_width=1)
 		markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
@@ -2915,7 +2919,7 @@ def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: in
 			# Add current progress
 			if state.get("name"):
 				message_text += f"<b>{get_text('schedule_label_name')}:</b> {html.escape(str(state.get('name')))}\n\n"
-			message_text += get_text("schedule_ask_cron")
+			message_text += typed_prompt("schedule_ask_cron")
 
 			markup = InlineKeyboardMarkup(row_width=1)
 			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
@@ -2973,7 +2977,7 @@ def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: in
 				message_text = f"❌ <b>{get_text('schedule_invalid_minutes')}</b>\n\n"
 				# Add current progress
 				message_text += _build_schedule_summary(state)
-				message_text += f"\n\n{get_text('schedule_ask_minutes')}"
+				message_text += f"\n\n{typed_prompt('schedule_ask_minutes')}"
 
 				markup = InlineKeyboardMarkup(row_width=1)
 				markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
@@ -2993,7 +2997,7 @@ def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: in
 			message_text = f"❌ <b>{get_text('schedule_invalid_minutes')}</b>\n\n"
 			# Add current progress
 			message_text += _build_schedule_summary(state)
-			message_text += f"\n\n{get_text('schedule_ask_minutes')}"
+			message_text += f"\n\n{typed_prompt('schedule_ask_minutes')}"
 
 			markup = InlineKeyboardMarkup(row_width=1)
 			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
@@ -3588,6 +3592,54 @@ def show_settings_columns(chat_id, message_id):
 	_add_navigation(markup, "settings")
 	edit_message_text(get_text("button_settings_columns"), chat_id, message_id, reply_markup=markup)
 
+# How long a group's answer to "can the bot read loose text here" is trusted.
+# Becoming admin is not something the bot hears about, so it has to expire.
+_READS_GROUP_TEXT_TTL = 600
+_reads_group_text = {}
+
+def reads_loose_text(chat_id):
+	"""
+	Whether a message typed in `chat_id` without replying reaches the bot.
+
+	Always in a private chat. In a group, only when BotFather's privacy mode is
+	off or the bot is an administrator there: otherwise Telegram delivers it
+	commands, buttons and replies to its own messages, and nothing else. A
+	value typed as a plain message was lost without a trace, and the person
+	was left waiting for an answer to something the bot never saw.
+
+	Unknown counts as yes, so a failed lookup leaves the question as it was.
+	"""
+	try:
+		chat_id = int(chat_id)
+	except (TypeError, ValueError):
+		return True
+	if chat_id > 0:
+		return True
+	cached = _reads_group_text.get(chat_id)
+	if cached and time.time() - cached[1] < _READS_GROUP_TEXT_TTL:
+		return cached[0]
+	try:
+		me = bot_identity()
+		reads = bool(getattr(me, "can_read_all_group_messages", False)) or \
+			bot.get_chat_member(chat_id, me.id).status in ("administrator", "creator")
+	except Exception as e:
+		debug(f"Could not tell whether I read loose text in chat {chat_id}: {e}")
+		return True
+	if not reads:
+		debug(f"Chat {chat_id}: I only see replies to my messages, so typed answers are asked for as replies")
+	_reads_group_text[chat_id] = (reads, time.time())
+	return reads
+
+def typed_prompt(key, *args):
+	"""
+	A question answered by typing, with a note to reply to it when typing
+	alone would not reach the bot.
+	"""
+	text = get_text(key, *args)
+	if not reads_loose_text(get_reply_chat_id()):
+		text += f"\n\n{get_text('reply_to_answer')}"
+	return text
+
 def ask_text_input(user_id, field, prompt_key, back_to="main"):
 	"""
 	Asks for a value that has to be typed rather than picked.
@@ -3599,7 +3651,7 @@ def ask_text_input(user_id, field, prompt_key, back_to="main"):
 	debug(f"Running command: ask_text_input({field}) for user {user_id}")
 	markup = InlineKeyboardMarkup(row_width=1)
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cancelTextInput"))
-	sent = send_message(message=get_text(prompt_key), reply_markup=markup)
+	sent = send_message(message=typed_prompt(prompt_key), reply_markup=markup)
 	if sent:
 		save_text_input_state(user_id, field, sent.message_id, back_to)
 
@@ -3634,13 +3686,18 @@ def apply_settings_text_value(field, raw):
 
 	if field == "host_add":
 		alias_name, url = parse_host_definition(raw)
+		# Each refusal is logged as well as answered: the answer goes to the
+		# chat, and a /logfile sent to ask for help used to show nothing at all
+		# about a host that would not add.
 		if not url:
+			debug(f"Rejected host definition [{raw}]: no URL in it")
 			send_message(message=get_text("settings_host_invalid"))
 			return None
 		try:
 			entry = host_registry.add_host(alias_name, url)
 		except host_registry.HostRejected as e:
 			# Nothing was tried: it is what was typed that cannot be registered.
+			debug(f"Rejected host {url}: {e.reason}")
 			key = ("settings_host_duplicate" if e.reason == "duplicate"
 				   else "settings_host_bad_scheme")
 			send_message(message=get_text(key, html.escape(url)))
@@ -3648,6 +3705,7 @@ def apply_settings_text_value(field, raw):
 		except host_registry.HostUnavailable as e:
 			# Rejected at the point of adding, while the connection details are
 			# still in front of the person typing them.
+			debug(f"Could not add host {url}: {e.reason}")
 			send_message(message=get_text("settings_host_unreachable", html.escape(url), html.escape(str(e.reason))))
 			return None
 		return get_text("settings_host_added", html.escape(entry["alias"]))
@@ -5501,7 +5559,7 @@ def confirm_delete(containerId, containerName):
 def ask_command(userId, containerId, containerName):
 	debug(f"Running command: ask_command for container {containerName}")
 	markup = create_simple_keyboard("button_cancel", "cancelAskCommand")
-	x = send_message(message=f'{host_label(ref_host(containerId))}{get_text("prompt_enter_command", containerName)}',
+	x = send_message(message=f'{host_label(ref_host(containerId))}{typed_prompt("prompt_enter_command", containerName)}',
 					reply_markup=markup)
 	if x:
 		save_command_request_state(userId, containerId, containerName, x.message_id)
@@ -7366,7 +7424,7 @@ def get_update_emoji(containerName, host_id=None):
 		if read_container_update_status(image_with_tag, container.name, host_id) is True:
 			status = "⬆️"
 	except Exception as e:
-		error(f"Could not check update: [{e}]")
+		error(f"Could not read the update status of {containerName} on {host_registry.alias(host_id)}: [{e}]")
 
 	return status
 
@@ -7528,7 +7586,7 @@ def ask_port_to_check(userId, host_id=None):
 	debug(f"Running command: ask_port_to_check for user {userId} on {host_id}")
 	markup = InlineKeyboardMarkup(row_width=1)
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cancelCheckPort"))
-	x = send_message(message=f'{host_label(host_id)}{get_text("ports_ask_port")}', reply_markup=markup)
+	x = send_message(message=f'{host_label(host_id)}{typed_prompt("ports_ask_port")}', reply_markup=markup)
 	if x:
 		save_port_check_request_state(userId, x.message_id, host_id)
 

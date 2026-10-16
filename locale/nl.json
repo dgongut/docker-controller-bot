@@ -357,6 +357,7 @@
   "waiting_for_healthy": "⏳ Wachten tot <b>$1</b> healthy is...",
   "healthy_ready": "✅ <b>$1</b> is healthy, doorgaan",
   "recreating_namespace_dependent": "♻️ <b>$1</b> wordt opnieuw aangemaakt (deelt namespace met de bijgewerkte parent)...",
+  "reply_to_answer": "↩️ <i>Antwoord door op dit bericht te reageren: in deze groep ontvang ik alleen reacties op mijn eigen berichten.</i>",
   "error_recreating_namespace_dependent": "❌ Fout bij het opnieuw aanmaken van <b>$1</b>",
   "update_list_expired": "⌛ Deze lijst is niet meer bruikbaar: hij is verlopen of al gebruikt. Vraag een nieuwe aan met /updateall.",
   "update_current_image": "Huidige image",
