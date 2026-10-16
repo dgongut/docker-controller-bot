@@ -3919,6 +3919,64 @@ def test_a_schedule_on_a_paused_host_is_skipped_not_disabled():
 		(dcb.schedule_manager.update_schedule, dcb.send_message) = original
 		_restore_hosts()
 
+def test_a_scheduled_prune_does_not_hold_up_the_scheduler():
+	"""
+	The loop runs every task in line, and a prune can now take minutes. One
+	that outlasted the catch-up window made the loop skip the minutes after it,
+	and their tasks with them. It goes to a worker of its own, which still runs
+	them one at a time and in order: a containers prune frees images for the
+	images one due with it.
+	"""
+	_with_hosts([HOST_FIXTURE[0]], unreachable=())
+	release = threading.Event()
+	ran, sent = [], []
+	owner = MagicMock()
+
+	def pruning(kind):
+		def prune():
+			release.wait(5)
+			ran.append(kind)
+			return (f"ok {kind}", None)
+		return prune
+
+	owner.prune_containers.side_effect = pruning("containers")
+	owner.prune_images.side_effect = pruning("images")
+	original = (dcb.manager, dcb.send_message)
+	dcb.manager = lambda host_id=None: owner
+	dcb.send_message = lambda **kw: sent.append(kw.get("message"))
+	try:
+		monitor = dcb.DockerScheduleMonitor()
+		started = time.time()
+		for kind in ("containers", "images"):
+			task = {"id": 1, "name": f"limpia {kind}", "cron": "@daily", "action": "prune",
+					"prune_type": kind, "show_output": True, "host": "h_local", "enabled": True}
+			assert monitor._execute_schedule_action(task) is True
+		assert time.time() - started < 1 and ran == [], "el bucle esperó al prune"
+
+		release.set()
+		deadline = time.time() + 5
+		while len(sent) < 2 and time.time() < deadline:
+			time.sleep(0.01)
+		assert ran == ["containers", "images"], ran
+		assert sent == ["ok containers", "ok images"], sent
+
+		# An unknown type still disables the task there and then.
+		disabled = []
+		original_update = dcb.schedule_manager.update_schedule
+		dcb.schedule_manager.update_schedule = lambda name, **kw: disabled.append(name)
+		try:
+			task = {"id": 2, "name": "rara", "cron": "@daily", "action": "prune",
+					"prune_type": "planets", "host": "h_local", "enabled": True}
+			assert monitor._execute_schedule_action(task) is False
+			assert disabled == ["rara"], disabled
+		finally:
+			dcb.schedule_manager.update_schedule = original_update
+	finally:
+		release.set()
+		dcb.manager, dcb.send_message = original
+		_restore_hosts()
+
+
 def test_a_schedule_on_an_unreachable_host_is_skipped_not_disabled():
 	"""
 	Not paused, just down for a moment: an ssh machine rebooting during the
@@ -4382,9 +4440,12 @@ def test_a_prune_that_fails_says_so_instead_of_raising():
 	became a ValueError, the button answered nothing, and a scheduled prune
 	only left a line in the log. An answer with nothing to reclaim raised too.
 	"""
+	import host_registry
 	_with_hosts([HOST_FIXTURE[0]], unreachable=())
 	owner = dcb.DockerManager("h_local")
 	owner.client = MagicMock()
+	original_slow = host_registry.slow_client
+	host_registry.slow_client = lambda host_id: owner.client
 	busy = Exception("409 Conflict: a prune operation is already running")
 	for collection in ("containers", "images", "networks", "volumes"):
 		getattr(owner.client, collection).prune.side_effect = busy
@@ -4397,23 +4458,120 @@ def test_a_prune_that_fails_says_so_instead_of_raising():
 		message, details = owner.prune_images()
 		assert details is not None and "0.0B" in message, message
 	finally:
+		host_registry.slow_client = original_slow
 		_restore_hosts()
 
 	# And the button sends the message, with no file to attach.
-	sent, documents = [], []
-	original = (dcb.manager, dcb.send_message, dcb.send_document)
+	# While it runs, a message says so —the confirmation is already gone, the
+	# dispatcher removes it— and it goes once there is an answer.
+	sent, documents, steps = [], [], []
+	original = (dcb.manager, dcb.send_message, dcb.send_document, dcb.delete_message)
 	failing = MagicMock()
-	failing.prune_images.return_value = ("falló", None)
+	failing.prune_images.side_effect = lambda: steps.append("prune") or ("falló", None)
 	dcb.manager = lambda host_id=None: failing
-	dcb.send_message = lambda **kw: sent.append(kw.get("message"))
+
+	def sending(**kw):
+		sent.append(kw.get("message"))
+		steps.append(("send", len(sent)))
+		return MagicMock(message_id=90 + len(sent))
+
+	dcb.send_message = sending
 	dcb.send_document = lambda **kw: documents.append(kw)
+	dcb.delete_message = lambda message_id, chat_id=None: steps.append(("delete", message_id))
 	try:
 		callbacks.cb_prune(callback_registry.Context(
 			call=MagicMock(id="q"), comando="prune", chatId=1, messageId=2, userId=1,
 			multiAction=None, hostId="h_local", containerId=None, action="pruneImages", value="h_local"))
-		assert sent == ["falló"] and documents == [], (sent, documents)
+		working = i18n.get_text("prune_working", i18n.get_text("button_images"))
+		assert len(sent) == 2 and sent[0].endswith(working) and sent[1] == "falló", sent
+		assert documents == [], documents
+		assert steps == [("send", 1), "prune", ("delete", 91), ("send", 2)], steps
+
+		# Through the dispatcher, which is what removes the confirmation: an
+		# edit of it, which is what this first tried, would land on nothing.
+		sent.clear(), steps.clear()
+		press = MagicMock()
+		press.data, press.id = "prune|pruneImages|h_local", "q2"
+		press.message.id, press.message.chat.id = 2, 1
+		press.from_user.id = int(str(dcb.TELEGRAM_ADMIN).split(",")[0])
+		dcb.button_controller(press)
+		assert steps[0] == ("delete", 2) and steps[1:] == [("send", 1), "prune", ("delete", 91), ("send", 2)], steps
 	finally:
-		dcb.manager, dcb.send_message, dcb.send_document = original
+		dcb.manager, dcb.send_message, dcb.send_document, dcb.delete_message = original
+
+
+def test_a_prune_runs_with_the_slow_client_and_says_when_it_ran_out_of_time():
+	"""
+	The daemon cancels a prune when the client hangs up. With the working
+	client's thirty seconds, a slow disk with gigabytes of old images had every
+	/prune cut short: nothing was freed, so the next one failed the same way,
+	and the message sent the user to the logs for an error they could not fix.
+	"""
+	import host_registry
+	import requests
+	_with_hosts([HOST_FIXTURE[0]], unreachable=())
+	owner = dcb.DockerManager("h_local")
+	owner.client = MagicMock()
+	slow = MagicMock()
+	original_slow = host_registry.slow_client
+	host_registry.slow_client = lambda host_id: slow
+	try:
+		slow.images.prune.return_value = {"SpaceReclaimed": 1024}
+		message, details = owner.prune_images()
+		assert details is not None, message
+		slow.images.prune.assert_called_once_with(filters={'dangling': False})
+		owner.client.images.prune.assert_not_called()
+
+		slow.images.prune.side_effect = requests.exceptions.ReadTimeout(
+			"UnixHTTPConnectionPool(host='localhost', port=None): Read timed out. (read timeout=600)")
+		message, details = owner.prune_images()
+		minutes = str(host_registry.SLOW_TIMEOUT_SECONDS // 60)
+		assert details is None, message
+		assert message == i18n.get_text("error_prune_timeout", minutes, "docker image prune -a -f"), message
+
+		# The daemon runs one prune at a time: a scheduled one and a /prune
+		# can meet, and that deserves its own answer, not "see the logs".
+		import docker
+		response = MagicMock(status_code=409)
+		slow.images.prune.side_effect = docker.errors.APIError(
+			"409 Client Error: Conflict", response=response,
+			explanation="a prune operation is already running")
+		message, details = owner.prune_images()
+		assert details is None and message == i18n.get_text("error_prune_busy"), message
+	finally:
+		host_registry.slow_client = original_slow
+		_restore_hosts()
+
+
+def test_the_slow_client_waits_longer_and_is_dropped_with_the_others():
+	"""
+	Raising the working timeout instead would leave a host that stops answering
+	looking frozen for ten minutes. And a slow client left behind by drop()
+	would prune through a connection the rest of the bot already gave up on.
+	"""
+	import copy
+	import docker
+	import host_registry
+
+	asked = []
+
+	def sdk(base_url=None, timeout=None, **kwargs):
+		asked.append(timeout)
+		return MagicMock()
+
+	docker.DockerClient = sdk
+	store.set("hosts", copy.deepcopy(HOST_FIXTURE))
+	host_registry.reset()
+	try:
+		first = host_registry.slow_client("h_nas")
+		assert asked == [host_registry.SLOW_TIMEOUT_SECONDS], asked
+		assert host_registry.SLOW_TIMEOUT_SECONDS > host_registry.DEFAULT_TIMEOUT_SECONDS
+		assert host_registry.slow_client("h_nas") is first, "debe cachearse"
+		assert host_registry.client("h_nas") is not first
+		host_registry.drop("h_nas")
+		assert host_registry.slow_client("h_nas") is not first
+	finally:
+		_restore_hosts()
 
 
 def test_container_output_does_not_break_the_log_message():

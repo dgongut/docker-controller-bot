@@ -5,6 +5,7 @@ import html
 import io
 import json
 import os
+import queue
 import re
 import requests
 import shlex
@@ -43,7 +44,7 @@ from i18n import get_text, language
 from logger import debug, error, warning
 from message_queue import MessageQueue
 
-VERSION = "5.0.0"
+VERSION = "5.0.1"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -694,44 +695,54 @@ class DockerManager:
 	# ValueError: the /prune button answered nothing, and a scheduled one only
 	# left a line in the log.
 	def prune_containers(self):
-		try:
-			pruned_containers = self.client.containers.prune()
-			file_size_bytes = sizeof_fmt((pruned_containers or {}).get('SpaceReclaimed') or 0)
-			debug(f"Deleted: [{str(pruned_containers)}] - Space reclaimed: {str(file_size_bytes)}")
-			return get_text("prune_containers", str(file_size_bytes)), str(pruned_containers)
-		except Exception as e:
-			error(f"An error has occurred deleting unused containers. Error: [{e}]")
-			return get_text("error_prune_containers"), None
+		return self._prune("containers", "prune_containers", "error_prune_containers", "docker container prune -f", reclaims=True)
 
 	def prune_images(self):
-		try:
-			pruned_images = self.client.images.prune(filters={'dangling': False})
-			file_size_bytes = sizeof_fmt((pruned_images or {}).get('SpaceReclaimed') or 0)
-			debug(f"Deleted: [{str(pruned_images)}] - Space reclaimed: {str(file_size_bytes)}")
-			return get_text("prune_images", str(file_size_bytes)), str(pruned_images)
-		except Exception as e:
-			error(f"An error occurred deleting unused images. Error: [{e}]")
-			return get_text("error_prune_images"), None
+		return self._prune("images", "prune_images", "error_prune_images", "docker image prune -a -f", reclaims=True, filters={'dangling': False})
 
 	def prune_networks(self):
-		try:
-			pruned_networks = self.client.networks.prune()
-			debug(f"Deleted: [{str(pruned_networks)}]")
-			return get_text("prune_networks"), str(pruned_networks)
-		except Exception as e:
-			error(f"An error occurred while deleting unused networks. Error: [{e}]")
-			return get_text("error_prune_networks"), None
-
+		return self._prune("networks", "prune_networks", "error_prune_networks", "docker network prune -f", reclaims=False)
 
 	def prune_volumes(self):
+		return self._prune("volumes", "prune_volumes", "error_prune_volumes", "docker volume prune -f", reclaims=True)
+
+	def _prune(self, collection, done_key, error_key, command, reclaims, **kwargs):
+		"""
+		Runs one prune through the host's slow client.
+
+		The working client gives up after thirty seconds, and the daemon
+		cancels a prune as soon as the client hangs up: on a slow disk with
+		gigabytes of old images every attempt was cut short, nothing was freed
+		and the next one had just as much to do. A timeout that still runs out
+		says so, with the command that does the same on the server, instead of
+		pointing at the logs for an error there is nothing to do about.
+		"""
 		try:
-			pruned_volumes = self.client.volumes.prune()
-			file_size_bytes = sizeof_fmt((pruned_volumes or {}).get('SpaceReclaimed') or 0)
-			debug(f"Deleted: [{str(pruned_volumes)}] - Space reclaimed: {str(file_size_bytes)}")
-			return get_text("prune_volumes", str(file_size_bytes)), str(pruned_volumes)
+			connection = host_registry.slow_client(self.host_id)
+		except host_registry.HostUnavailable:
+			connection = self.client
+		try:
+			pruned = getattr(connection, collection).prune(**kwargs)
+			if not reclaims:
+				debug(f"Deleted: [{str(pruned)}]")
+				return get_text(done_key), str(pruned)
+			file_size_bytes = sizeof_fmt((pruned or {}).get('SpaceReclaimed') or 0)
+			debug(f"Deleted: [{str(pruned)}] - Space reclaimed: {str(file_size_bytes)}")
+			return get_text(done_key, str(file_size_bytes)), str(pruned)
+		except requests.exceptions.Timeout as e:
+			error(f"Docker did not finish pruning {collection} in time, so it cancelled it. Error: [{e}]")
+			return get_text("error_prune_timeout", str(host_registry.SLOW_TIMEOUT_SECONDS // 60), command), None
+		except docker.errors.APIError as e:
+			# The daemon runs one prune at a time. A scheduled one and a /prune
+			# can meet, and that is not an error worth reading the logs for.
+			if e.status_code == 409 and "already running" in str(e):
+				warning(f"Not pruning {collection}: Docker is already running a prune. [{e}]")
+				return get_text("error_prune_busy"), None
+			error(f"An error occurred deleting unused {collection}. Error: [{e}]")
+			return get_text(error_key), None
 		except Exception as e:
-			error(f"An error occurred deleting unused volumes. Error: [{e}]")
-			return get_text("error_prune_volumes"), None
+			error(f"An error occurred deleting unused {collection}. Error: [{e}]")
+			return get_text(error_key), None
 
 	def execute_command(self, container_id, container_name, command):
 		try:
@@ -1954,6 +1965,15 @@ def schedule_container_ref(host_id, container_name):
 	return container_ref(host_id, container) if container is not None else None
 
 
+# What a scheduled prune can clean, and the name its output file goes by.
+SCHEDULED_PRUNE_LABELS = {
+	"containers": "button_containers",
+	"images": "button_images",
+	"networks": "button_networks",
+	"volumes": "button_volumes",
+}
+
+
 class DockerScheduleMonitor:
 	# How many minutes the loop makes up for when it falls behind —a slow
 	# action, a busy machine— before it gives up on them. Past that the gap is
@@ -1971,6 +1991,11 @@ class DockerScheduleMonitor:
 		# {host_id: True}. The user hears once when it starts and once when
 		# it ends, not on every skipped run.
 		self._down_hosts = {}
+		# Scheduled prunes, run by a worker of their own in the order they came
+		# due. Started on the first one: most installations never have any.
+		self._prunes = queue.Queue()
+		self._prune_lock = threading.Lock()
+		self._prune_worker = None
 
 	def _execute_reboot_tasks(self):
 		"""Execute all @reboot tasks, once, when the daemon starts"""
@@ -2063,40 +2088,13 @@ class DockerScheduleMonitor:
 				execute_command(containerId, container, command, show_output)
 
 			elif action == "prune":
-				# Execute prune based on type
-				result_message = None
-				data = None
-				prune_label = ""
-
-				if prune_type == "containers":
-					result_message, data = manager(schedule_host).prune_containers()
-					prune_label = get_text("button_containers")
-				elif prune_type == "images":
-					result_message, data = manager(schedule_host).prune_images()
-					prune_label = get_text("button_images")
-				elif prune_type == "networks":
-					result_message, data = manager(schedule_host).prune_networks()
-					prune_label = get_text("button_networks")
-				elif prune_type == "volumes":
-					result_message, data = manager(schedule_host).prune_volumes()
-					prune_label = get_text("button_volumes")
-				else:
+				if prune_type not in SCHEDULED_PRUNE_LABELS:
 					return handle_error(f"Unknown prune type: {prune_type}")
-
-				# Show output if requested, otherwise just log
-				if show_output and result_message and data is None:
-					send_message(message=result_message)
-				elif show_output and result_message:
-					# Send the same format as manual /prune command
-					markup = InlineKeyboardMarkup(row_width=1)
-					markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
-					fichero_temporal = get_temporal_file(data, prune_label)
-					x = send_message(message=get_text("loading_file"))
-					send_document(document=fichero_temporal, reply_markup=markup, caption=result_message)
-					if x:
-						delete_message(x.message_id)
-				else:
-					debug(f"Scheduled prune executed: {result_message}")
+				# Handed to its own worker: a prune can take minutes, and this
+				# loop runs every task in line. One that outlasted the catch-up
+				# window made the loop skip the minutes after it —logged as if
+				# the bot had not been running— and their tasks with them.
+				self._queue_prune(manager(schedule_host), prune_type, show_output)
 
 			return True
 
@@ -2114,6 +2112,46 @@ class DockerScheduleMonitor:
 		except Exception as e:
 			error(f"Error executing schedule action [{action}]: [{str(e)}]")
 			return False
+
+	def _queue_prune(self, owner, prune_type, show_output):
+		"""Leaves a scheduled prune to the prune worker, starting it if needed."""
+		self._prunes.put((owner, prune_type, show_output))
+		with self._prune_lock:
+			if self._prune_worker is None or not self._prune_worker.is_alive():
+				self._prune_worker = threading.Thread(target=self._prune_loop, daemon=True)
+				self._prune_worker.start()
+
+	def _prune_loop(self):
+		"""
+		Runs the queued prunes one after another.
+
+		One at a time and in order, as the loop used to: a containers prune
+		due with an images one frees images the second can then remove, and
+		two at once on the same host only get Docker's "already running".
+		"""
+		while True:
+			owner, prune_type, show_output = self._prunes.get()
+			try:
+				self._run_prune(owner, prune_type, show_output)
+			except Exception as e:
+				error(f"Error executing schedule action [prune]: [{str(e)}]")
+
+	def _run_prune(self, owner, prune_type, show_output):
+		result_message, data = getattr(owner, f"prune_{prune_type}")()
+		# Show output if requested, otherwise just log
+		if show_output and result_message and data is None:
+			send_message(message=result_message)
+		elif show_output and result_message:
+			# Send the same format as manual /prune command
+			markup = InlineKeyboardMarkup(row_width=1)
+			markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
+			fichero_temporal = get_temporal_file(data, get_text(SCHEDULED_PRUNE_LABELS[prune_type]))
+			x = send_message(message=get_text("loading_file"))
+			send_document(document=fichero_temporal, reply_markup=markup, caption=result_message)
+			if x:
+				delete_message(x.message_id)
+		else:
+			debug(f"Scheduled prune executed: {result_message}")
 
 	def run(self):
 		"""

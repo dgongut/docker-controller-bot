@@ -41,6 +41,12 @@ DEFAULT_TIMEOUT_SECONDS = 30
 # thirty seconds, so waiting that long only delays finding out the host is down.
 PROBE_TIMEOUT_SECONDS = 5
 
+# What a prune waits for. Far longer, because the daemon cancels a prune the
+# moment the client hangs up: on a slow disk with gigabytes of old images the
+# working timeout cut every attempt short, nothing was ever freed and the next
+# one had just as much to do.
+SLOW_TIMEOUT_SECONDS = 600
+
 
 class HostRejected(Exception):
 	"""
@@ -87,6 +93,9 @@ _probe_results = {}
 # their timeout, and sharing a cache would mean whichever ran first decided how
 # long every later operation waits.
 _probe_clients = {}
+# Clients for operations that legitimately take minutes. Cached apart for the
+# same reason as the probe ones.
+_slow_clients = {}
 
 
 def hosts(include_paused=False):
@@ -508,6 +517,23 @@ def probe_client(host_id):
 	return _cached_client(_probe_clients, entry, timeout=PROBE_TIMEOUT_SECONDS)
 
 
+def slow_client(host_id):
+	"""
+	A long-timeout client for `host_id`, for the operations that legitimately
+	take minutes: the prunes.
+
+	Separate from the working client because the SDK's timeout applies to every
+	request, and raising that one for everything would leave a host that stops
+	answering looking frozen for ten minutes instead of thirty seconds.
+
+	Raises HostUnavailable, like client().
+	"""
+	entry = host(host_id)
+	if entry is None:
+		raise HostUnavailable(host_id, "not configured")
+	return _cached_client(_slow_clients, entry, timeout=SLOW_TIMEOUT_SECONDS)
+
+
 def ping(host_id):
 	"""
 	Whether `host_id` answers right now.
@@ -562,17 +588,18 @@ def drop(host_id):
 	Forgets the cached clients for a host, and closes them.
 
 	Called when a host's connection details change, and when a connection goes
-	bad so that the next use reconnects instead of reusing a dead socket. Both
-	the working client and the probe one go: they point at the same daemon, and
+	bad so that the next use reconnects instead of reusing a dead socket. The
+	working, probe and slow clients all go: they point at the same daemon, and
 	leaving one behind means the next check answers about a connection the rest
 	of the bot has already given up on.
 	"""
 	with _lock:
 		removed = _clients.pop(host_id, None)
 		probe = _probe_clients.pop(host_id, None)
+		slow = _slow_clients.pop(host_id, None)
 	# Outside the lock: an ssh teardown is not instant, and nothing else needs
 	# to wait on it to look up a different host.
-	_close((removed, probe), host_id)
+	_close((removed, probe, slow), host_id)
 	if removed:
 		debug(f"Dropped the cached client for host {host_id}")
 
@@ -799,9 +826,10 @@ def rename_host(host_id, new_alias):
 def reset():
 	"""Drops every cached client. For tests, and after a settings reload."""
 	with _lock:
-		discarded = list(_clients.items()) + list(_probe_clients.items())
+		discarded = list(_clients.items()) + list(_probe_clients.items()) + list(_slow_clients.items())
 		_clients.clear()
 		_probe_clients.clear()
+		_slow_clients.clear()
 	for host_id, entry in discarded:
 		_close((entry,), host_id)
 	with _probe_lock:

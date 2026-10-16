@@ -587,7 +587,14 @@ def cb_prune(ctx):
 										core.host_alias(host_id), html.escape(str(e.reason))))
 		return
 
+	# A prune can take minutes, and the confirmation is already gone by now
+	# (the dispatcher removes it): without this the chat went quiet until
+	# Docker answered, and running /prune again only got "already running".
+	working = core.send_message(message=f'{core.host_label(host_id)}'
+								f'{get_text("prune_working", get_text(labels[kind]))}')
 	result, data = getattr(owner, f"prune_{kind.lower()}")()
+	if working:
+		core.delete_message(working.message_id)
 	markup = core.create_simple_keyboard("button_delete")
 	if data is None:
 		# It failed: the message says so, and there is nothing to attach.
