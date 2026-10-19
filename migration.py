@@ -241,6 +241,14 @@ def _migrate_schedules(local_host_id):
 		warning(f"Could not read {path} to migrate schedules: {e}")
 		return
 
+	# Valid JSON is not yet a schedules file. This runs while core is being
+	# imported, so a `[]` or a `null` raising here stopped the bot from
+	# starting at all; left as it is, ScheduleManager sets it aside like any
+	# other file it cannot read, and says so.
+	if not isinstance(document, dict):
+		warning(f"{path} does not hold a schedules document, leaving it as it is")
+		return
+
 	schedules = document.get("schedules")
 	if not isinstance(schedules, list):
 		return
@@ -249,7 +257,11 @@ def _migrate_schedules(local_host_id):
 	for schedule in schedules:
 		if not isinstance(schedule, dict):
 			continue
-		host_scoped = schedule.get("action") in HOST_SCOPED_SCHEDULE_ACTIONS
+		# Hand-edited, the action can be anything JSON holds, and a list or an
+		# object cannot even be looked up in a set. No action the bot knows is
+		# one of those, so it is no host's.
+		action = schedule.get("action")
+		host_scoped = isinstance(action, str) and action in HOST_SCOPED_SCHEDULE_ACTIONS
 		if host_scoped and not schedule.get("host"):
 			schedule["host"] = local_host_id
 			stamped += 1

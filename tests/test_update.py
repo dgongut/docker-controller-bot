@@ -42,7 +42,12 @@ class FakeContainer:
 	def start(self):
 		if self.engine.fail_start and self.role == "new":
 			raise Exception("start failed")
+		if self.status == "paused":
+			raise docker.errors.APIError("cannot start a paused container, try unpause instead")
 		self.status = "running"
+
+	def pause(self):
+		self.status = "paused"
 
 	def rename(self, name):
 		if any(c.name == name and c is not self for c in self.engine.containers.values()):
@@ -50,6 +55,12 @@ class FakeContainer:
 		self.name = name
 
 	def remove(self, force=False):
+		if self.role == "original" and self.engine.fail_remove:
+			# (what the client gets, whether the daemon deletes it anyway)
+			error, deleted = self.engine.fail_remove
+			if deleted:
+				self.engine.containers.pop(self.id, None)
+			raise error
 		self.engine.containers.pop(self.id, None)
 
 	def reload(self):
@@ -75,6 +86,7 @@ class FakeContainers:
 			self.engine.on_create()
 		if self.engine.fail_create:
 			raise Exception("create failed")
+		self.engine.created = kwargs
 		return self.engine.add(name, status="created", role="new")
 
 
@@ -82,22 +94,36 @@ class FakeImages:
 	def __init__(self, engine):
 		self.engine = engine
 
-	def pull(self, image):
-		self.engine.pulled = True
+	def get(self, reference):
+		self.engine.looked_up.append(reference)
 		return type("Image", (), {"id": "sha256:new"})()
 
 	def remove(self, image_id):
-		pass
+		self.engine.removed_images.append(image_id)
 
 
 class FakeDocker:
 	def __init__(self):
 		self.containers = {}
 		self.pulled = False
+		self.pulls = []
+		# What the daemon streams back for a pull.
+		self.pull_stream = [{"status": "Pulling from library/app"}, {"status": "Status: Image is up to date"}]
+		self.looked_up = []
+		self.removed_images = []
+		self.created = None
 		self.fail_create = False
 		self.fail_start = False
+		self.fail_remove = None
 		self.on_create = None
-		self.api = self  # unused, but the SDK has one
+		# The low-level client: the pull, and the API version it negotiated.
+		self.api = self
+		self._version = "1.47"
+
+	def pull(self, repository, tag=None, platform=None, stream=False, decode=False):
+		self.pulled = True
+		self.pulls.append((repository, tag, platform))
+		return iter(self.pull_stream)
 
 	def add(self, name, status="running", role=None):
 		container = FakeContainer(self, name, status, role)
@@ -110,6 +136,7 @@ class FakeDocker:
 	@property
 	def client(self):
 		client = type("Client", (), {})()
+		client.api = self.api
 		client.containers = FakeContainers(self)
 		client.images = FakeImages(self)
 		client.networks = None
@@ -122,13 +149,20 @@ def _config():
 	return config
 
 
-def _update(engine, container):
-	return docker_update.perform_update(
-		client=engine.client, container=container, config=_config(),
+def _update(engine, container, config=None, **overrides):
+	arguments = dict(
+		client=engine.client, container=container, config=config if config is not None else _config(),
 		container_name=container.name, message=None,
 		edit_message_func=lambda *a, **k: None, debug_func=lambda m: None,
 		error_func=lambda m: None, get_text_func=lambda key, *a: key,
 		save_status_func=lambda *a: None, container_id_length=12, telegram_group=0)
+	arguments.update(overrides)
+	return docker_update.perform_update(**arguments)
+
+
+def _with_values(key, *values):
+	"""A get_text that shows what it was handed."""
+	return " ".join((key,) + tuple(str(value) for value in values))
 
 
 def test_a_leftover_old_container_stops_the_update_before_anything_is_touched():
@@ -195,6 +229,265 @@ def test_a_successful_update_leaves_just_the_new_container():
 	assert _update(engine, original) == "updated_container"
 	assert [c.role for c in engine.containers.values()] == ["new"]
 	assert engine.named("nginx")[0].status == "running"
+
+
+def test_an_original_that_will_not_go_is_left_and_the_new_one_kept():
+	"""
+	The new container had passed its verification and the original could not
+	be deleted: the rollback took that for a failed update and deleted the new
+	one, which worked. Now the update stands, and the original is left under
+	its _old name with a word to the user — with the success text unchanged,
+	since that is how the caller tells success from failure.
+	"""
+	engine = FakeDocker()
+	original = engine.add("nginx", role="original")
+	engine.fail_remove = (docker.errors.APIError("driver failed to remove root filesystem: device or resource busy"), False)
+	notes = []
+
+	result = _update(engine, original, get_text_func=_with_values, notify_func=notes.append)
+
+	assert result == "updated_container nginx", result
+	new = engine.named("nginx")
+	assert [c.role for c in new] == ["new"] and new[0].status == "running", "se borró el nuevo"
+	assert original.id in engine.containers and original.name == "nginx_old"
+	assert notes == ["update_old_left_behind nginx nginx_old"], notes
+	assert engine.removed_images == [], "se intentó borrar la imagen que el viejo sigue usando"
+
+	# Without anyone to tell, it is the same update.
+	engine = FakeDocker()
+	original = engine.add("nginx", role="original")
+	engine.fail_remove = (docker.errors.APIError("device or resource busy"), False)
+	assert _update(engine, original) == "updated_container"
+	assert sorted(c.role for c in engine.containers.values()) == ["new", "original"]
+
+
+def test_a_delete_that_times_out_but_happens_is_a_plain_update():
+	"""
+	A ReadTimeout is not an APIError, and on a slow disk the daemon goes on to
+	delete the original after the client gave up. The rollback then deleted
+	the new container and found no original to restore: nothing was left.
+	"""
+	import requests
+	engine = FakeDocker()
+	original = engine.add("nginx", role="original")
+	engine.fail_remove = (requests.exceptions.ReadTimeout("Read timed out. (read timeout=30)"), True)
+	notes = []
+
+	assert _update(engine, original, notify_func=notes.append) == "updated_container"
+	assert [c.role for c in engine.containers.values()] == ["new"]
+	assert engine.named("nginx")[0].status == "running"
+	assert notes == [], notes
+
+
+def test_nothing_after_the_verification_rolls_the_update_back():
+	"""Housekeeping that fails is reported; the container that works stays."""
+	engine = FakeDocker()
+	original = engine.add("nginx", role="original")
+
+	def save_status(*args):
+		raise OSError("No space left on device")
+
+	assert _update(engine, original, save_status_func=save_status) == "updated_container"
+	assert [c.role for c in engine.containers.values()] == ["new"]
+
+	# Something fails before the original is even deleted: it is still there,
+	# and said so.
+	engine = FakeDocker()
+	original = engine.add("nginx", role="original")
+	message = type("Message", (), {"message_id": 1})()
+	notes = []
+
+	def edit(text, *args):
+		if text == "updating_deleting_old":
+			raise Exception("Too Many Requests: retry after 5")
+
+	assert _update(engine, original, message=message, edit_message_func=edit, notify_func=notes.append) == "updated_container"
+	assert engine.named("nginx")[0].role == "new" and engine.named("nginx")[0].status == "running"
+	assert original.name == "nginx_old" and notes == ["update_old_left_behind"], notes
+
+
+def test_a_paused_container_rolls_back_paused():
+	"""
+	It came back running. And when the pull was what failed, the original had
+	not even been stopped: start() on a paused container fails, and a rollback
+	that had touched nothing was logged as failed.
+	"""
+	for failure in ("pull", "create"):
+		engine = FakeDocker()
+		original = engine.add("vpn", status="paused", role="original")
+		if failure == "pull":
+			engine.pull_stream = [{"error": "manifest unknown", "errorDetail": {"message": "manifest unknown"}}]
+		else:
+			engine.fail_create = True
+		config = _config()
+		config.update(was_paused=True)
+		debug, errors = [], []
+
+		assert _update(engine, original, config, debug_func=debug.append, error_func=errors.append) == "error_updating_container"
+		assert original.name == "vpn" and original.status == "paused", (failure, original.name, original.status)
+		assert any("[ROLLBACK_RESULT] ✅" in line for line in debug), (failure, errors)
+		assert not any("ROLLBACK_STEP2] ❌" in line for line in errors), (failure, errors)
+
+
+def test_an_anonymous_volume_declared_as_a_mount_comes_back_with_its_data():
+	"""
+	`volumes: - /var/lib/mysql` in compose, or `--mount type=volume,dst=…`, is
+	a Mount with no Source: handed back as it was, Docker made a new, empty
+	volume and mariadb initialised a fresh database. The new container gets
+	the old one by name; the compose generator still sees `- /var/lib/mysql`.
+	"""
+	engine = FakeDocker()
+	original = engine.add("db", role="original")
+	anonymous = "a" * 64
+	original.attrs = {
+		"Config": {"Image": "mariadb:11"},
+		"HostConfig": {"Mounts": [
+			{"Type": "volume", "Target": "/var/lib/mysql"},
+			{"Type": "volume", "Source": "backups", "Target": "/backup", "ReadOnly": True},
+			{"Type": "bind", "Source": "/srv/db/conf", "Target": "/etc/mysql/conf.d"}]},
+		"Mounts": [
+			{"Type": "volume", "Name": anonymous, "Destination": "/var/lib/mysql", "RW": True},
+			{"Type": "volume", "Name": "backups", "Destination": "/backup", "RW": False},
+			{"Type": "bind", "Source": "/srv/db/conf", "Destination": "/etc/mysql/conf.d", "RW": True}]}
+	config = docker_update.extract_container_config(original)
+
+	assert _update(engine, original, config) == "updated_container"
+	assert engine.created["mounts"] == [
+		{"Type": "volume", "Source": anonymous, "Target": "/var/lib/mysql"},
+		{"Type": "volume", "Source": "backups", "Target": "/backup", "ReadOnly": True},
+		{"Type": "bind", "Source": "/srv/db/conf", "Target": "/etc/mysql/conf.d"}], engine.created["mounts"]
+	assert config["mounts_list"][0] == {"Type": "volume", "Target": "/var/lib/mysql"}, "el compose escribiría el nombre aleatorio"
+	# Once, as a mount: not a second time as an anonymous `-v`.
+	assert config["anonymous_volumes"] == [], config["anonymous_volumes"]
+
+
+def test_a_fixed_mac_is_kept_on_daemons_before_api_1_44():
+	"""
+	It was read from HostConfig, which has no MacAddress, so only the
+	endpoint's survived: and daemons before Docker 25 ignore that one. On
+	those it goes in as the container's; on newer ones it stays per endpoint.
+	"""
+	mac = "02:42:c0:a8:01:0a"
+	for version, container_wide in (("1.41", mac), ("1.43", mac), ("1.44", None), ("1.47", None)):
+		engine = FakeDocker()
+		engine._version = version
+		original = engine.add("pihole", role="original")
+		original.attrs = {
+			"Config": {"Image": "pihole/pihole:latest", "MacAddress": mac},
+			"HostConfig": {"NetworkMode": "lan"},
+			"NetworkSettings": {"Networks": {"lan": {"IPAMConfig": {"IPv4Address": "192.168.1.10"}, "MacAddress": mac}}}}
+		config = docker_update.extract_container_config(original)
+		assert config["mac_address"] == mac, config["mac_address"]
+
+		assert _update(engine, original, config) == "updated_container"
+		assert engine.created["mac_address"] == container_wide, (version, engine.created["mac_address"])
+		assert engine.created["networking_config"]["lan"]["MacAddress"] == mac, version
+
+	# Sharing another container's network, it has none of its own to keep.
+	engine = FakeDocker()
+	engine._version = "1.43"
+	original = engine.add("app", role="original")
+	original.attrs = {"Config": {"Image": "app", "MacAddress": mac}, "HostConfig": {"NetworkMode": "container:" + "b" * 64}}
+	config = docker_update.extract_container_config(original)
+	assert config["mac_address"] is None
+	assert _update(engine, original, config) == "updated_container"
+	assert engine.created["mac_address"] is None
+
+
+def test_a_healthchecks_start_interval_reaches_the_daemon():
+	"""
+	The SDK rebuilds a healthcheck from the fields it knows, and
+	`start_interval` is not one of them. Through the real SDK, with only the
+	HTTP request caught.
+	"""
+	api = docker.APIClient(base_url="tcp://127.0.0.1:9", version="1.44")
+	sent = []
+
+	class Response:
+		def raise_for_status(self):
+			pass
+
+		def json(self):
+			return {"Id": "f" * 64}
+
+	def post_json(url, data=None, params=None, **kwargs):
+		sent.append((url, data, params))
+		return Response()
+
+	api._post_json = post_json
+	client = type("Client", (), {})()
+	client.api = api
+	client.containers = type("Containers", (), {"get": staticmethod(lambda key: key)})()
+	healthcheck = {"Test": ["CMD-SHELL", "curl -f localhost"], "Interval": 30_000_000_000, "Timeout": 5_000_000_000,
+				   "Retries": 3, "StartPeriod": 60_000_000_000, "StartInterval": 2_000_000_000}
+
+	created = docker_update._create_container(client, None, None, "app:1.0", name="app", healthcheck=dict(healthcheck),
+											  environment=["A=1"], labels={"x": "y"})
+
+	assert created == "f" * 64
+	url, data, params = sent[0]
+	assert url.endswith("/containers/create") and params["name"] == "app", (url, params)
+	assert data["Healthcheck"] == healthcheck, data["Healthcheck"]
+	assert data["Image"] == "app:1.0" and "A=1" in data["Env"] and data["Labels"] == {"x": "y"}, data
+
+
+def test_a_pull_that_fails_halfway_is_a_failed_pull():
+	"""
+	The daemon says 200 when a pull starts and sends what goes wrong after
+	that inside the stream; the SDK returned the image already there as if
+	it were the new one.
+	"""
+	engine = FakeDocker()
+	engine.pull_stream = [
+		{"status": "Pulling from library/nginx"},
+		{"errorDetail": {"message": "write /var/lib/docker/tmp/x: no space left on device"},
+		 "error": "write /var/lib/docker/tmp/x: no space left on device"},
+	]
+	try:
+		docker_update.pull_checked(engine.client, "nginx:latest")
+	except docker.errors.APIError as error:
+		assert "no space left on device" in str(error), str(error)
+	else:
+		raise AssertionError("el pull fallido devolvió una imagen")
+	assert engine.looked_up == []
+
+	engine.pull_stream = [{"errorDetail": {"message": "unauthorized"}}]
+	try:
+		docker_update.pull_checked(engine.client, "nginx:latest")
+	except docker.errors.APIError as error:
+		assert "unauthorized" in str(error), str(error)
+	else:
+		raise AssertionError("un errorDetail sin error pasó por bueno")
+
+	# In an update, it fails before the original is touched.
+	engine = FakeDocker()
+	original = engine.add("nginx", role="original")
+	engine.pull_stream = [{"error": "no space left on device"}]
+	assert _update(engine, original) == "error_updating_container"
+	assert [c.role for c in engine.containers.values()] == ["original"]
+	assert original.name == "nginx" and original.status == "running"
+
+
+def test_a_checked_pull_returns_the_image_it_pulled():
+	"""
+	As images.pull() does, by digest when there is one: `repo:tag@sha256:…`
+	is pulled, and kept, by its digest alone.
+	"""
+	a, b = "sha256:" + "a" * 64, "sha256:" + "b" * 64
+	cases = {
+		"nginx": (("nginx", "latest"), "nginx:latest"),
+		"nginx:1.27": (("nginx", "1.27"), "nginx:1.27"),
+		"nas:5000/app": (("nas:5000/app", "latest"), "nas:5000/app:latest"),
+		"lscr.io/linuxserver/plex:latest": (("lscr.io/linuxserver/plex", "latest"), "lscr.io/linuxserver/plex:latest"),
+		f"nginx@{a}": (("nginx", a), f"nginx@{a}"),
+		f"nas:5000/app:1.0@{b}": (("nas:5000/app", b), f"nas:5000/app@{b}"),
+	}
+	for reference, ((repository, tag), looked_up) in cases.items():
+		engine = FakeDocker()
+		image = docker_update.pull_checked(engine.client, reference, platform="linux/arm64")
+		assert image.id == "sha256:new"
+		assert engine.pulls == [(repository, tag, "linux/arm64")], (reference, engine.pulls)
+		assert engine.looked_up == [looked_up], (reference, engine.looked_up)
 
 
 def test_a_container_is_stopped_with_the_grace_period_it_asked_for():

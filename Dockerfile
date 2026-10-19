@@ -3,7 +3,12 @@ ARG BASE_IMAGE=alpine:3.24.2
 FROM ${BASE_IMAGE}
 ARG BASE_IMAGE
 
-ARG VERSION=5.1.0
+ARG VERSION=5.1.1
+# The sha256 of the release's source zip, to build only what was released:
+#   --build-arg APP_SHA256=$(curl -fsSL https://github.com/dgongut/docker-controller-bot/archive/refs/tags/v<version>.zip | sha256sum | cut -d' ' -f1)
+# A tag can be moved; with this a moved one fails the build instead of
+# going into the image unnoticed.
+ARG APP_SHA256
 
 # Standard OCI labels. The version comes from the same VERSION that picks the
 # source tag below, so it cannot say one thing and contain another; it is
@@ -27,6 +32,7 @@ WORKDIR /app
 # Install dependencies and download source
 RUN apk add --no-cache python3 py3-pip tzdata curl unzip py3-paramiko openssh-client && \
     curl -fsSL https://github.com/dgongut/docker-controller-bot/archive/refs/tags/v${VERSION}.zip -o /tmp/app.zip && \
+    if [ -n "${APP_SHA256}" ]; then echo "${APP_SHA256}  /tmp/app.zip" | sha256sum -c -; fi && \
     unzip -q /tmp/app.zip -d /tmp && \
     mv /tmp/docker-controller-bot-${VERSION}/docker-controller-bot.py /app && \
     mv /tmp/docker-controller-bot-${VERSION}/core.py /app && \
@@ -55,16 +61,20 @@ RUN apk add --no-cache python3 py3-pip tzdata curl unzip py3-paramiko openssh-cl
     export PIP_BREAK_SYSTEM_PACKAGES=1 && \
     pip3 install --no-cache-dir -Ur /app/requirements.txt
 
-# A remote ssh:// host that stops answering has to fail, not hang: docker-py
-# reads the ssh pipe with no timeout of its own, so these are the only bound.
+# A remote ssh:// host whose link dies has to fail, not hang. The bot puts
+# its own timeout on every read from the ssh pipe; these end the connection
+# when the link itself is gone, which no read timeout can tell apart.
 # Written as the system defaults, so a ~/.ssh/config mapped in still wins.
 RUN mkdir -p /etc/ssh/ssh_config.d && \
     printf 'Host *\n    BatchMode yes\n    ConnectTimeout 10\n    ServerAliveInterval 10\n    ServerAliveCountMax 3\n' \
         > /etc/ssh/ssh_config.d/docker-controller-bot.conf
 
 # Health check
+# Healthy while the bot keeps taking work: a heartbeat the bot writes through
+# the same workers that answer the buttons, so with every one of them stuck
+# it stops. The old check only proved that python3 was installed.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD python3 -c "import sys; sys.exit(0)" || exit 1
+    CMD python3 -c "import os, sys, time; sys.exit(0 if time.time() - os.path.getmtime('/tmp/dcb-heartbeat') < 120 else 1)" || exit 1
 
 ENTRYPOINT ["python3", "docker-controller-bot.py"]
 

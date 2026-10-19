@@ -16,16 +16,20 @@ RUN export PIP_BREAK_SYSTEM_PACKAGES=1 && \
     pip3 install --no-cache-dir -Ur /app/requirements.txt && \
     pip3 install --no-cache-dir debugpy watchdog[watchmedo]
 
-# A remote ssh:// host that stops answering has to fail, not hang: docker-py
-# reads the ssh pipe with no timeout of its own, so these are the only bound.
+# A remote ssh:// host whose link dies has to fail, not hang. The bot puts
+# its own timeout on every read from the ssh pipe; these end the connection
+# when the link itself is gone, which no read timeout can tell apart.
 # Written as the system defaults, so a ~/.ssh/config mapped in still wins.
 RUN mkdir -p /etc/ssh/ssh_config.d && \
     printf 'Host *\n    BatchMode yes\n    ConnectTimeout 10\n    ServerAliveInterval 10\n    ServerAliveCountMax 3\n' \
         > /etc/ssh/ssh_config.d/docker-controller-bot.conf
 
 # Health check
+# Healthy while the bot keeps taking work: a heartbeat the bot writes through
+# the same workers that answer the buttons, so with every one of them stuck
+# it stops. The old check only proved that python3 was installed.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD python3 -c "import sys; sys.exit(0)" || exit 1
+    CMD python3 -c "import os, sys, time; sys.exit(0 if time.time() - os.path.getmtime('/tmp/dcb-heartbeat') < 120 else 1)" || exit 1
 
 # Use watchdog for file monitoring instead of nodemon. The locale directory is
 # watched too because i18n caches each file on first read, so a translation

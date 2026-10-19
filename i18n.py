@@ -8,6 +8,7 @@ Every string the user sees goes through get_text.
 
 import json
 import os
+import re
 
 import store
 from config import SUPPORTED_LANGUAGES
@@ -15,6 +16,10 @@ from logger import error, warning
 
 # Cache for locale files to avoid repeated file I/O
 _locale_cache = {}
+
+# A placeholder in a translation: $1, $2... All the digits at once, so $1 is
+# never read as the start of $10.
+_PLACEHOLDER = re.compile(r"\$(\d+)")
 
 def language():
 	"""
@@ -62,9 +67,15 @@ def get_text(key, *args):
 			error(f"key ['{key}'] is not in locale {locale} or EN")
 			return f"key ['{key}'] is not in locale {locale} or EN"
 
-	# Replace placeholders efficiently
+	# In one pass over the translation, not one replace per argument: those went
+	# on to replace inside what was already in, so a `$3` in a command run with
+	# /exec came out as the whole output of it. Each placeholder of the text is
+	# filled once, what goes in is never read again, and one with no argument
+	# is left as it is.
 	if args:
-		for i, arg in enumerate(args, start=1):
-			translated_text = translated_text.replace(f"${i}", str(arg))
+		def fill(match):
+			index = int(match.group(1))
+			return str(args[index - 1]) if 0 < index <= len(args) else match.group(0)
+		translated_text = _PLACEHOLDER.sub(fill, translated_text)
 
 	return translated_text

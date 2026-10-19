@@ -93,6 +93,33 @@ def _format_duration(nanoseconds):
 	return "".join(parts)
 
 
+def _escape_interpolation(value):
+	"""
+	Every `$` in the values doubled, the way Compose reads a literal one.
+
+	Compose interpolates `$VAR` and `${VAR}` everywhere in the file, and what
+	the container holds is already the result: a Traefik basicauth label
+	(`admin:$apr1$...`) or `DB_PASSWORD=p$ss$word` written as it is came back
+	with the "variables" replaced by nothing, so recreating from the file broke
+	the login and initialised a new database with the password "p". A `$$VAR`
+	the user wrote for the shell inside the container (a CMD-SHELL healthcheck,
+	say) reads back as `$VAR`, and this gives it its `$$` back too.
+
+	Only the values: Compose does not interpolate keys, so a `$` in a label's
+	name is already literal and doubling it would change the name. _Quoted
+	stays _Quoted, or the ports would lose their quotes.
+	"""
+	if isinstance(value, _Quoted):
+		return _Quoted(value.replace("$", "$$"))
+	if isinstance(value, str):
+		return value.replace("$", "$$")
+	if isinstance(value, dict):
+		return {key: _escape_interpolation(item) for key, item in value.items()}
+	if isinstance(value, (list, tuple)):
+		return [_escape_interpolation(item) for item in value]
+	return value
+
+
 def _is_named_volume(source):
 	"""Whether a bind source is a named volume instead of a host path"""
 	return bool(source) and not source.startswith(("/", "./", "../", "~"))
@@ -150,7 +177,7 @@ class ComposeGenerator:
 	def to_yaml(self):
 		"""Returns the compose document rendered as YAML"""
 		return yaml.dump(
-			self.build(),
+			_escape_interpolation(self.build()),
 			Dumper=_ComposeDumper,
 			default_flow_style=False,
 			sort_keys=False,

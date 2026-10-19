@@ -107,6 +107,38 @@ def image_repository(reference):
 	return reference[:colon] if colon > reference.rfind('/') else reference
 
 
+def pull_checked(client, image, platform=None):
+	"""
+	Pulls an image and returns it, like images.pull(), but fails when the
+	pull does.
+
+	The daemon answers 200 as soon as a pull starts, and whatever goes wrong
+	after that — a full disk, a layer that does not verify, a registry that
+	drops the connection — comes as an `error` inside the stream. The SDK
+	reads the stream without looking at it and returns the image that was
+	there already: a check for updates took the old image for the new one and
+	stored the container as up to date, with nothing in the log.
+	"""
+	name, tag = docker.utils.parse_repository_tag(str(image))
+	# `repo:tag@sha256:…` is pulled by its digest, and the tag on it says
+	# nothing more: Docker keeps only the digest of such a reference. Looked
+	# up as `repo@sha256:…`, which is what the pull records.
+	repository = image_repository(name)
+	tag = tag or 'latest'
+	failure = None
+	for chunk in client.api.pull(repository, tag=tag, platform=platform, stream=True, decode=True):
+		if not isinstance(chunk, dict) or not (chunk.get('error') or chunk.get('errorDetail')):
+			continue
+		detail = chunk.get('errorDetail')
+		failure = failure or chunk.get('error') or (detail.get('message') if isinstance(detail, dict) else None) or str(detail)
+		# Read to the end all the same, as images.pull() does: a stream left
+		# half read holds on to its connection until it is collected.
+	if failure:
+		raise docker.errors.APIError(f"Pull of {image} failed: {failure}")
+	separator = '@' if '@' in str(image) else ':'
+	return client.images.get(f"{repository}{separator}{tag}")
+
+
 # Label namespaces that describe an image, and only ever come from one.
 IMAGE_METADATA_LABEL_PREFIXES = ("org.opencontainers.image.", "org.label-schema.")
 
@@ -420,8 +452,15 @@ def _create_container(client, stop_timeout, exposed_ports, image, host_config_ex
 	request as the daemon reported them. When the container has none of it,
 	this is create() itself; otherwise it does what create() does inside,
 	with all of that added.
+
+	The healthcheck too, when it has a `start_interval`: the SDK rebuilds it
+	from the fields it knows, and that one is not among them, so the new
+	container went back to probing every `interval` while it started up and
+	took that much longer to be healthy.
 	"""
-	if not stop_timeout and not exposed_ports and not host_config_extra:
+	healthcheck = kwargs.get('healthcheck')
+	raw_healthcheck = healthcheck if isinstance(healthcheck, dict) and healthcheck.get('StartInterval') else None
+	if not stop_timeout and not exposed_ports and not host_config_extra and raw_healthcheck is None:
 		return client.containers.create(image, **kwargs)
 	from docker.models.containers import _create_container_args
 	kwargs['image'] = image
@@ -440,7 +479,21 @@ def _create_container(client, stop_timeout, exposed_ports, image, host_config_ex
 		create_kwargs['ports'] = ports
 	for key, value in (host_config_extra or {}).items():
 		create_kwargs['host_config'][key] = copy.deepcopy(value)
-	response = client.api.create_container(**create_kwargs)
+	if raw_healthcheck is None:
+		response = client.api.create_container(**create_kwargs)
+	else:
+		# What api.create_container() does, with the healthcheck put back as
+		# the daemon reported it once the SDK has built the request: it
+		# rebuilds whatever it is handed, so there is no passing it in.
+		api = client.api
+		name = create_kwargs.pop('name', None)
+		platform = create_kwargs.pop('platform', None)
+		if create_kwargs.pop('use_config_proxy', True):
+			create_kwargs['environment'] = api._proxy_configs.inject_proxy_environment(
+				create_kwargs.get('environment')) or None
+		container_config = api.create_container_config(**create_kwargs)
+		container_config['Healthcheck'] = copy.deepcopy(raw_healthcheck)
+		response = api.create_container_from_config(container_config, name, platform)
 	return client.containers.get(response['Id'])
 
 
@@ -505,6 +558,20 @@ def extract_container_config(container, tag=None):
 	config['tmpfs_mounts'] = dict(_get_dict(host_config, 'Tmpfs'))
 	config['mounts_list'] = [copy.deepcopy(mount) for mount in _get_list(host_config, 'Mounts')
 							if isinstance(mount, dict) and mount.get('Target')]
+	# An anonymous volume declared as a mount — `--mount type=volume,dst=/data`,
+	# or compose's short `- /var/lib/mysql`, which compose sends as one — is in
+	# that list with no Source, and handed back as it is it asks Docker for a
+	# new, empty volume: a mariadb came back from every update with an empty
+	# datadir and initialised a fresh database. The volume it got is named in
+	# the container's Mounts, and the update creates the new container with
+	# that name as the Source, as compose does when it recreates one. Kept
+	# apart from `mounts_list`, which the compose generator writes out: `- /data`
+	# is what the user declared, not a random 64-character name.
+	sourceless = {mount['Target'] for mount in config['mounts_list']
+				  if mount.get('Type') == 'volume' and not mount.get('Source')}
+	config['mount_volume_names'] = {
+		_get_val(mount, 'Destination'): _get_val(mount, 'Name') for mount in _get_list(container.attrs, 'Mounts')
+		if _get_val(mount, 'Type') == 'volume' and _get_val(mount, 'Name') and _get_val(mount, 'Destination') in sourceless}
 
 	# Anonymous volumes: `-v /data`, or a VOLUME in the image nobody mapped —
 	# the database directory of postgres, mariadb or mongo, more often than
@@ -573,8 +640,11 @@ def extract_container_config(container, tag=None):
 	config['dns_opt'] = _get_list(host_config, 'DnsOptions')
 	config['dns_search'] = _get_list(host_config, 'DnsSearch')
 	config['extra_hosts'] = _get_list(host_config, 'ExtraHosts')
-	# mac_address also conflicts with host/container:/none network modes
-	config['mac_address'] = None if _nm_conflicts_with_hostname else _get_val(host_config, 'MacAddress')
+	# `--mac-address`, compose's `mac_address`. It is in Config: it used to be
+	# read from HostConfig, which has no such field, so it was always None and
+	# daemons that only take the container's MAC (see the create) lost it. It
+	# also conflicts with host/container:/none network modes.
+	config['mac_address'] = None if _nm_conflicts_with_hostname else (_get_val(container_attrs, 'MacAddress') or None)
 	config['network_disabled'] = _get_val(host_config, 'NetworkDisabled', False)
 	# In host/container:/none network modes port bindings are meaningless
 	# (Docker ignores them and may emit warnings). Drop them.
@@ -755,9 +825,69 @@ def extract_container_config(container, tag=None):
 	return config
 
 
+def _mounts_for_create(config):
+	"""
+	`mounts_list` as the new container is created with: a copy, with the
+	anonymous volumes it had given back by name (see `mount_volume_names`).
+	"""
+	names = config.get('mount_volume_names') or {}
+	mounts = []
+	for mount in config.get('mounts_list') or []:
+		mount = copy.deepcopy(mount)
+		if mount.get('Type') == 'volume' and not mount.get('Source') and names.get(mount.get('Target')):
+			mount['Source'] = names[mount['Target']]
+		mounts.append(mount)
+	return mounts
+
+
+def _name_if_still_there(client, container, fallback_name):
+	"""
+	The name a container goes by now, or None once Docker has deleted it.
+
+	A delete that timed out on the client may still finish on the daemon. One
+	whose fate cannot be checked counts as still there: being told to remove
+	something already gone costs a look, while a leftover nobody mentions
+	stops the next update.
+	"""
+	try:
+		return client.containers.get(container.id).name or fallback_name
+	except docker.errors.NotFound:
+		return None
+	except Exception:
+		return fallback_name
+
+
+def _report_updated(config, container_name, left_behind, get_text_func, save_status_func, notify_func,
+					debug_func, error_func):
+	"""
+	The end of an update the new container went through.
+
+	Returns exactly get_text("updated_container"): the caller tells success
+	from failure by comparing with it. An original that could not be deleted
+	is therefore said in a message of its own.
+	"""
+	debug_func(f"[UPDATE_SUCCESS] ✅ Update completed successfully for {container_name}")
+	# The container now runs the image it was just updated to, so it is up
+	# to date. The status is stored as a boolean and rendered for display
+	# later, in whichever language is configured at that point. Not storing
+	# it only means the next check says it again.
+	try:
+		save_status_func(config['image'], container_name, False)
+	except Exception as e:
+		error_func(f"[UPDATE_SUCCESS] Could not save the update status of {container_name}: {e}")
+	if left_behind:
+		error_func(f"[DELETE_OLD] ⚠️ {container_name} was updated; the original is left as {left_behind} and has to be removed by hand")
+		if notify_func is not None:
+			try:
+				notify_func(get_text_func("update_old_left_behind", container_name, left_behind))
+			except Exception as e:
+				error_func(f"[DELETE_OLD] Could not tell that {left_behind} was left behind: {e}")
+	return get_text_func("updated_container", container_name)
+
+
 def perform_update(client, container, config, container_name, message, edit_message_func,
 				   debug_func, error_func, get_text_func, save_status_func,
-				   container_id_length, telegram_group, skip_pull=False):
+				   container_id_length, telegram_group, skip_pull=False, notify_func=None):
 	"""
 	Perform the actual container update with the extracted configuration.
 	Uses a lock to prevent concurrent updates of the same container.
@@ -778,6 +908,9 @@ def perform_update(client, container, config, container_name, message, edit_mess
 		skip_pull: When True, skip the image pull step. Used for in-place
 			recreation with the same image (e.g. when a dependent must be
 			recreated to point at a new parent container id).
+		notify_func: Called with a text for the user when the update went
+			through but the original could not be deleted, and is left under
+			another name. The returned text is the plain success either way.
 
 	Returns:
 		str: Success or error message
@@ -792,14 +925,15 @@ def perform_update(client, container, config, container_name, message, edit_mess
 	try:
 		return _perform_update_locked(client, container, config, container_name, message, edit_message_func,
 									   debug_func, error_func, get_text_func, save_status_func,
-									   container_id_length, telegram_group, skip_pull=skip_pull)
+									   container_id_length, telegram_group, skip_pull=skip_pull,
+									   notify_func=notify_func)
 	finally:
 		_done_updating(container.id)
 
 
 def _perform_update_locked(client, container, config, container_name, message, edit_message_func,
 						   debug_func, error_func, get_text_func, save_status_func,
-						   container_id_length, telegram_group, skip_pull=False):
+						   container_id_length, telegram_group, skip_pull=False, notify_func=None):
 	"""
 	Internal function that performs the actual update (called with lock held).
 	"""
@@ -836,6 +970,15 @@ def _perform_update_locked(client, container, config, container_name, message, e
 	# is a name to give back.
 	renamed = False
 	new_container_id = None
+	# Set once the new container has proved itself, and from then on it is
+	# the one to keep. A failure past that point is housekeeping: rolling back
+	# deleted a container that worked to bring back one that might be half
+	# deleted. A DELETE that outlasted the client's timeout on a slow disk did
+	# exactly that — the daemon then finished removing the original, and there
+	# was no container left at all.
+	verified = False
+	# The name the original is left under when it could not be deleted.
+	left_behind = None
 
 	try:
 		# Pull new image with timeout validation
@@ -847,15 +990,12 @@ def _perform_update_locked(client, container, config, container_name, message, e
 
 			try:
 				debug_func(f"[PULL_IMAGE] Starting pull of {config['image']}")
-				if config.get('platform'):
-					pulled_image = client.images.pull(config['image'], platform=config['platform'])
-				else:
-					pulled_image = client.images.pull(config['image'])
+				pulled_image = pull_checked(client, config['image'], platform=config.get('platform') or None)
 				if not pulled_image or not pulled_image.id:
 					raise Exception("Image pull returned invalid image object")
 				debug_func(f"[PULL_IMAGE] Image pulled successfully: {pulled_image.id[:container_id_length]}")
 			except Exception as pull_error:
-				error_func(get_text_func("error_pulling_image", config['image'], str(pull_error)))
+				error_func(f"[PULL_IMAGE] ❌ Could not pull {config['image']}: {pull_error}")
 				raise Exception(f"Failed to pull image {config['image']}: {pull_error}")
 
 		# Stop container
@@ -890,6 +1030,13 @@ def _perform_update_locked(client, container, config, container_name, message, e
 			# For macvlan and similar networks, MAC should be in EndpointConfig, not in containers.create()
 			# Otherwise the MAC gets lost
 			effective_mac = None  # Will only be used for non-network-specific MAC
+			# Except before API 1.44 (Docker 25), which has no MAC per endpoint:
+			# those daemons ignore the endpoint's and only take the container's.
+			# A Pi-hole on macvlan with a DHCP reservation, on a Synology with
+			# Docker 24 or a Debian 12 with docker.io, got a random MAC from
+			# every update, and with it another address.
+			api_version = getattr(client.api, '_version', None)
+			container_wide_mac = isinstance(api_version, str) and docker.utils.version_lt(api_version, '1.44')
 
 			if config['network_mode'] and has_network_config:
 				from docker.types import EndpointConfig
@@ -922,6 +1069,9 @@ def _perform_update_locked(client, container, config, container_name, message, e
 					endpoint_config['GwPriority'] = gw_priority
 				networking_config = {config['network_mode']: endpoint_config}
 				debug_func(f"[CREATE_CONTAINER] Network config: IPv4={config['ipv4_address']}, IPv6={config['ipv6_address']}, MAC={config['network_mac_address']}, aliases={config['network_aliases']}")
+				if container_wide_mac and config['mac_address']:
+					effective_mac = config['mac_address']
+					debug_func(f"[CREATE_CONTAINER] Container MAC address: {effective_mac} (API {api_version} has no MAC per endpoint)")
 			else:
 				# Only use container-level MAC if there's no network-specific config
 				effective_mac = config['mac_address']
@@ -943,7 +1093,7 @@ def _perform_update_locked(client, container, config, container_name, message, e
 				working_dir=config['working_dir'],
 				user=config['user'],
 				volumes=list(config['volumes'] or []) + list(config.get('anonymous_volumes') or []),
-				mounts=config['mounts_list'] if config['mounts_list'] else None,
+				mounts=_mounts_for_create(config) or None,
 				# docker-py only applies networking_config when `network` is also
 				# passed (_create_container_args drops it silently otherwise, losing
 				# aliases, static IPs, links... - including the compose service-name
@@ -1034,7 +1184,7 @@ def _perform_update_locked(client, container, config, container_name, message, e
 				new_container.start()
 				debug_func(f"[START_CONTAINER] New container started successfully")
 			except Exception as start_error:
-				error_func(get_text_func("error_starting_container", container_name, str(start_error)))
+				error_func(f"[START_CONTAINER] ❌ Could not start the new {container_name}: {start_error}")
 				raise Exception(f"Failed to start new container: {start_error}")
 		else:
 			debug_func(f"[START_CONTAINER] Original container was not running, keeping new container stopped")
@@ -1049,6 +1199,7 @@ def _perform_update_locked(client, container, config, container_name, message, e
 			# was nothing left to roll back to. It has to stay up for
 			# VERIFY_STABLE_SECONDS in a row, without Docker restarting it.
 			_verify_stays_up(new_container, container_name, debug_func)
+			verified = True
 			debug_func(f"[DELETE_OLD] New container verified and running. Now safe to delete old container {old_container_name}")
 			if config.get('was_paused'):
 				try:
@@ -1063,6 +1214,7 @@ def _perform_update_locked(client, container, config, container_name, message, e
 				debug_func(f"[VERIFY_CONTAINER] ✅ Container {container_name} created successfully (kept stopped as original)")
 			except docker.errors.NotFound:
 				raise Exception("Container was removed by external process during verification")
+			verified = True
 			debug_func(f"[DELETE_OLD] New container verified. Now safe to delete old container {old_container_name}")
 
 		# Save old image ID BEFORE deleting container (container object becomes invalid after delete)
@@ -1072,22 +1224,28 @@ def _perform_update_locked(client, container, config, container_name, message, e
 		except Exception as e:
 			debug_func(f"[DELETE_OLD] Warning: Could not get old image ID: {e}")
 
-		# Delete old container
+		# Delete old container. Whatever goes wrong here leaves the new one in
+		# place, and not only an APIError: a DELETE that outlasts the client's
+		# timeout is a requests ReadTimeout. If the original is still there —
+		# the daemon may yet finish deleting it, or leave it Dead because
+		# something else holds its files — it stays under its _old name for
+		# the user to remove.
 		try:
 			if message:
 				edit_message_func(get_text_func("updating_deleting_old", container_name), telegram_group, message.message_id)
 			debug_func(f"[DELETE_OLD] Removing old container {old_container_name} (ID: {old_container_id})")
 			container.remove()
 			debug_func(f"[DELETE_OLD] ✅ Old container {old_container_name} deleted successfully")
-		except docker.errors.APIError as e:
-			error_func(get_text_func("error_deleting_container_with_error", container_name, e))
-			raise Exception(f"Failed to delete old container: {e}")
+		except Exception as e:
+			error_func(get_text_func("error_deleting_container_with_error", old_container_name, e))
+			left_behind = _name_if_still_there(client, container, old_container_name)
 
 		# Delete old image (using saved ID, not container.image.id which is now invalid).
 		# In skip_pull mode the "old" image is the same image the new container
 		# was just created from, so attempting to remove it would fail (or worse,
-		# leave dangling references); skip the delete entirely.
-		if old_image_id and not skip_pull:
+		# leave dangling references); skip the delete entirely. So does an
+		# original that is still there, which is still using it.
+		if old_image_id and not skip_pull and not left_behind:
 			try:
 				debug_func(f"[DELETE_IMAGE] Removing old image {old_image_id[:container_id_length]}")
 				client.images.remove(old_image_id)
@@ -1095,14 +1253,17 @@ def _perform_update_locked(client, container, config, container_name, message, e
 			except Exception as e:
 				debug_func(f"[DELETE_IMAGE] Warning: Could not delete old image: {e}")
 
-		# The container now runs the image it was just updated to, so it is up
-		# to date. The status is stored as a boolean and rendered for display
-		# later, in whichever language is configured at that point.
-		debug_func(f"[UPDATE_SUCCESS] ✅ Update completed successfully for {container_name}")
-		save_status_func(config['image'], container_name, False)
-		return get_text_func("updated_container", container_name)
+		return _report_updated(config, container_name, left_behind, get_text_func, save_status_func,
+							   notify_func, debug_func, error_func)
 
 	except Exception as e:
+		if verified:
+			# Nothing to roll back to: the new container is the good one. Only
+			# the original is in question, which may or may not have gone.
+			error_func(f"[UPDATE_SUCCESS] ⚠️ {container_name} was updated, but what came after failed: {e}")
+			return _report_updated(config, container_name, _name_if_still_there(client, container, old_container_name),
+								   get_text_func, save_status_func, notify_func, debug_func, error_func)
+
 		# Rollback with validation - CRITICAL: Must restore old container
 		debug_func(f"[ROLLBACK_START] ❌ Update failed with exception: {str(e)}")
 		debug_func(get_text_func("debug_rollback_update", container_name))
@@ -1175,7 +1336,14 @@ def _perform_update_locked(client, container, config, container_name, message, e
 					debug_func(f"[ROLLBACK_STEP2] Original was never renamed, it keeps its name")
 
 				# Start it again if it was running before
-				if config['is_running']:
+				if config.get('was_paused') and original.status == 'paused':
+					# Never stopped: the update failed before it got that far,
+					# at the pull. It is as it was, and start() on a paused
+					# container fails, which used to be logged as a failed
+					# rollback.
+					rollback_successful = True
+					debug_func(f"[ROLLBACK_STEP2] ✅ Original container was never stopped, it stays paused")
+				elif config['is_running']:
 					debug_func(f"[ROLLBACK_STEP2] Container was running before, starting it...")
 					original.start()
 					time.sleep(1)
@@ -1185,6 +1353,15 @@ def _perform_update_locked(client, container, config, container_name, message, e
 						debug_func(get_text_func("debug_rollback_successful", container_name))
 						debug_func(f"[ROLLBACK_STEP2] ✅ Rollback successful - original container is running")
 						rollback_successful = True
+						if config.get('was_paused'):
+							# Back as it was: a container is paused for a reason.
+							# Running is still better than lost, so a pause that
+							# fails does not fail the rollback.
+							try:
+								original.pause()
+								debug_func(f"[ROLLBACK_STEP2] Paused again, as it was")
+							except Exception as pause_error:
+								error_func(f"[ROLLBACK_STEP2] ⚠️ {container_name} is back but running: could not pause it again: {pause_error}")
 					else:
 						error_func(f"[ROLLBACK_STEP2] ❌ Original container failed to start after rollback. Status: {original.status}")
 				else:

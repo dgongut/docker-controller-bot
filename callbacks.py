@@ -146,8 +146,7 @@ def cb_askCommand(ctx):
 	params=('containerId', 'commandId'),
 )
 def cb_exec(ctx):
-	command = core.load_command_cache(ctx.commandId)
-	core.clear_command_cache(ctx.commandId)
+	command = core.take_command_cache(ctx.commandId)
 	if command is not None:
 		core.execute_command(ctx.containerId, ctx.containerName, command)
 	else:
@@ -225,7 +224,7 @@ def cb_deleteSchedule(ctx):
 	if idx >= 0:
 		schedule_to_delete = schedules[idx]
 		core.schedule_manager.delete_schedule(schedule_to_delete["name"])
-		core.send_message(message=get_text("deleted_schedule", schedule_to_delete["name"]))
+		core.send_message(message=get_text("deleted_schedule", html.escape(schedule_to_delete["name"])))
 	else:
 		core.send_message(message=get_text("error_schedule_not_found"))
 
@@ -421,7 +420,7 @@ def cb_enterComposeProject(ctx):
 	project_info = core.project_info_or_none(ctx.hostId, project_name)
 
 	if not project_info:
-		core.send_message(message=f'{get_text("error_project_not_found", project_name)}{core.host_suffix(ctx.hostId)}')
+		core.send_message(message=f'{get_text("error_project_not_found", html.escape(str(project_name)))}{core.host_suffix(ctx.hostId)}')
 		return
 
 	# Build Level 2 keyboard
@@ -453,7 +452,7 @@ def cb_enterComposeProject(ctx):
 	core.save_container_cache(ctx.chatId, ctx.messageId, project_info.containers, ctx.hostId)
 
 	core.edit_message_text(
-		f'{get_text("select_container_from_project", project_name)}'
+		f'{get_text("select_container_from_project", html.escape(str(project_name)))}'
 		f'{core.host_suffix(ctx.hostId)}',
 		ctx.chatId,
 		ctx.messageId,
@@ -499,10 +498,11 @@ def cb_confirmDeleteWholeProject(ctx):
 	project_info = core.project_info_or_none(ctx.hostId, project_name)
 
 	if not project_info:
-		core.send_message(message=f'{get_text("error_project_not_found", project_name)}{core.host_suffix(ctx.hostId)}')
+		core.send_message(message=f'{get_text("error_project_not_found", html.escape(str(project_name)))}{core.host_suffix(ctx.hostId)}')
 		return
 
-	container_count = project_info.get_container_count()
+	# What will actually go: the bot is left out of a whole-project delete.
+	container_count = len(core.without_the_bot(ctx.hostId, project_info.containers)[0])
 	markup = InlineKeyboardMarkup(row_width=2)
 	markup.add(
 		InlineKeyboardButton(
@@ -516,7 +516,7 @@ def cb_confirmDeleteWholeProject(ctx):
 	)
 	core.edit_message_text(
 		f'{core.host_label(ctx.hostId)}'
-		f'{get_text("confirm_delete_project", project_name, container_count)}',
+		f'{get_text("confirm_delete_project", html.escape(str(project_name)), container_count)}',
 		ctx.chatId,
 		ctx.messageId,
 		reply_markup=markup
@@ -894,7 +894,7 @@ def cb_scheduleSelectAction(ctx):
 			message_text += f"\n\n{core.typed_prompt('schedule_ask_minutes')}"
 
 			markup = InlineKeyboardMarkup(row_width=1)
-			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
 			msg = core.send_message(message=message_text, reply_markup=markup)
 			schedule_state["last_message_id"] = msg.message_id if msg else None
 			core.save_schedule_state(ctx.userId, schedule_state)
@@ -941,10 +941,10 @@ def cb_scheduleSelectContainer(ctx):
 			schedule_state["show_output"] = False  # Initialize for display
 
 			# Build message with summary
-			message_text = f"<b>{get_text('schedule_label_name')}:</b> {schedule_state.get('name')}\n"
-			message_text += f"<b>{get_text('schedule_label_cron')}:</b> {schedule_state.get('cron')}\n"
+			message_text = f"<b>{get_text('schedule_label_name')}:</b> {html.escape(str(schedule_state.get('name')))}\n"
+			message_text += f"<b>{get_text('schedule_label_cron')}:</b> {html.escape(str(schedule_state.get('cron')))}\n"
 			message_text += f"<b>{get_text('schedule_label_action')}:</b> {schedule_state.get('action')}\n"
-			message_text += f"<b>{get_text('schedule_label_container')}:</b> {container_name}\n\n"
+			message_text += f"<b>{get_text('schedule_label_container')}:</b> {html.escape(str(container_name))}\n\n"
 			message_text += get_text("schedule_ask_show_output")
 
 			markup = InlineKeyboardMarkup(row_width=2)
@@ -982,7 +982,7 @@ def cb_scheduleSelectShowOutput(ctx):
 		message_text += f"\n\n{core.typed_prompt('schedule_ask_command')}"
 
 		markup = InlineKeyboardMarkup(row_width=1)
-		markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+		markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
 		msg = core.send_message(message=message_text, reply_markup=markup)
 		schedule_state["last_message_id"] = msg.message_id if msg else None
 		core.save_schedule_state(ctx.userId, schedule_state)
@@ -1067,7 +1067,7 @@ def cb_scheduleConfirm(ctx):
 			# Show the updated schedule menu
 			core.show_schedule_menu(ctx.userId, ctx.chatId)
 		except Exception as e:
-			core.send_message(message=get_text("error_adding_schedule", str(e)))
+			core.send_message(message=get_text("error_adding_schedule", html.escape(str(e))))
 			core.error(f"Error adding schedule: {e}")
 
 @callback(
@@ -1099,7 +1099,7 @@ def cb_scheduleEditField(ctx):
 
 			# For text fields, ask for input
 			markup = InlineKeyboardMarkup(row_width=1)
-			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
 			msg = core.send_message(message=message_text, reply_markup=markup)
 			edit_state["last_message_id"] = msg.message_id if msg else None
 			core.save_schedule_state(ctx.userId, edit_state)
@@ -1112,7 +1112,7 @@ def cb_scheduleEditField(ctx):
 
 			# For text fields, ask for input
 			markup = InlineKeyboardMarkup(row_width=1)
-			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
 			msg = core.send_message(message=message_text, reply_markup=markup)
 			edit_state["last_message_id"] = msg.message_id if msg else None
 			core.save_schedule_state(ctx.userId, edit_state)
@@ -1130,18 +1130,27 @@ def cb_scheduleEditField(ctx):
 				core.send_message(message=get_text("error_no_containers_available"))
 				return
 
-			markup = InlineKeyboardMarkup(row_width=2)
-			# The same shape as choosing the container of a new schedule: the
-			# choice travels as an index and the name and host stay in the
-			# state, since a reference plus a name may not fit in 64 bytes.
-			for idx, (entry, container) in enumerate(available_containers):
-				label = container.name
-				if not host_registry.is_single_host():
-					label = f'{container.name} · {entry.get("alias", entry["id"])}'
-				markup.add(InlineKeyboardButton(label, callback_data=f"scheduleEditValue|container|{ctx.scheduleId}|{idx}"))
-				edit_state[f"container_{idx}"] = container.name
-				edit_state[f"container_host_{idx}"] = entry["id"]
-			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+			# The same shape as choosing the container of a new schedule.
+			core.note_schedule_containers(edit_state, available_containers, f"scheduleEditValue|container|{ctx.scheduleId}")
+			markup = core.schedule_container_markup(edit_state)
+			msg = core.send_message(message=message_text, reply_markup=markup)
+			edit_state["last_message_id"] = msg.message_id if msg else None
+			core.save_schedule_state(ctx.userId, edit_state)
+
+		elif ctx.field == "host":
+			current_host = core.schedule_host_value(schedule) or core.host_alias(
+				schedule.get("host") or host_registry.local_host_id())
+			message_text = f"<b>{get_text('schedule_edit_host')}</b>\n\n"
+			message_text += f"{get_text('pick_a_host')}\n"
+			message_text += f"<i>{get_text('current_value')}: {current_host}</i>"
+
+			# The same list as choosing the host of a new prune.
+			markup = InlineKeyboardMarkup(row_width=1)
+			for entry in host_registry.hosts():
+				markup.add(InlineKeyboardButton(
+					f'🖥️ {entry.get("alias", entry["id"])}',
+					callback_data=f'scheduleEditValue|host|{ctx.scheduleId}|{entry["id"]}'))
+			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
 			msg = core.send_message(message=message_text, reply_markup=markup)
 			edit_state["last_message_id"] = msg.message_id if msg else None
 			core.save_schedule_state(ctx.userId, edit_state)
@@ -1154,7 +1163,7 @@ def cb_scheduleEditField(ctx):
 
 			# For text fields, ask for input
 			markup = InlineKeyboardMarkup(row_width=1)
-			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
 			msg = core.send_message(message=message_text, reply_markup=markup)
 			edit_state["last_message_id"] = msg.message_id if msg else None
 			core.save_schedule_state(ctx.userId, edit_state)
@@ -1167,7 +1176,7 @@ def cb_scheduleEditField(ctx):
 
 			# For text fields, ask for input
 			markup = InlineKeyboardMarkup(row_width=1)
-			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
 			msg = core.send_message(message=message_text, reply_markup=markup)
 			edit_state["last_message_id"] = msg.message_id if msg else None
 			core.save_schedule_state(ctx.userId, edit_state)
@@ -1200,7 +1209,7 @@ def cb_scheduleEditField(ctx):
 				InlineKeyboardButton(get_text("schedule_prune_networks"), callback_data=f"scheduleEditValue|prune_type|{ctx.scheduleId}|networks"),
 				InlineKeyboardButton(get_text("schedule_prune_volumes"), callback_data=f"scheduleEditValue|prune_type|{ctx.scheduleId}|volumes")
 			)
-			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
 			msg = core.send_message(message=message_text, reply_markup=markup)
 			edit_state["last_message_id"] = msg.message_id if msg else None
 			core.save_schedule_state(ctx.userId, edit_state)
@@ -1211,6 +1220,12 @@ def cb_scheduleEditField(ctx):
 )
 def cb_scheduleEditValue(ctx):
 	if ctx.field and ctx.scheduleId and ctx.value:
+		# The question this button answers is over either way. Left behind,
+		# its state took the admin's next loose message as the answer: written
+		# into the task as its command, or just deleted, every time.
+		edit_state = core.load_schedule_state(ctx.userId)
+		if edit_state and edit_state.get("field"):
+			core.clear_schedule_state(ctx.userId)
 		schedule = core.schedule_manager.get_schedule_by_id(int(ctx.scheduleId))
 		if not schedule:
 			core.send_message(message=get_text("error_invalid_selection"))
@@ -1227,7 +1242,6 @@ def cb_scheduleEditValue(ctx):
 			core.send_message(message=get_text("schedule_updated_success", html.escape(schedule_name)))
 		elif ctx.field == "container":
 			# value is now the container index, retrieve name from edit state
-			edit_state = core.load_schedule_state(ctx.userId)
 			container_name = edit_state.get(f"container_{ctx.value}") if edit_state else None
 			container_host = edit_state.get(f"container_host_{ctx.value}") if edit_state else None
 
@@ -1241,6 +1255,16 @@ def cb_scheduleEditValue(ctx):
 				return
 		elif ctx.field == "command":
 			core.schedule_manager.update_schedule(schedule_name, command=ctx.value)
+			core.send_message(message=get_text("schedule_updated_success", html.escape(schedule_name)))
+		elif ctx.field == "host":
+			# The button may be older than the host list: one removed since
+			# would just put the task back where it cannot run. Only a prune
+			# has its host as a field of its own; a container task moving
+			# without its container would point at a namesake or at nothing.
+			if schedule.get("action") != "prune" or host_registry.host(ctx.value) is None:
+				core.send_message(message=get_text("error_invalid_selection"))
+				return
+			core.schedule_manager.update_schedule(schedule_name, host=ctx.value)
 			core.send_message(message=get_text("schedule_updated_success", html.escape(schedule_name)))
 
 		# Show the schedule menu again
@@ -1259,6 +1283,15 @@ def cb_scheduleEditStatus(ctx):
 
 			# Toggle the status
 			new_enabled = not schedule.get("enabled", True)
+			# Switched on, a task on a removed host would only be switched off
+			# again by its next firing. It has to be moved first, so the edit
+			# screen comes back with the button that does it.
+			if new_enabled and core.schedule_host_missing(schedule):
+				key = ("schedule_enable_host_missing_prune" if schedule.get("action") == "prune"
+					else "schedule_enable_host_missing_container")
+				core.send_message(message=get_text(key, html.escape(schedule_name)))
+				core.show_schedule_edit_options(ctx.userId, schedule_name)
+				return
 			core.schedule_manager.update_schedule(schedule_name, enabled=new_enabled)
 
 			# Show success message
@@ -1345,6 +1378,18 @@ def cb_pickHosts(ctx):
 def cb_pickHost(ctx):
 	"""Steps into one host from a picker that offered several."""
 	core.render_picker_for_host(ctx.chatId, ctx.messageId, ctx.action, ctx.value)
+
+
+@callback(name="pickPage", params=("action", "field", "value"), keeps_message=True)
+def cb_pickPage(ctx):
+	"""Shows another page of a container picker too long for one keyboard."""
+	try:
+		page = int(ctx.value)
+	except (TypeError, ValueError):
+		page = 0
+	core.write_cache_item(core.picker_page_key(ctx.chatId, ctx.messageId), page)
+	# `field` is the host the list is about.
+	core.back_to_level1_multi_aware(ctx.action, ctx.chatId, ctx.messageId, ctx.field)
 
 
 # --- HOSTS ---------------------------------------------------------------
@@ -1434,6 +1479,33 @@ def cb_settingsHostRemoveConfirm(ctx):
 			listed = "\n".join(f"· <b>{html.escape(name)}</b>" for name in names)
 			core.send_message(message=get_text("settings_host_schedules_disabled", listed))
 	core.render_settings(ctx.chatId, ctx.messageId, "hosts")
+
+
+@callback(name="scheduleContainerPage", params=("value",), keeps_message=True)
+def cb_scheduleContainerPage(ctx):
+	"""Shows another page of the containers a schedule can be pointed at."""
+	state = core.load_schedule_state(ctx.userId)
+	if not state or not state.get("container_count"):
+		core.send_message(message=get_text("error_invalid_selection"))
+		return
+	try:
+		state["container_page"] = int(ctx.value)
+	except (TypeError, ValueError):
+		state["container_page"] = 0
+	core.save_schedule_state(ctx.userId, state)
+	core.edit_message_reply_markup(ctx.chatId, ctx.messageId, core.schedule_container_markup(state))
+
+
+@callback(name="scheduleCancel")
+def cb_scheduleCancel(ctx):
+	"""
+	Cancels creating or editing a schedule, closing its message.
+
+	Its own button rather than `cerrar`, which leaves the per-user state
+	alone because it closes menus of every kind: after a cancel, that state
+	took the admin's next loose message as the answer to the question.
+	"""
+	core.clear_schedule_state(ctx.userId)
 
 
 @callback(name="cerrar")

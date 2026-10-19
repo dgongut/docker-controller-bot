@@ -10,6 +10,25 @@ import socket
 import random
 from typing import Tuple, List, Dict, Set, Optional
 
+import host_registry
+
+
+def _host_port_range(host_port) -> Tuple[int, int]:
+    """
+    The ports a HostPort binding takes, as (first, last).
+
+    `-p 8000-8010:80` is stored as the one HostPort "8000-8010", not as eleven
+    bindings, so reading it as a number failed and the whole container was
+    skipped: checking 8005 said nobody had it. Raises ValueError for anything
+    that is neither a port nor a range of them.
+    """
+    first, dash, last = str(host_port).strip().partition('-')
+    start = int(first)
+    end = int(last) if dash else start
+    if end < start:
+        raise ValueError(f"not a port range: {host_port!r}")
+    return start, end
+
 
 class PortManager:
     """Manages port operations for Docker containers"""
@@ -52,6 +71,40 @@ class PortManager:
             return False
         
         return True
+
+    def _is_this_machine(self, manager) -> bool:
+        """
+        Whether `manager` is the host the bot runs on: the only one a bind
+        made here says anything about.
+
+        The bind happens in the bot's own network, wherever the bindings were
+        read from. On a remote host it answered about the wrong machine:
+        "free" on the NAS for a port a service of the NAS itself holds, "used
+        by the system" for one that is only taken here.
+        """
+        if manager is None:
+            return True
+        return getattr(manager, 'host_id', None) == host_registry.local_host_id()
+
+    def _bound_port_ranges(self, container) -> List[Tuple[int, int]]:
+        """
+        The host ports a container's PortBindings hold, as (first, last).
+
+        A binding that does not read as a port is skipped on its own. Skipping
+        the container instead, as it used to be, hid every other port it had.
+        """
+        ranges = []
+        port_bindings = container.attrs.get('HostConfig', {}).get('PortBindings') or {}
+        for host_bindings in port_bindings.values():
+            for host_binding in host_bindings or []:
+                host_port = host_binding.get('HostPort', '')
+                if not host_port:
+                    continue
+                try:
+                    ranges.append(_host_port_range(host_port))
+                except ValueError:
+                    continue
+        return ranges
     
     def _get_bridge_network_ports(self, container) -> List[str]:
         """
@@ -144,16 +197,16 @@ class PortManager:
                     continue
 
                 # For bridge/default network, check PortBindings
-                port_bindings = container.attrs.get('HostConfig', {}).get('PortBindings', {})
-                if port_bindings:
-                    for container_port, host_bindings in port_bindings.items():
-                        if host_bindings:
-                            for host_binding in host_bindings:
-                                host_port = host_binding.get('HostPort', '')
-                                if host_port and int(host_port) == port_number:
-                                    return (False, "ports_used_by_container", container.name)
+                for first, last in self._bound_port_ranges(container):
+                    if first <= port_number <= last:
+                        return (False, "ports_used_by_container", container.name)
             except Exception:
                 continue
+
+        # No container has it. On another machine that is all there is to go
+        # on: what else is listening there cannot be asked from here.
+        if not self._is_this_machine(manager):
+            return (True, "ports_available", None)
 
         # Check if port is available at system level
         if self._is_port_available(port_number):
@@ -177,7 +230,7 @@ class PortManager:
         # a port free here says nothing about any other machine. Inspected,
         # because the bindings are only in the inspect.
         containers = (manager or self.default_manager()).list_containers(inspect=True)
-        used_ports = set()
+        used_ranges = []
 
         for container in containers:
             try:
@@ -187,30 +240,24 @@ class PortManager:
                     continue
 
                 # Get port bindings
-                port_bindings = container.attrs.get('HostConfig', {}).get('PortBindings', {})
-                if port_bindings:
-                    for container_port, host_bindings in port_bindings.items():
-                        if host_bindings:
-                            for host_binding in host_bindings:
-                                host_port = host_binding.get('HostPort', '')
-                                if host_port:
-                                    try:
-                                        used_ports.add(int(host_port))
-                                    except ValueError:
-                                        pass
+                used_ranges.extend(self._bound_port_ranges(container))
             except Exception:
                 continue
+
+        # Same as check_port_availability: a bind only says anything about the
+        # bot's own host, and on any other the bindings have the last word.
+        this_machine = self._is_this_machine(manager)
 
         # Try to find an available port
         for _ in range(max_attempts):
             port = random.randint(min_port, max_port)
 
             # Skip if port is used by a container
-            if port in used_ports:
+            if any(first <= port <= last for first, last in used_ranges):
                 continue
 
             # Check if port is available at system level
-            if self._is_port_available(port):
+            if not this_machine or self._is_port_available(port):
                 return port
 
         # If no port found after max_attempts, return None

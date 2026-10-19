@@ -2,6 +2,7 @@ import docker
 import functools
 import hashlib
 import html
+import ipaddress
 import io
 import json
 import os
@@ -23,13 +24,14 @@ from croniter import croniter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
+from urllib.parse import urlsplit
 from telebot.types import InlineKeyboardButton
 from telebot.types import InlineKeyboardMarkup
 from compose_generator import ComposeGenerator
 from formatting import (
 	EVENT_LOG_LINES, by_host, render_container_info, comparison_version_change, comparison_version_line, comparison_version_notes, container_line, describe_exit_code, human_duration, log_excerpt, release_notes_url, version_lines,
 )
-from docker_update import container_platform, extract_container_config, image_repository, image_version, perform_update, stop_container, updates_in_progress
+from docker_update import container_platform, extract_container_config, image_repository, image_version, perform_update, pull_checked, stop_container, updates_in_progress
 from docker_compose_manager import (
     ComposeDetector,
     ComposeProjectManager
@@ -44,7 +46,7 @@ from i18n import get_text, language
 from logger import debug, error, warning
 from message_queue import MessageQueue
 
-VERSION = "5.1.0"
+VERSION = "5.1.1"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -68,17 +70,23 @@ def sizeof_fmt(num, suffix="B"):
 if TELEGRAM_TOKEN is None or TELEGRAM_TOKEN == '':
 	error("You need to configure the bot token with the TELEGRAM_TOKEN variable")
 	sys.exit(1)
-if TELEGRAM_ADMIN is None or TELEGRAM_ADMIN == '':
+# The administrators' ids, read once. Spaces around the commas, or one after
+# the last, are how a list is commonly written: compared as typed, "123, 456"
+# left the second administrator out with no hint of why.
+ADMIN_IDS = frozenset(a.strip() for a in str(TELEGRAM_ADMIN or "").split(",") if a.strip())
+if not ADMIN_IDS:
 	error("You need to configure the chatId of the user who will interact with the bot with the TELEGRAM_ADMIN variable")
 	sys.exit(1)
-if str(ANONYMOUS_USER_ID) in str(TELEGRAM_ADMIN).split(','):
+if str(ANONYMOUS_USER_ID) in ADMIN_IDS:
 	error("You cannot be anonymous to control the bot. In the variable TELEGRAM_ADMIN you have to put your user id.")
 	sys.exit(1)
-if TELEGRAM_GROUP is None or TELEGRAM_GROUP == '':
-	if len(str(TELEGRAM_ADMIN).split(',')) > 1:
+if TELEGRAM_GROUP is None or TELEGRAM_GROUP.strip() == '':
+	if len(ADMIN_IDS) > 1:
 		error("Multiple administrators can only be specified if used in a group (using the TELEGRAM_GROUP variable)")
 		sys.exit(1)
-	TELEGRAM_GROUP = TELEGRAM_ADMIN
+	TELEGRAM_GROUP = next(iter(ADMIN_IDS))
+else:
+	TELEGRAM_GROUP = TELEGRAM_GROUP.strip()
 
 try:
 	TELEGRAM_THREAD = int(TELEGRAM_THREAD)
@@ -179,6 +187,46 @@ def is_allowed_origin(chat, user_id):
 	if chat.type == "private":
 		return str(chat.id) == str(user_id)
 	return str(chat.id) == str(TELEGRAM_GROUP)
+
+def topic_of(message):
+	"""
+	The forum topic a message was written in, 1 for the general one.
+
+	Only forums have topics. Elsewhere Telegram still fills message_thread_id
+	in a reply —with the message the thread of replies started from— and
+	taking that for a topic ignored, without a word, a command written as a
+	reply to someone else.
+	"""
+	if not getattr(message.chat, "is_forum", False):
+		return 1
+	return message.message_thread_id or 1
+
+
+# How long a question the bot asked can be answered by writing: /exec's
+# command, a setting, a port, a step of /schedule. The answer carries only who
+# wrote it, so the question also remembers the chat it was asked in. Without
+# either, any loose message from the admin, days later and in another chat,
+# was taken as the answer: posted to the group as a command to confirm, or
+# saved as a host's alias.
+PENDING_ANSWER_SECONDS = 15 * 60
+
+def asked_here(value):
+	"""A pending question's state, stamped with where and when it was asked."""
+	value = dict(value)
+	value["asked_in"] = str(get_reply_chat_id())
+	value["asked_at"] = time.time()
+	return value
+
+def answerable(state, chat_id):
+	"""The pending state if a message in `chat_id` now can answer it, else None."""
+	if not isinstance(state, dict):
+		return None
+	asked_at = state.get("asked_at")
+	if not isinstance(asked_at, (int, float)) or time.time() - asked_at > PENDING_ANSWER_SECONDS:
+		return None
+	if str(state.get("asked_in")) != str(chat_id):
+		return None
+	return state
 
 def with_reply_context(handler):
 	"""Binds the reply context for the whole lifetime of a Telegram handler"""
@@ -372,7 +420,11 @@ class DockerManager:
 	def show_logs(self, container_id, container_name):
 		try:
 			container = self.client.containers.get(container_id)
-			logs = container.logs().decode("utf-8")
+			# Only the end, which is all the message shows. Without a tail the
+			# daemon sent the whole history, gigabytes of it under json-file,
+			# which never rotates unless told to. And whatever bytes it holds: a
+			# single one that was not UTF-8 failed every /logs of that container.
+			logs = container.logs(tail=LOGS_TAIL_LINES).decode("utf-8", errors="replace")
 			# Escaped because the message is parsed as HTML and this is whatever
 			# the process inside the container decided to print: a single "<"
 			# in its output would have Telegram reject the whole message, and
@@ -384,12 +436,40 @@ class DockerManager:
 			return get_text("error_showing_logs_container", container_name)
 
 	def show_logs_raw(self, container_id, container_name):
+		"""
+		The container's log as (text, cut), or None when it could not be read.
+
+		Read as a stream keeping only the last LOGFILE_MAX_BYTES: a log of
+		gigabytes read whole, two or three copies of it in memory, took the bot
+		down on a small machine, and Telegram would not have taken more than
+		50 MB of it anyway. None rather than an error text, which was sent as
+		if it were the log.
+		"""
 		try:
 			container = self.client.containers.get(container_id)
-			return container.logs().decode("utf-8")
+			stream = container.logs(stream=True, follow=False)
+			kept = bytearray()
+			cut = False
+			for chunk in ([stream] if isinstance(stream, (bytes, bytearray)) else stream):
+				kept += chunk
+				if len(kept) > 2 * LOGFILE_MAX_BYTES:
+					del kept[:len(kept) - LOGFILE_MAX_BYTES]
+					cut = True
+			if len(kept) > LOGFILE_MAX_BYTES:
+				del kept[:len(kept) - LOGFILE_MAX_BYTES]
+				cut = True
+			text = kept.decode("utf-8", errors="replace")
+			# Every byte that was not UTF-8 grows to three once written out again.
+			if len(text.encode("utf-8")) > LOGFILE_MAX_BYTES:
+				text = text[-(LOGFILE_MAX_BYTES // 3):]
+				cut = True
+			if cut:
+				# From the first whole line.
+				text = text.split("\n", 1)[-1]
+			return text, cut
 		except Exception as e:
 			error(f"The logs for container {container_name} could not be shown. Error: [{e}]")
-			return get_text("error_showing_logs_container", container_name)
+			return None
 
 	def get_docker_compose(self, container_id, container_name):
 		try:
@@ -397,7 +477,9 @@ class DockerManager:
 			return generate_docker_compose(container)
 		except Exception as e:
 			error(f"Could not show docker compose for container {container_name}. Error: [{e}]")
-			return get_text("error_showing_compose_container", container_name)
+			# None, not the error text: compose() looked for an "Error" prefix
+			# that no translation has, and sent the error as docker-compose.txt.
+			return None
 
 	def get_project_info_formatted(self, project_name):
 		"""
@@ -412,7 +494,7 @@ class DockerManager:
 		try:
 			project_info = self.get_project_info(project_name)
 			if not project_info:
-				return get_text("error_project_not_found", project_name)
+				return get_text("error_project_not_found", html.escape(str(project_name)))
 
 			# Basic information. Everything below comes from Compose labels on
 			# the containers, so it is escaped: the message is parsed as HTML
@@ -476,7 +558,7 @@ class DockerManager:
 
 		except Exception as e:
 			error(f"Could not display information for project {project_name}. Error: [{e}]")
-			return get_text("error_showing_info_project", project_name)
+			return get_text("error_showing_info_project", html.escape(str(project_name)))
 
 	def get_info(self, container_id, container_name):
 		"""
@@ -547,7 +629,11 @@ class DockerManager:
 					get_text_func=get_text,
 					save_status_func=lambda image, name, has_update: save_container_update_status(image, name, has_update, self.host_id),
 					container_id_length=CONTAINER_ID_LENGTH,
-					telegram_group=message.chat.id if message else get_reply_chat_id()
+					telegram_group=message.chat.id if message else get_reply_chat_id(),
+					# Where the progress went: an auto-update reports to the
+					# notification channel, a button to the chat it was pressed in.
+					notify_func=lambda text: send_message(
+						chat_id=message.chat.id if message else None, message=f'{host_label(self.host_id)}{text}'),
 				)
 				return result
 		except Exception as e:
@@ -585,6 +671,7 @@ class DockerManager:
 				container_id_length=CONTAINER_ID_LENGTH,
 				telegram_group=TELEGRAM_GROUP,
 				skip_pull=True,
+				notify_func=lambda text: send_message(message=f'{host_label(self.host_id)}{text}'),
 			)
 			return result
 		except Exception as e:
@@ -645,7 +732,8 @@ class DockerManager:
 				delete_message(loading_msg.message_id)
 				loading_msg = None
 
-			if local_image_normalized != remote_image_normalized:
+			if local_image_normalized != remote_image_normalized \
+					and not same_running_manifest(self.client, container, local_image, remote_image):
 				# Keep the pulled image cached locally so the subsequent update
 				# operation does not need to re-download it.
 				debug(f"{container.name} update detected! Keeping downloaded image [{remote_image_normalized[:CONTAINER_ID_LENGTH]}] for upcoming update")
@@ -746,6 +834,12 @@ class DockerManager:
 			return get_text(error_key), None
 
 	def execute_command(self, container_id, container_name, command):
+		"""
+		The command's output, or None when it could not be run.
+
+		None rather than an error text: returned the same way as the output,
+		the error was shown as if it were what the command had printed.
+		"""
 		try:
 			container = self.client.containers.get(container_id)
 			# Some minimal/distroless images do not ship a shell.
@@ -755,7 +849,7 @@ class DockerManager:
 					result = container.exec_run(exec_command)
 				except docker.errors.APIError:
 					continue
-				if not self._is_executable_missing(result):
+				if not self._is_executable_missing(result, exec_command[0]):
 					return self._decode_exec_output(result)
 			# No shell available: execute the command tokens directly.
 			try:
@@ -766,21 +860,33 @@ class DockerManager:
 			return self._decode_exec_output(result)
 		except Exception as e:
 			error(f"Error executing command [{command}] in container {container_name}. Error: [{e}]")
-			return get_text("error_executing_command_container", html.escape(command), container_name)
+			return None
 
 	def _decode_exec_output(self, result):
-		output = result.output.decode('utf-8') if result.output else ''
+		# Whatever the command printed: a byte that is not UTF-8 —a file name
+		# in Latin-1, a binary— made a command that had run read as one that
+		# could not be.
+		output = result.output.decode('utf-8', errors='replace') if result.output else ''
 		if not output:
 			output = get_text("command_executed_without_output")
 		return output
 
-	def _is_executable_missing(self, result):
-		output = (result.output or b'').decode('utf-8', errors='replace')
-		if "OCI runtime exec failed" in output or "unable to start container process" in output:
-			return True
-		if result.exit_code in (126, 127) and ("executable file not found" in output or "no such file or directory" in output):
-			return True
-		return False
+	def _is_executable_missing(self, result, executable):
+		"""
+		Whether the daemon could not start `executable` at all.
+
+		Only the daemon's own refusal counts, naming that executable. Finding
+		the words anywhere in the output took a command that ran and printed
+		them —a deploy script reporting a service that would not start— for a
+		missing shell, and ran it twice more, under bash and then directly.
+		"""
+		if result.exit_code not in (None, 126, 127):
+			return False
+		output = (result.output or b'').decode('utf-8', errors='replace').strip()
+		named = f'"{executable}"' in output or f'`{executable}`' in output
+		if output.startswith("OCI runtime exec failed"):
+			return named
+		return named and ("executable file not found" in output or "no such file or directory" in output.lower())
 
 # Instantiate the DockerManager
 # Managers are cached per host: each one holds a connection, so rebuilding it
@@ -849,7 +955,7 @@ def disconnect_host(host_id):
 	machine failing made every other one reconnect — and reconnecting to an ssh
 	host is neither instant nor free. Closing the client empties its pool, so
 	nothing reuses a connection that went bad; a request already waiting on one
-	is bounded by its own timeout, and over ssh by ssh's keepalive.
+	is bounded by its own timeout, over ssh too.
 	"""
 	host_registry.drop(host_id)
 	forget_manager(host_id)
@@ -1955,10 +2061,19 @@ class DockerUpdateMonitor:
 			# only in the inspect (ImageManifestDescriptor), so it is fetched
 			# here, after the containers skipped above that the list could
 			# answer for.
-			if getattr(container, "listed", False):
-				container.reload()
-			container_attrs = container.attrs['Config']
-			image_with_tag = container_attrs['Image']
+			#
+			# A container gone since the listing —removed, or recreated under a
+			# new id, which an auto-update earlier in this same pass does to the
+			# services sharing its network— is skipped. Failing here, outside
+			# the try below, threw away every update already found on the host,
+			# and those were saved as announced without ever being announced.
+			try:
+				if getattr(container, "listed", False):
+					container.reload()
+				image_with_tag = container.attrs['Config']['Image']
+			except docker.errors.NotFound:
+				debug(f"Update check: {container.name} is gone since it was listed, skipped")
+				continue
 			versions = None
 			try:
 				local_image = container.image.id
@@ -1974,7 +2089,7 @@ class DockerUpdateMonitor:
 				if isinstance(remote_image, Exception):
 					raise remote_image
 				debug(f"Checking update: {container.name} ({image_with_tag}): LOCAL IMAGE [{local_image.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}] - REMOTE IMAGE [{remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}]")
-				if local_image != remote_image.id:
+				if local_image != remote_image.id and not same_running_manifest(owner.client, container, local_image, remote_image):
 					if label_enabled(labels, LABEL_AUTO_UPDATE) and is_own_container(host_id, container.id, container.name):
 						# Updating the bot recreates it, which would end this
 						# pass halfway, with the hosts after this one unchecked.
@@ -2162,12 +2277,29 @@ class DockerScheduleMonitor:
 				count_usage(f"sched_{action}")
 
 			# Helper function to handle errors consistently
-			def handle_error(error_msg):
+			def handle_error(error_msg, notice="error_schedule_disabled"):
 				error(error_msg)
 				# Disable the schedule instead of deleting it
 				if schedule_name:
 					self.schedule_manager.update_schedule(schedule_name, enabled=False)
-					send_message(message=get_text("error_schedule_disabled", html.escape(schedule_name)))
+					send_message(message=get_text(notice, html.escape(schedule_name)))
+				return False
+
+			# A removed host is not coming back, unlike a paused or unreachable
+			# one, so the task is disabled rather than skipped. A prune used to
+			# reach manager() and be skipped as a host not answering, on every
+			# firing and naming the bare id; a container task was disabled, but
+			# with a notice that only said it had failed.
+			if schedule_host_missing(schedule):
+				return handle_error(f"Host {schedule_host} of schedule {schedule_name or action} no longer exists",
+					notice="schedule_disabled_host_missing")
+			# With settings.json unreadable the host list is the defaults, and
+			# the local host an id made up in memory, so every task's host looks
+			# gone. That is what schedule_host_missing answers then, so that
+			# nothing is switched off for it; the task waits here instead.
+			if (action.lower() in HOST_SCOPED_SCHEDULE_ACTIONS and store.settings_unreadable()
+					and host_registry.host(schedule_host) is None):
+				warning(f"Schedule {schedule_name or action} skipped: settings.json is unreadable")
 				return False
 
 			# Execute action based on type
@@ -2194,7 +2326,7 @@ class DockerScheduleMonitor:
 					minutes = int(minutes)
 					if minutes <= 0:
 						return handle_error(f"Invalid minutes value: {minutes}")
-					mute(minutes)
+					mute(minutes, extend_only=True)
 				except (ValueError, TypeError):
 					return handle_error(f"Invalid minutes value: {minutes}")
 
@@ -2202,7 +2334,9 @@ class DockerScheduleMonitor:
 				containerId = schedule_container_ref(schedule_host, container)
 				if not containerId:
 					return handle_error(f"Container {container} not found for action {action}")
-				execute_command(containerId, container, command, show_output)
+				# Not waited for: a long or endless command would hold up every
+				# task after it. Its output, if asked for, arrives when it ends.
+				execute_command(containerId, container, command, show_output, wait=False)
 
 			elif action == "prune":
 				if prune_type not in SCHEDULED_PRUNE_LABELS:
@@ -2296,8 +2430,14 @@ class DockerScheduleMonitor:
 		"""The minutes to evaluate now, oldest first, and marks them as done."""
 		current = now.replace(second=0, microsecond=0)
 		last = self._last_minute
-		if last is None or current - last > timedelta(minutes=self.MAX_CATCH_UP_MINUTES) \
-				or last - current > timedelta(hours=2):
+		# The gap in real time, which a change of the clock's hour does not
+		# move. In spring the wall clock goes from 01:59 to 03:00 in a minute:
+		# taken for an hour the bot was not running, the tasks of 02:xx were
+		# skipped that day. That is a gap of a minute, and those minutes are
+		# replayed —each task once, like any catch-up— as cron does.
+		long_gap = last is not None and current - last > timedelta(minutes=self.MAX_CATCH_UP_MINUTES) \
+			and current.timestamp() - last.timestamp() > self.MAX_CATCH_UP_MINUTES * 60
+		if last is None or long_gap or last - current > timedelta(hours=2):
 			# First lap, a gap too long to replay, or the clock set well back:
 			# start over from here.
 			if last is not None and current > last:
@@ -2403,15 +2543,27 @@ class DockerScheduleMonitor:
 # SCHEDULE INTERACTIVE FLOW FUNCTIONS
 # ============================================================================
 
+def schedule_button_value(schedule):
+	"""What a list button carries to name a task: its id, never its place."""
+	return f"i{schedule.get('id')}"
+
 def _validate_schedule_index(index_str: str, schedules: list) -> int:
-	"""Validate and return schedule index, or -1 if invalid"""
-	try:
-		idx = int(index_str)
-		if 1 <= idx <= len(schedules):
-			return idx - 1  # Convert to 0-based index
+	"""
+	Where in `schedules` the task a list button names is, or -1.
+
+	Found by the task's id. The button used to carry the place the task had
+	when the list was drawn, which named another task once the list changed
+	underneath —one deleted from a newer list, by another admin, a double
+	tap— and deleted that one, with no confirmation. A button from before
+	carries only that place, so it is refused rather than guessed.
+	"""
+	value = str(index_str or "")
+	if not (value.startswith("i") and value[1:].isdigit()):
 		return -1
-	except (ValueError, TypeError):
-		return -1
+	for idx, sched in enumerate(schedules):
+		if str(sched.get("id")) == value[1:]:
+			return idx
+	return -1
 
 def _build_schedule_summary(state: dict) -> str:
 	"""Build a consistent schedule summary message from state dict"""
@@ -2460,6 +2612,41 @@ def _get_available_containers() -> list:
 			if not is_own_container(entry["id"], container.id, container.name):
 				available.append((entry, container))
 	return available
+
+def schedule_host_missing(schedule):
+	"""
+	Whether a task acts on a host the bot no longer has.
+
+	Only a removed one: a paused or unreachable host is still registered and
+	comes back. Re-adding the machine from /settings does not help either,
+	since it comes in under a new id, so the task has to be moved to a host
+	that exists. Only a host declared by hand in settings.json with the same id
+	would match again.
+
+	Never while settings.json cannot be read: the host list is then only the
+	defaults, every task's host looks gone, and answering yes switched off
+	every task, which stayed off once the file was fixed.
+	"""
+	if (schedule.get("action") or "").lower() not in HOST_SCOPED_SCHEDULE_ACTIONS:
+		return False
+	if store.settings_unreadable():
+		return False
+	return host_registry.host(schedule.get("host") or host_registry.local_host_id()) is None
+
+
+def schedule_host_value(schedule):
+	"""
+	What a task's details say for its host, or None to leave the line out.
+
+	A missing host is said even with a single host left, which is exactly when
+	the line would otherwise be hidden and the task would look runnable.
+	"""
+	if schedule_host_missing(schedule):
+		return get_text("schedule_host_missing")
+	if host_registry.is_single_host() or schedule.get("action") not in HOST_SCOPED_SCHEDULE_ACTIONS:
+		return None
+	return host_alias(schedule.get("host") or host_registry.local_host_id())
+
 
 def show_schedule_menu(user_id: int, chat_id: int):
 	"""Show the main schedule menu - Optimized with caching and efficient string building"""
@@ -2517,9 +2704,9 @@ def show_schedule_menu(user_id: int, chat_id: int):
 			# summary puts it — after what it acts on, before show_output — so
 			# both read the same way round.
 			host_line = None
-			if not host_registry.is_single_host() and action in HOST_SCOPED_SCHEDULE_ACTIONS:
-				task_host = sched.get("host") or host_registry.local_host_id()
-				host_line = f"  {get_text('schedule_label_host')}: <b>{host_alias(task_host)}</b>"
+			host_value = schedule_host_value(sched)
+			if host_value:
+				host_line = f"  {get_text('schedule_label_host')}: <b>{host_value}</b>"
 
 			# Add action-specific details
 			if action == 'mute':
@@ -2557,7 +2744,9 @@ def show_schedule_menu(user_id: int, chat_id: int):
 		InlineKeyboardButton(get_text("button_close"), callback_data="cerrar")
 	)
 
-	send_message(message=message_text, reply_markup=markup)
+	# Split like any long listing: past 4096 characters, about twenty tasks,
+	# Telegram refused the menu and, with it, the only way to manage them.
+	send_split_message(message_text, reply_markup=markup)
 
 def show_schedule_delete_list(user_id: int, chat_id: int):
 	"""Show list of schedules to delete - Optimized"""
@@ -2569,16 +2758,16 @@ def show_schedule_delete_list(user_id: int, chat_id: int):
 
 	# Build message efficiently
 	header = get_text("schedule_select_to_delete")
-	schedule_lines = [f"{idx}. <code>{sched['name']}</code>" for idx, sched in enumerate(schedules, 1)]
+	schedule_lines = [f"{idx}. <code>{html.escape(str(sched['name']))}</code>" for idx, sched in enumerate(schedules, 1)]
 	message_text = f"{header}\n\n" + "\n".join(schedule_lines)
 
 	markup = InlineKeyboardMarkup(row_width=5)
-	buttons = [InlineKeyboardButton(str(idx), callback_data=f"scheduleSelectDelete|{idx}")
-	           for idx in range(1, len(schedules) + 1)]
+	buttons = [InlineKeyboardButton(str(idx), callback_data=f"scheduleSelectDelete|{schedule_button_value(sched)}")
+	           for idx, sched in enumerate(schedules, 1)]
 	markup.add(*buttons)
 	markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
 
-	send_message(message=message_text, reply_markup=markup)
+	send_split_message(message_text, reply_markup=markup)
 
 def show_schedule_edit_list(user_id: int, chat_id: int):
 	"""Show list of schedules to edit - Optimized"""
@@ -2590,16 +2779,16 @@ def show_schedule_edit_list(user_id: int, chat_id: int):
 
 	# Build message efficiently
 	header = get_text("schedule_select_to_edit")
-	schedule_lines = [f"{idx}. <code>{sched['name']}</code>" for idx, sched in enumerate(schedules, 1)]
+	schedule_lines = [f"{idx}. <code>{html.escape(str(sched['name']))}</code>" for idx, sched in enumerate(schedules, 1)]
 	message_text = f"{header}\n\n" + "\n".join(schedule_lines)
 
 	markup = InlineKeyboardMarkup(row_width=5)
-	buttons = [InlineKeyboardButton(str(idx), callback_data=f"scheduleSelectEdit|{idx}")
-	           for idx in range(1, len(schedules) + 1)]
+	buttons = [InlineKeyboardButton(str(idx), callback_data=f"scheduleSelectEdit|{schedule_button_value(sched)}")
+	           for idx, sched in enumerate(schedules, 1)]
 	markup.add(*buttons)
 	markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
 
-	send_message(message=message_text, reply_markup=markup)
+	send_split_message(message_text, reply_markup=markup)
 
 def show_schedule_edit_options(user_id: int, schedule_name: str):
 	"""Show options to edit a schedule"""
@@ -2624,13 +2813,14 @@ def show_schedule_edit_options(user_id: int, schedule_name: str):
 	message_text += f"<b>{get_text('schedule_label_status')}:</b> {status_icon} {status_text}\n"
 	message_text += f"<b>{get_text('schedule_label_cron')}:</b> <code>{cron}</code>\n"
 	message_text += f"<b>{get_text('schedule_label_action')}:</b> <b>{action}</b>\n"
-	# Which machine the task runs on, same rule and same position as the other
-	# two renderers: only with more than one host, only for actions that act on
-	# Docker, and after what the task acts on.
+	# Which machine the task runs on, in the same position as the listing and
+	# the creation summary: after what the task acts on. Same rule as the
+	# listing, from schedule_host_value: only for actions that act on Docker,
+	# with more than one host or when the task's host no longer exists.
 	host_line = ""
-	if not host_registry.is_single_host() and action in HOST_SCOPED_SCHEDULE_ACTIONS:
-		task_host = schedule.get("host") or host_registry.local_host_id()
-		host_line = f"<b>{get_text('schedule_label_host')}:</b> <b>{host_alias(task_host)}</b>\n"
+	host_value = schedule_host_value(schedule)
+	if host_value:
+		host_line = f"<b>{get_text('schedule_label_host')}:</b> <b>{host_value}</b>\n"
 
 	if action == 'mute':
 		message_text += f"<b>{get_text('schedule_label_minutes')}:</b> <b>{minutes}</b>\n"
@@ -2666,6 +2856,12 @@ def show_schedule_edit_options(user_id: int, schedule_name: str):
 
 	if action == 'prune':
 		markup.add(InlineKeyboardButton(get_text("schedule_edit_prune_type"), callback_data=f"scheduleEditField|prune_type|{schedule_id}"))
+		# A container task moves host with "Container", since the name only
+		# means something on one machine. A prune names none, so its host is
+		# its own field: with one host left there is nowhere to move it,
+		# unless the one it points at is gone.
+		if not host_registry.is_single_host() or schedule_host_missing(schedule):
+			markup.add(InlineKeyboardButton(get_text("schedule_edit_host"), callback_data=f"scheduleEditField|host|{schedule_id}"))
 
 	if action in ('exec', 'prune'):
 		markup.add(InlineKeyboardButton(get_text("schedule_edit_show_output"), callback_data=f"scheduleEditField|show_output|{schedule_id}"))
@@ -2674,7 +2870,7 @@ def show_schedule_edit_options(user_id: int, schedule_name: str):
 	status_button_text = get_text("schedule_button_disable") if enabled else get_text("schedule_button_enable")
 	markup.add(InlineKeyboardButton(status_button_text, callback_data=f"scheduleEditStatus|{schedule_id}"))
 
-	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
 
 	send_message(message=message_text, reply_markup=markup)
 
@@ -2682,9 +2878,54 @@ def ask_schedule_name(user_id: int):
 	"""Ask user for schedule name"""
 	state = init_add_schedule_state()
 	message_text = typed_prompt("schedule_ask_name")
-	msg = send_message(message=message_text, reply_markup=create_simple_keyboard("button_cancel"))
+	msg = send_message(message=message_text, reply_markup=create_simple_keyboard("button_cancel", "scheduleCancel"))
 	state["last_message_id"] = msg.message_id if msg else None
 	save_schedule_state(user_id, state)
+
+def note_schedule_containers(state, available_containers, choose):
+	"""
+	Notes in a schedule's state the containers it can be pointed at.
+
+	The choice travels as an index, with the name and the host kept in the
+	state: a reference plus a name would not fit in 64 bytes of callback_data
+	for every container someone might have. `choose` is what the buttons
+	carry before that index.
+	"""
+	for idx, (entry, container) in enumerate(available_containers):
+		state[f"container_{idx}"] = container.name
+		state[f"container_host_{idx}"] = entry["id"]
+	state["container_count"] = len(available_containers)
+	state["container_choice"] = choose
+	state["container_page"] = 0
+
+
+def schedule_container_markup(state):
+	"""
+	The keyboard to pick a schedule's container from those noted in `state`.
+
+	A page at a time, like the other pickers: a button for every container
+	on every host went past the hundred Telegram accepts on a big enough
+	fleet, and the question never arrived, leaving the schedule half made.
+	"""
+	indexes = list(range(state.get("container_count") or 0))
+	page, pages = update_keyboard_page(indexes, state.get("container_page"))
+	single = host_registry.is_single_host()
+	markup = InlineKeyboardMarkup(row_width=2)
+	for idx in indexes[page * UPDATE_KEYBOARD_PAGE_SIZE:(page + 1) * UPDATE_KEYBOARD_PAGE_SIZE]:
+		name = state.get(f"container_{idx}")
+		label = name if single else f'{name} · {host_registry.alias(state.get(f"container_host_{idx}"))}'
+		markup.add(InlineKeyboardButton(label, callback_data=f'{state.get("container_choice")}|{idx}'))
+	if pages > 1:
+		navigation = []
+		if page > 0:
+			navigation.append(InlineKeyboardButton("◀️", callback_data=f"scheduleContainerPage|{page - 1}"))
+		navigation.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data=f"scheduleContainerPage|{page}"))
+		if page < pages - 1:
+			navigation.append(InlineKeyboardButton("▶️", callback_data=f"scheduleContainerPage|{page + 1}"))
+		markup.row(*navigation)
+	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
+	return markup
+
 
 def show_schedule_container_selection(user_id: int, action: str):
 	"""Show container selection for schedule"""
@@ -2710,18 +2951,8 @@ def show_schedule_container_selection(user_id: int, action: str):
 		message_text = _build_schedule_summary(schedule_state)
 		message_text += f"\n\n{get_text('schedule_ask_container')}"
 
-		markup = InlineKeyboardMarkup(row_width=2)
-		# The choice travels as an index, with the name and the host kept in the
-		# state: a reference plus a name would not fit in 64 bytes of
-		# callback_data for every container someone might have.
-		for idx, (entry, container) in enumerate(available_containers):
-			label = container.name
-			if not host_registry.is_single_host():
-				label = f'{container.name} · {entry.get("alias", entry["id"])}'
-			markup.add(InlineKeyboardButton(label, callback_data=f"scheduleSelectContainer|{idx}"))
-			schedule_state[f"container_{idx}"] = container.name
-			schedule_state[f"container_host_{idx}"] = entry["id"]
-		markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+		note_schedule_containers(schedule_state, available_containers, "scheduleSelectContainer")
+		markup = schedule_container_markup(schedule_state)
 		msg = send_message(message=message_text, reply_markup=markup)
 		schedule_state["last_message_id"] = msg.message_id if msg else None
 		save_schedule_state(user_id, schedule_state)
@@ -2743,7 +2974,7 @@ def ask_schedule_prune_show_output(user_id: int, state: dict):
 		InlineKeyboardButton(get_text("button_yes"), callback_data="scheduleSelectPruneShowOutput|yes"),
 		InlineKeyboardButton(get_text("button_no"), callback_data="scheduleSelectPruneShowOutput|no")
 	)
-	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
 
 	msg = send_message(message=message_text, reply_markup=markup)
 	state["last_message_id"] = msg.message_id if msg else None
@@ -2778,7 +3009,7 @@ def ask_schedule_prune_host(user_id: int, state: dict):
 		markup.add(InlineKeyboardButton(
 			f'🖥️ {entry.get("alias", entry["id"])}',
 			callback_data=f'scheduleSelectHost|{entry["id"]}'))
-	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
 
 	msg = send_message(message=message_text, reply_markup=markup)
 	state["last_message_id"] = msg.message_id if msg else None
@@ -2803,7 +3034,7 @@ def ask_schedule_prune_type(user_id: int, state: dict):
 							callback_data=f"scheduleSelectPruneType|{kind}")
 		for kind in ("containers", "images", "networks", "volumes")
 	])
-	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
 
 	msg = send_message(message=message_text, reply_markup=markup)
 	state["last_message_id"] = msg.message_id if msg else None
@@ -2835,15 +3066,30 @@ def confirm_schedule_creation(user_id: int, state: dict):
 	markup = InlineKeyboardMarkup(row_width=2)
 	markup.add(
 		InlineKeyboardButton(get_text("button_confirm"), callback_data="scheduleConfirm"),
-		InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar")
+		InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel")
 	)
 
 	send_message(message=message_text, reply_markup=markup)
+
+# What a schedule question accepts as a written answer. The container is not
+# here: it is picked from a list, since its host goes with it.
+SCHEDULE_TEXT_FIELDS = frozenset({"name", "cron", "command", "minutes"})
+SCHEDULE_TEXT_STEPS = frozenset({"ask_name", "ask_cron", "ask_minutes", "ask_command"})
 
 def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: int = None, user_message_id: int = None):
 	"""Handle the schedule creation flow and editing"""
 	step = state.get("step")
 	chatId = chat_id  # Make chatId available in the function
+
+	# Only some questions are answered by writing; the rest are buttons. Text
+	# that arrives while one of those is open was not meant for the bot, so it
+	# is left alone: deleting it, as before, swallowed every message the admin
+	# wrote until the question was answered.
+	if state.get("field"):
+		if state.get("field") not in SCHEDULE_TEXT_FIELDS:
+			return
+	elif step not in SCHEDULE_TEXT_STEPS:
+		return
 
 	# Delete user message after processing
 	if user_message_id and chat_id:
@@ -2880,7 +3126,7 @@ def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: in
 				message_text += f"{typed_prompt('schedule_ask_name')}\n"
 				message_text += f"<i>{get_text('current_value')}: {html.escape(schedule_name)}</i>"
 				markup = InlineKeyboardMarkup(row_width=1)
-				markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+				markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
 				msg = send_message(message=message_text, reply_markup=markup)
 				state["last_message_id"] = msg.message_id if msg else None
 				save_schedule_state(user_id, state)
@@ -2908,18 +3154,12 @@ def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: in
 				message_text += f"{typed_prompt('schedule_ask_cron')}\n"
 				message_text += f"<i>{get_text('current_value')}: {current_cron}</i>"
 				markup = InlineKeyboardMarkup(row_width=1)
-				markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+				markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
 				msg = send_message(message=message_text, reply_markup=markup)
 				state["last_message_id"] = msg.message_id if msg else None
 				save_schedule_state(user_id, state)
 				return
 			schedule_manager.update_schedule(schedule_name, cron=user_input)
-			send_message(message=get_text("schedule_updated_success", html.escape(schedule_name)))
-			clear_schedule_state(user_id)
-			show_schedule_menu(user_id, chatId)
-			return
-		elif field == "container":
-			schedule_manager.update_schedule(schedule_name, container=user_input)
 			send_message(message=get_text("schedule_updated_success", html.escape(schedule_name)))
 			clear_schedule_state(user_id)
 			show_schedule_menu(user_id, chatId)
@@ -2950,7 +3190,7 @@ def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: in
 					message_text += f"{typed_prompt('schedule_ask_minutes')}\n"
 					message_text += f"<i>{get_text('current_value')}: {current_minutes}</i>"
 					markup = InlineKeyboardMarkup(row_width=1)
-					markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+					markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
 					msg = send_message(message=message_text, reply_markup=markup)
 					state["last_message_id"] = msg.message_id if msg else None
 					save_schedule_state(user_id, state)
@@ -2971,7 +3211,7 @@ def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: in
 				message_text += f"{typed_prompt('schedule_ask_minutes')}\n"
 				message_text += f"<i>{get_text('current_value')}: {current_minutes}</i>"
 				markup = InlineKeyboardMarkup(row_width=1)
-				markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+				markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
 				msg = send_message(message=message_text, reply_markup=markup)
 				state["last_message_id"] = msg.message_id if msg else None
 				save_schedule_state(user_id, state)
@@ -2997,7 +3237,7 @@ def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: in
 			message_text += typed_prompt("schedule_ask_name")
 
 			markup = InlineKeyboardMarkup(row_width=1)
-			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
 			msg = send_message(message=message_text, reply_markup=markup)
 			state["last_message_id"] = msg.message_id if msg else None
 			save_schedule_state(user_id, state)
@@ -3018,7 +3258,7 @@ def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: in
 		message_text += typed_prompt("schedule_ask_cron")
 
 		markup = InlineKeyboardMarkup(row_width=1)
-		markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+		markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
 		msg = send_message(message=message_text, reply_markup=markup)
 		state["last_message_id"] = msg.message_id if msg else None
 		save_schedule_state(user_id, state)
@@ -3041,7 +3281,7 @@ def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: in
 			message_text += typed_prompt("schedule_ask_cron")
 
 			markup = InlineKeyboardMarkup(row_width=1)
-			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
 			msg = send_message(message=message_text, reply_markup=markup)
 			state["last_message_id"] = msg.message_id if msg else None
 			save_schedule_state(user_id, state)
@@ -3075,7 +3315,7 @@ def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: in
 			InlineKeyboardButton(action, callback_data=f"scheduleSelectAction|{action}")
 			for action in SCHEDULE_ACTIONS
 		])
-		markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+		markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
 		msg = send_message(message=message_text, reply_markup=markup)
 		state["last_message_id"] = msg.message_id if msg else None
 		save_schedule_state(user_id, state)
@@ -3099,7 +3339,7 @@ def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: in
 				message_text += f"\n\n{typed_prompt('schedule_ask_minutes')}"
 
 				markup = InlineKeyboardMarkup(row_width=1)
-				markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+				markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
 				msg = send_message(message=message_text, reply_markup=markup)
 				state["last_message_id"] = msg.message_id if msg else None
 				save_schedule_state(user_id, state)
@@ -3119,7 +3359,7 @@ def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: in
 			message_text += f"\n\n{typed_prompt('schedule_ask_minutes')}"
 
 			markup = InlineKeyboardMarkup(row_width=1)
-			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
 			msg = send_message(message=message_text, reply_markup=markup)
 			state["last_message_id"] = msg.message_id if msg else None
 			save_schedule_state(user_id, state)
@@ -3241,7 +3481,7 @@ def collect_telemetry_metrics():
 		"hosts_ssh": schemes.count("ssh"),
 		"hosts_tcp": schemes.count("tcp"),
 		"schedules": sum(1 for schedule in schedule_manager.get_all_schedules() if schedule.get("enabled", True)),
-		"admins": len([admin for admin in str(TELEGRAM_ADMIN).split(",") if admin.strip()]),
+		"admins": len(ADMIN_IDS),
 		# The environment and not the global: that one falls back to the admin
 		# when there is no group, which would make everyone look like a group.
 		"telegram_group": bool(os.environ.get("TELEGRAM_GROUP")),
@@ -3568,9 +3808,11 @@ def disable_schedules(schedules):
 	Turns off the given schedules, and returns the names it turned off.
 
 	Disabled rather than deleted, which is what the executor already does with
-	a task it cannot run: re-adding the host and switching them back on is a
-	couple of taps, while a deleted cron expression is gone for good. Left
-	enabled they would raise HostUnavailable on every firing.
+	a task it cannot run: moving it to another host and switching it back on is
+	a couple of taps, while a deleted cron expression is gone for good. Re-adding
+	the machine from /settings is not enough, since it comes in under a new id.
+	Left enabled, each would be switched off by its next firing anyway, with a
+	notice per task at whatever hour its cron comes round.
 
 	Takes the tasks already read rather than a host id, so the caller can look
 	them up while the host still exists.
@@ -3775,11 +4017,11 @@ def ask_text_input(user_id, field, prompt_key, back_to="main"):
 		save_text_input_state(user_id, field, sent.message_id, back_to)
 
 def save_text_input_state(user_id, field, delete_message_id, back_to="main"):
-	_save_cache("pending_text_input", user_id, {
+	_save_cache("pending_text_input", user_id, asked_here({
 		"field": field,
 		"deleteMessage": delete_message_id,
 		"back_to": back_to,
-	})
+	}))
 
 def load_text_input_state(user_id):
 	return _load_cache("pending_text_input", user_id)
@@ -3841,11 +4083,14 @@ def apply_settings_text_value(field, raw):
 		return get_text("settings_updated")
 
 	if field == "notification_channel":
-		# Verify the bot can actually reach the channel before saving it.
-		# Storing an id it cannot post to would send every notification into
-		# the void, with nothing in the interface to explain why.
+		# Verify the bot can actually post there before saving it. Storing an
+		# id it cannot post to would send every notification into the void,
+		# with nothing in the interface to explain why. Reaching the chat was
+		# not enough: a public channel answers to anyone, member or not, and
+		# an administrator without the right to post can see it too. So a
+		# message is posted, which also shows the channel it works.
 		try:
-			bot.get_chat(raw)
+			bot.send_message(raw, get_text("settings_channel_test"))
 		except Exception as e:
 			debug(f"Rejected notification channel {raw}: {e}")
 			send_message(message=get_text("settings_channel_unreachable", html.escape(raw)))
@@ -4130,9 +4375,7 @@ def command_controller(message):
 		return
 
 	messageId = message.id
-	message_thread_id = message.message_thread_id
-	if not message_thread_id:
-		message_thread_id = 1
+	message_thread_id = topic_of(message)
 	debug(f"COMMAND: {comando} | USER: {userId} | CHAT: {message.chat.id} | THREAD: {message_thread_id}")
 
 	# The topic filter only applies to groups: a private chat with the bot has no
@@ -4141,8 +4384,7 @@ def command_controller(message):
 		return
 
 	if not is_admin(userId):
-		warning(f"User {userId} ({message.from_user.username}) tried to use admin command without permission")
-		send_message(chat_id=userId, message=get_text("user_not_admin"))
+		tell_not_admin(userId, message.from_user.username)
 		return
 
 	container_id = None
@@ -4220,8 +4462,14 @@ def button_controller(call):
 		userId = call.from_user.id
 
 		if not is_admin(userId):
-			warning(f"User {userId} ({call.from_user.username}) tried to use admin command without permission")
-			send_message(chat_id=userId, message=get_text("user_not_admin"))
+			tell_not_admin(userId, call.from_user.username)
+			answer_callback_quietly(call.id, text="❌")
+			return
+		# Only where commands are taken too. No message with buttons is sent
+		# anywhere else, but one left behind is enough: in a group TELEGRAM_GROUP
+		# used to be, its buttons still worked, and answered there.
+		if not is_allowed_origin(call.message.chat, userId):
+			debug(f"Button ignored: chat {chatId} is neither an administrator private chat nor TELEGRAM_GROUP")
 			answer_callback_quietly(call.id, text="❌")
 			return
 
@@ -4267,11 +4515,18 @@ def button_controller(call):
 		# a different machine, which is the one mistake here that would be both
 		# silent and destructive.
 		if ctx.containerId and ctx.containerName and not spec.project_arg:
-			current_id = find_container_id_on_host(ctx.hostId, ctx.containerName)
+			current_id, silent = locate_container_on_host(ctx.hostId, ctx.containerName)
 			if current_id:
 				if current_id != ref_id(ctx.containerId):
 					debug(f"Resolved stale id {ctx.containerId} to {current_id} via name {ctx.containerName} on {ctx.hostId}")
 				ctx.containerId = make_ref(ctx.hostId, current_id)
+			elif silent is not None:
+				# The host did not answer, which says nothing about the container.
+				# Saying it did not exist, and deleting the message —the list of
+				# updates, the only way back into them— was wrong on both counts.
+				answer_callback_quietly(call.id)
+				send_message(message=get_text("host_unreachable", host_alias(ctx.hostId), html.escape(silent)))
+				return
 			else:
 				close_multi_action_menu(chatId, messageId)
 				send_message(message=f'{get_text("container_does_not_exist", ctx.containerName)}'
@@ -4322,13 +4577,7 @@ def button_controller(call):
 def handle_text(message):
 	userId = message.from_user.id
 	username = message.from_user.username
-	pending = load_command_request_state(userId)
-	pending_port_check = load_port_check_request_state(userId)
-	pending_input = load_text_input_state(userId)
-	schedule_state = load_schedule_state(userId)
-	message_thread_id = message.message_thread_id
-	if not message_thread_id:
-		message_thread_id = 1
+	message_thread_id = topic_of(message)
 
 	if not is_allowed_origin(message.chat, userId):
 		debug(f"Message ignored: chat {message.chat.id} is neither an administrator private chat nor TELEGRAM_GROUP")
@@ -4339,10 +4588,18 @@ def handle_text(message):
 	if message.chat.type != "private" and message_thread_id != TELEGRAM_THREAD and (not message.reply_to_message or message.reply_to_message.from_user.id != bot_identity().id):
 		return
 
+	# Loose text gets no answer from the bot unless it comes from an
+	# administrator: in the group that is every member's every message, and
+	# from anyone at all in private, each answer queued with the notifications.
 	if not is_admin(userId):
-		warning(f"User {userId} ({username}) tried to use admin command without permission")
-		send_message(chat_id=userId, message=get_text("user_not_admin"))
+		debug(f"Message from {userId} ({username}) ignored: not an administrator")
 		return
+
+	chat_id = message.chat.id
+	pending = answerable(load_command_request_state(userId), chat_id)
+	pending_port_check = answerable(load_port_check_request_state(userId), chat_id)
+	pending_input = answerable(load_text_input_state(userId), chat_id)
+	schedule_state = answerable(load_schedule_state(userId), chat_id)
 
 	if pending:
 		command_text = message.text.strip()
@@ -4445,6 +4702,27 @@ def stop(containerId, containerName, from_schedule=False):
 def restart(containerId, containerName, from_schedule=False):
 	return _execute_container_action('restart', containerId, containerName, from_schedule)
 
+def without_the_bot(host_id, containers):
+	"""
+	A project's containers split into the rest and the bot's own.
+
+	Stopping, restarting or deleting a whole project went through every
+	container in it, the bot included: a restart stopped the bot halfway and
+	never came back to start the services it had already stopped, and a delete
+	removed it. Picked alone, the bot is already refused; in a project it is
+	left out and the admin is told.
+	"""
+	rest, own = [], []
+	for container in containers:
+		(own if is_own_container(host_id, container.id, container.name) else rest).append(container)
+	return rest, own
+
+
+def _tell_bot_skipped(host_id, own):
+	for container in own:
+		send_message(message=f'{get_text("project_bot_skipped", html.escape(container.name))}{host_suffix(host_id)}')
+
+
 def _execute_compose_project_action(action, project_name, show_extended=True, host_id=None):
 	"""
 	Generic function to execute compose project actions (run, stop, restart).
@@ -4470,76 +4748,81 @@ def _execute_compose_project_action(action, project_name, show_extended=True, ho
 		debug(f"Could not read project {project_name}: {e}")
 		project_info = None
 	if not project_info:
-		send_message(message=f'{label}{get_text("error_project_not_found", project_name)}')
+		send_message(message=f'{label}{get_text("error_project_not_found", html.escape(str(project_name)))}')
 		return
 
 	# Get containers sorted by dependencies
 	containers = project_info.containers
 	sorted_containers = owner.compose_manager.sort_containers_by_dependencies(containers)
+	own = []
+	if action in ('restart', 'stop'):
+		sorted_containers, own = without_the_bot(host_id, sorted_containers)
 
 	# Per-action configuration
 	if action == 'restart':
-		progress = send_message(message=f'{label}{get_text("restarting_project", project_name)}')
+		progress = send_message(message=f'{label}{get_text("restarting_project", html.escape(str(project_name)))}')
 		# Stop containers in reverse order
 		for container in reversed(sorted_containers):
 			service_name = container.labels.get('com.docker.compose.service', container.name)
 			if store.get("bot.extended_messages") and show_extended:
-				send_message(message=f'{label}{get_text("stopping_service", service_name)}')
+				send_message(message=f'{label}{get_text("stopping_service", html.escape(str(service_name)))}')
 			try:
 				stop_container(container)
 			except Exception as e:
 				debug(f"Error stopping {service_name}: {e}")
 				if show_extended:
-					send_message(message=f'{get_text("error_stopping_service", service_name)}{host_suffix(host_id)}')
+					send_message(message=f'{get_text("error_stopping_service", html.escape(str(service_name)))}{host_suffix(host_id)}')
 		# Start containers in the correct order
 		for container in sorted_containers:
 			service_name = container.labels.get('com.docker.compose.service', container.name)
 			if store.get("bot.extended_messages") and show_extended:
-				send_message(message=f'{label}{get_text("starting_service", service_name)}')
+				send_message(message=f'{label}{get_text("starting_service", html.escape(str(service_name)))}')
 			try:
 				container.start()
 			except Exception as e:
 				debug(f"Error starting {service_name}: {e}")
 				if show_extended:
-					send_message(message=f'{get_text("error_starting_service", service_name)}{host_suffix(host_id)}')
+					send_message(message=f'{get_text("error_starting_service", html.escape(str(service_name)))}{host_suffix(host_id)}')
 		# The progress line goes when the work is done, as it does for a single container
 		if progress:
 			delete_message(progress.message_id)
-		send_message(message=f'{get_text("project_restarted_success", project_name)}{host_suffix(host_id)}')
+		send_message(message=f'{get_text("project_restarted_success", html.escape(str(project_name)))}{host_suffix(host_id)}')
+		_tell_bot_skipped(host_id, own)
 
 	elif action == 'run':
-		progress = send_message(message=f'{label}{get_text("starting_project", project_name)}')
+		progress = send_message(message=f'{label}{get_text("starting_project", html.escape(str(project_name)))}')
 		# Start containers in the correct order
 		for container in sorted_containers:
 			service_name = container.labels.get('com.docker.compose.service', container.name)
 			if store.get("bot.extended_messages") and show_extended:
-				send_message(message=f'{label}{get_text("starting_service", service_name)}')
+				send_message(message=f'{label}{get_text("starting_service", html.escape(str(service_name)))}')
 			try:
 				container.start()
 			except Exception as e:
 				debug(f"Error starting {service_name}: {e}")
 				if show_extended:
-					send_message(message=f'{get_text("error_starting_service", service_name)}{host_suffix(host_id)}')
+					send_message(message=f'{get_text("error_starting_service", html.escape(str(service_name)))}{host_suffix(host_id)}')
 		if progress:
 			delete_message(progress.message_id)
-		send_message(message=f'{get_text("project_started_success", project_name)}{host_suffix(host_id)}')
+		send_message(message=f'{get_text("project_started_success", html.escape(str(project_name)))}{host_suffix(host_id)}')
 
 	elif action == 'stop':
-		progress = send_message(message=f'{label}{get_text("stopping_project", project_name)}')
+		progress = send_message(message=f'{label}{get_text("stopping_project", html.escape(str(project_name)))}')
 		# Stop containers in reverse order
 		for container in reversed(sorted_containers):
 			service_name = container.labels.get('com.docker.compose.service', container.name)
 			if store.get("bot.extended_messages") and show_extended:
-				send_message(message=f'{label}{get_text("stopping_service", service_name)}')
+				send_message(message=f'{label}{get_text("stopping_service", html.escape(str(service_name)))}')
 			try:
 				stop_container(container)
 			except Exception as e:
 				debug(f"Error stopping {service_name}: {e}")
 				if show_extended:
-					send_message(message=f'{get_text("error_stopping_service", service_name)}{host_suffix(host_id)}')
+					send_message(message=f'{get_text("error_stopping_service", html.escape(str(service_name)))}{host_suffix(host_id)}')
 		if progress:
 			delete_message(progress.message_id)
-		send_message(message=f'{get_text("project_stopped_success", project_name)}{host_suffix(host_id)}')
+		send_message(message=f'{get_text("project_stopped_success", html.escape(str(project_name)))}{host_suffix(host_id)}')
+		_tell_bot_skipped(host_id, own)
 
 def restart_compose_project(project_name, host_id=None):
 	"""Restarts a complete Docker Compose project respecting dependency order."""
@@ -4635,6 +4918,33 @@ def _compute_namespace_overrides(dep_container, old_parent_id, new_parent_id, st
 	return overrides
 
 
+# Dependents being stopped and started again after an update, which the
+# shutdown waits for as it does for the update itself.
+_dependents_restarting = 0
+_dependents_lock = threading.Lock()
+
+
+def dependents_in_progress():
+	with _dependents_lock:
+		return _dependents_restarting
+
+
+def _counted_as_dependents_work(function):
+	"""Marks a function whose work the shutdown has to wait for."""
+	@functools.wraps(function)
+	def wrapper(*args, **kwargs):
+		global _dependents_restarting
+		with _dependents_lock:
+			_dependents_restarting += 1
+		try:
+			return function(*args, **kwargs)
+		finally:
+			with _dependents_lock:
+				_dependents_restarting -= 1
+	return wrapper
+
+
+@_counted_as_dependents_work
 def restart_dependents_after_update(project_name, updated_service_name, new_parent_container=None, old_parent_id=None, send_fn=None, host_id=None, hold_events=False, running_before=None):
 	"""
 	Restarts only the services that depend (directly or transitively) on the
@@ -4678,7 +4988,7 @@ def restart_dependents_after_update(project_name, updated_service_name, new_pare
 	owner = manager(host_id or host_registry.local_host_id())
 	project_info = owner.get_project_info(project_name)
 	if not project_info:
-		send_fn(get_text("error_project_not_found", project_name))
+		send_fn(get_text("error_project_not_found", html.escape(str(project_name))))
 		return
 
 	# Get only the transitive dependents of the updated service
@@ -4918,9 +5228,12 @@ def perform_container_update(container_id, container_name, tag=None, send_fn=Non
 		send_fn(f"{host_label(host_id)}{result}")
 		return UpdateOutcome(False, result)
 
+	old_started_at = None
+	if container_obj is not None:
+		old_started_at = ((container_obj.attrs or {}).get("State") or {}).get("StartedAt")
 	plan = _UpdatePlan(owner=owner, host_id=host_id, reference=container_id, name=container_name, tag=tag,
 						project=project_name, service=updated_service_name, old_id=old_parent_id,
-						running_before=running_before, old_version=old_version)
+						running_before=running_before, old_version=old_version, old_started_at=old_started_at)
 	if not hold_events:
 		return _perform_container_update(plan, send_fn, False)
 	# The old container is renamed before the new one exists, and a rollback
@@ -4969,6 +5282,9 @@ class _UpdatePlan:
 	old_id: Optional[str]
 	running_before: Optional[set]
 	old_version: Optional[str]
+	# When the container last started, to tell afterwards whether the update
+	# ever stopped it.
+	old_started_at: Optional[str] = None
 
 
 def _perform_container_update(plan, send_fn, hold_events):
@@ -5013,8 +5329,12 @@ def _perform_container_update(plan, send_fn, hold_events):
 	else:
 		send_fn(f"{label}{result}")
 
-	# Restart dependents if applicable.
-	if plan.project and plan.service:
+	# Restart dependents if applicable: only when the update got as far as
+	# stopping the container they hang on. A refused one —the same container
+	# already being updated, a double tap— or one whose pull failed left it
+	# running as it was, and restarting them anyway recreated them against
+	# the old container in the middle of another update.
+	if plan.project and plan.service and (ok or not _parent_untouched(plan, new_parent_container)):
 		restart_dependents_after_update(
 			plan.project,
 			plan.service,
@@ -5030,6 +5350,15 @@ def _perform_container_update(plan, send_fn, hold_events):
 	return outcome
 
 
+def _parent_untouched(plan, new_parent_container):
+	"""Whether a failed update left the container exactly as it was: never stopped."""
+	if new_parent_container is None or new_parent_container.id != plan.old_id or not plan.old_started_at:
+		return False
+	state = (new_parent_container.attrs or {}).get("State") or {}
+	return state.get("StartedAt") == plan.old_started_at and state.get("Running", True)
+
+
+@_counted_as_dependents_work
 def _recreate_namespace_sharers(owner, old_parent_id, new_parent_container, send_fn, hold_events, running_before=None):
 	"""
 	Recreates whatever still shares a namespace with the container just replaced.
@@ -5225,7 +5554,10 @@ def _update_containers_quietly(targets, tag=None, send=None, up_to_date=(), miss
 			summary += get_text("updated_batch_failed") + "\n" + lines(failed)
 		if current:
 			summary += get_text("updated_batch_up_to_date") + "\n" + lines(current)
-	send(summary)
+	# In pieces when long: a big fleet's batch, a line per container and its
+	# versions, went past 4096 characters and the whole summary was lost.
+	for piece in split_for_telegram(summary):
+		send(piece)
 
 def run_compose_project(project_name, host_id=None):
 	"""Starts a complete Docker Compose project respecting dependency order."""
@@ -5256,29 +5588,30 @@ def delete_compose_project(project_name, host_id=None):
 		debug(f"Could not read project {project_name}: {e}")
 		project_info = None
 	if not project_info:
-		send_message(message=f'{label}{get_text("error_project_not_found", project_name)}')
+		send_message(message=f'{label}{get_text("error_project_not_found", html.escape(str(project_name)))}')
 		return
 
-	# Get the project's containers
-	containers = project_info.containers
+	# Get the project's containers, never the bot's own
+	containers, own = without_the_bot(host_id, project_info.containers)
 	container_count = len(containers)
 
 	# Initial message
-	send_message(message=f'{label}{get_text("deleting_project", project_name, container_count)}')
+	send_message(message=f'{label}{get_text("deleting_project", html.escape(str(project_name)), container_count)}')
 
 	# Delete each container
 	for container in containers:
 		service_name = container.labels.get('com.docker.compose.service', container.name)
 		if store.get("bot.extended_messages"):
-			send_message(message=f'{label}{get_text("deleting_service", service_name)}')
+			send_message(message=f'{label}{get_text("deleting_service", html.escape(str(service_name)))}')
 		try:
 			container.remove(force=True)
 		except Exception as e:
 			debug(f"Error deleting {service_name}: {e}")
-			send_message(message=f'{label}{get_text("error_deleting_service", service_name)}')
+			send_message(message=f'{label}{get_text("error_deleting_service", html.escape(str(service_name)))}')
 
 	# Final message
-	send_message(message=f'{get_text("project_deleted_success", project_name, container_count)}{host_suffix(host_id)}')
+	send_message(message=f'{get_text("project_deleted_success", html.escape(str(project_name)), container_count)}{host_suffix(host_id)}')
+	_tell_bot_skipped(host_id, own)
 
 def logs(containerId, containerName):
 	debug(f"Running command: logs for container {containerName}")
@@ -5289,17 +5622,23 @@ def log_file(containerId, containerName):
 	debug(f"Running command: log_file for container {containerName}")
 	markup = create_simple_keyboard("button_delete")
 	result = manager_for(containerId).show_logs_raw(container_id=ref_id(containerId), container_name=containerName)
-	if isinstance(result, str):
-		fichero_temporal = get_temporal_file(result, f'logs_{containerName}')
-		x = send_message(message=get_text("loading_file"))
-		# The file stays in the chat long after the menu that asked for it, so
-		# its caption is the only thing left saying which machine it came from.
-		send_document(document=fichero_temporal, reply_markup=markup,
-					caption=f'{get_text("logs", containerName)}{host_suffix(ref_host(containerId))}')
-		if x:
-			delete_message(x.message_id)
-	else:
-		send_message(message=result, reply_markup=markup)
+	if result is None:
+		send_message(message=get_text("error_showing_logs_container", containerName), reply_markup=markup)
+		return
+	text, cut = result
+	fichero_temporal = get_temporal_file(text, f'logs_{containerName}')
+	x = send_message(message=get_text("loading_file"))
+	# The file stays in the chat long after the menu that asked for it, so
+	# its caption is the only thing left saying which machine it came from.
+	caption = f'{get_text("logs", containerName)}{host_suffix(ref_host(containerId))}'
+	if cut:
+		caption += f'\n{get_text("logs_truncated", LOGFILE_MAX_BYTES // (1024 * 1024))}'
+	sent = send_document(document=fichero_temporal, reply_markup=markup, caption=caption)
+	if x:
+		delete_message(x.message_id)
+	if not sent:
+		# Said, rather than the loading message just going away.
+		send_message(message=get_text("error_showing_logs_container", containerName), reply_markup=markup)
 
 def get_temporal_file(data, fileName):
 	fichero_temporal = io.BytesIO(data.encode('utf-8'))
@@ -5309,7 +5648,7 @@ def get_temporal_file(data, fileName):
 	fichero_temporal.name = f"{fileName}_{fecha_hora_formateada}.txt"
 	return fichero_temporal
 
-def mute(minutes, asked=False):
+def mute(minutes, asked=False, extend_only=False):
 	"""
 	Mute the bot with thread-safe lock to prevent race conditions.
 
@@ -5317,6 +5656,10 @@ def mute(minutes, asked=False):
 	confirmed. Without extended messages it used to answer nothing at all,
 	which reads as the command not having worked. A scheduled mute stays
 	quiet unless extended messages are on, as it always has.
+
+	`extend_only` is for a scheduled one, which only ever lengthens a
+	silence: a half-hour task at 23:00 cut a /mute until 06:00 short at
+	23:30.
 	"""
 	global _unmute_timer
 
@@ -5335,6 +5678,9 @@ def mute(minutes, asked=False):
 		return
 
 	with _mute_lock:
+		if extend_only and _mute_until() >= time.time() + minutes * 60:
+			debug(f"Mute of {minutes} minutes not applied: a longer one is running")
+			return
 		# Cancel any existing unmute timer
 		if _unmute_timer is not None:
 			_unmute_timer.cancel()
@@ -5406,7 +5752,7 @@ def compose(containerId, containerName):
 	debug(f"Running command: compose for container {containerName}")
 	markup = create_simple_keyboard("button_delete")
 	result = manager_for(containerId).get_docker_compose(container_id=ref_id(containerId), container_name=containerName)
-	if isinstance(result, str) and not result.startswith("Error"):
+	if result is not None:
 		fichero_temporal = io.BytesIO(result.encode('utf-8'))
 		fichero_temporal.name = "docker-compose.txt"
 		x = send_message(message=get_text("loading_file"))
@@ -5415,7 +5761,7 @@ def compose(containerId, containerName):
 		if x:
 			delete_message(x.message_id)
 	else:
-		send_message(message=result, reply_markup=markup)
+		send_message(message=get_text("error_showing_compose_container", containerName), reply_markup=markup)
 
 def _parse_docker_time(value):
 	"""A timestamp from the Docker API as an aware datetime, or None for its zero."""
@@ -5690,21 +6036,81 @@ def confirm_execute_command(containerId, containerName, command):
 	send_message(message=f'{host_label(ref_host(containerId))}{get_text("confirm_exec", containerName, html.escape(command))}',
 				reply_markup=markup)
 
-def execute_command(containerId, containerName, command, sendMessage=True):
+# How long a typed /exec waits for its result before saying it is still
+# running. The SDK reads an exec's output with no time limit —the client's
+# timeout does not reach it— so a `ping` without -c held the button's worker
+# for good, and eight of them left the bot deaf.
+EXEC_WAIT_SECONDS = 60
+# How much output goes in the message. Past it the whole output goes as a
+# file: in messages, 5 MB of log was some 1500 of them, rate-limited, with
+# every other notification queued behind.
+EXEC_OUTPUT_INLINE = 3500
+# The command is shown too, and shares the message's 4096 characters with the
+# output: a long one pushed the first message over and it was lost.
+EXEC_COMMAND_SHOWN = 300
+# The end of a log /logs shows: the message only has room for its last 3500
+# characters anyway.
+LOGS_TAIL_LINES = 200
+# The most of a log /logfile sends, under the 50 MB Telegram accepts.
+LOGFILE_MAX_BYTES = 45 * 1024 * 1024
+
+
+def execute_command(containerId, containerName, command, sendMessage=True, wait=True):
+	"""
+	Runs a command in a container, on a thread of its own.
+
+	With `wait`, which is how a typed /exec behaves, the caller waits up to
+	EXEC_WAIT_SECONDS and then says the command is still running; the result
+	follows whenever it finishes. A scheduled exec does not wait at all: run in
+	line, a long one made the scheduler skip the minutes after it, and one that
+	never ended stopped every other task for good.
+	"""
 	debug(f"Running command: exec for container {containerName} with command [{command}]")
-	result = manager_for(containerId).execute_command(container_id=ref_id(containerId), container_name=containerName, command=command)
-	if sendMessage:
-		max_length = 3500
-		escaped_command = html.escape(command)
-		label = host_label(ref_host(containerId))
-		if len(result) <= max_length:
-			send_message(message=f'{label}{get_text("executed_command", containerName, escaped_command, html.escape(result))}')
-		else:
-			first_part = result[:max_length]
-			send_message(message=f'{label}{get_text("executed_command", containerName, escaped_command, html.escape(first_part))}')
-			for i in range(max_length, len(result), max_length):
-				part = result[i:i + max_length]
-				send_message(message=f"<pre><code>{html.escape(part)}</code></pre>")
+	# The thread answers where the command was asked from, not in the group.
+	context_chat = getattr(_reply_context, "chat_id", None)
+	context_thread = getattr(_reply_context, "thread_id", None)
+	lock = threading.Lock()
+	answered = threading.Event()
+
+	def run():
+		if context_chat is not None:
+			set_reply_context(context_chat, context_thread)
+		try:
+			try:
+				output = manager_for(containerId).execute_command(
+					container_id=ref_id(containerId), container_name=containerName, command=command)
+			except Exception as e:
+				error(f"Error executing command [{command}] in container {containerName}. Error: [{e}]")
+				output = None
+			with lock:
+				answered.set()
+				if sendMessage:
+					_send_exec_result(containerId, containerName, command, output)
+		finally:
+			clear_reply_context()
+
+	threading.Thread(target=run, name=f"exec-{containerName}", daemon=True).start()
+	if not wait or not sendMessage:
+		return
+	if answered.wait(EXEC_WAIT_SECONDS):
+		return
+	# Under the lock, so the notice cannot land after a result that arrived
+	# just as the wait ran out.
+	with lock:
+		if not answered.is_set():
+			send_message(message=f'{host_label(ref_host(containerId))}{get_text("exec_still_running", containerName)}')
+
+
+def _send_exec_result(containerId, containerName, command, output):
+	label = host_label(ref_host(containerId))
+	if output is None:
+		send_message(message=f'{label}{get_text("error_executing_command_container", html.escape(command), containerName)}')
+		return
+	shown = command if len(command) <= EXEC_COMMAND_SHOWN else f"{command[:EXEC_COMMAND_SHOWN]}…"
+	send_message(message=f'{label}{get_text("executed_command", containerName, html.escape(shown), html.escape(output[:EXEC_OUTPUT_INLINE]))}')
+	if len(output) > EXEC_OUTPUT_INLINE:
+		send_document(document=get_temporal_file(output, f"exec_{containerName}"),
+					caption=f'{label}{get_text("exec_output_attached", containerName)}')
 
 def comparison_message(containerId, containerName, comparison):
 	"""
@@ -5772,19 +6178,21 @@ def confirm_change_tag(containerId, containerName, tag):
 	if loading_msg:
 		delete_message(loading_msg.message_id)
 
+	# The same buttons with or without the comparison. The fallback built
+	# its own and showed "Yes, change to $1", the tag never filled in.
+	markup = InlineKeyboardMarkup(row_width=1)
+	markup.add(InlineKeyboardButton(get_text("button_confirm_change_tag", tag), callback_data=f"changeTag|{containerId}|{tag}"))
+	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+
 	if not comparison:
-		# Fallback to simple confirmation if comparison fails
-		markup = create_confirm_cancel_keyboard(f"changeTag|{containerId}|{tag}", f"button_confirm_change_tag", "cerrar", "button_cancel")
-		send_message(message=f'{host_label(ref_host(containerId))}{get_text("confirm_change_tag", containerName, tag)}',
+		# Fallback to simple confirmation if comparison fails. The tag is
+		# escaped in the text only: it comes from whatever registry the image
+		# names, and the callback needs it exactly as it is.
+		send_message(message=f'{host_label(ref_host(containerId))}{get_text("confirm_change_tag", containerName, html.escape(tag))}',
 					reply_markup=markup)
 		return
 
 	message = comparison_message(containerId, containerName, comparison)
-
-	# Create keyboard with tag parameter in button text
-	markup = InlineKeyboardMarkup(row_width=1)
-	markup.add(InlineKeyboardButton(get_text("button_confirm_change_tag", tag), callback_data=f"changeTag|{containerId}|{tag}"))
-	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 	send_message(message=message, reply_markup=markup)
 
 def change_tag_container(containerId, containerName):
@@ -5856,7 +6264,8 @@ def get_image_comparison(containerId, containerName, new_tag=None):
 		new_created = new_image.attrs.get('Created', '')
 
 		# Calculate differences
-		has_update = current_digest != new_digest
+		has_update = current_digest != new_digest \
+			and not same_running_manifest(owner.client, container, current_image.id, new_image)
 		size_diff = new_size - current_size
 
 		# Format dates
@@ -6236,9 +6645,16 @@ def count_actionable_buttons(markup):
 	menu has nothing left to act on.
 	"""
 	rows = markup.keyboard or []
-	return sum(len(row) for row in rows[:-1])
+	# The page buttons act on nothing: counted, an emptied list never closed.
+	return sum(1 for row in rows[:-1] for button in row
+			if not str(getattr(button, "callback_data", "") or "").startswith("pickPage|"))
 
-def build_hierarchical_keyboard(containers, action_type, exclude_own=False, filter_standalone_status=None, filter_projects_with_all_status=None, marked_names=None, host_id=None, back_to_hosts=False):
+
+def picker_page_key(chat_id, message_id):
+	"""Cache key for the page a container picker is showing."""
+	return f"picker_page_{chat_id}_{message_id}"
+
+def build_hierarchical_keyboard(containers, action_type, exclude_own=False, filter_standalone_status=None, filter_projects_with_all_status=None, marked_names=None, host_id=None, back_to_hosts=False, page=0):
 	"""
 	Build hierarchical keyboard with Compose projects and standalone containers.
 	Level 1: Shows projects (📦) and standalone containers (🐳)
@@ -6307,12 +6723,17 @@ def build_hierarchical_keyboard(containers, action_type, exclude_own=False, filt
 		# Get container count (filtered by status if applicable)
 		project_info = owner.get_project_info(project_name)
 		if project_info:
+			# The bot is not offered, so it is not counted either: the number
+			# is what the project's buttons will act on.
+			counted = project_info.containers
+			if exclude_own:
+				counted = without_the_bot(host_id, counted)[0]
 			if filter_standalone_status:
 				# Count only containers matching the filter
-				container_count = sum(1 for c in project_info.containers if c.status in filter_standalone_status)
+				container_count = sum(1 for c in counted if c.status in filter_standalone_status)
 			else:
 				# Show total count
-				container_count = project_info.get_container_count()
+				container_count = len(counted)
 		else:
 			container_count = len(project_containers[project_name])
 		botones.append(
@@ -6331,7 +6752,10 @@ def build_hierarchical_keyboard(containers, action_type, exclude_own=False, filt
 		'checkupdate': 'checkUpdate',
 		'changetag': 'changeTagContainer',
 		'info': 'info',
-		'ports': 'ports'
+		'ports': 'ports',
+		# Whatever its state: a stopped container fell through to "run", and
+		# tapping it to get its compose started it instead.
+		'compose': 'compose',
 	}
 
 	# Add standalone container buttons (sorted: bot first, then running, then stopped - all alphabetically)
@@ -6366,7 +6790,20 @@ def build_hierarchical_keyboard(containers, action_type, exclude_own=False, filt
 			)
 		)
 
-	markup.add(*botones)
+	# Telegram refuses a keyboard of more than about a hundred buttons, and the
+	# message with it: a host with more containers than that answered /logs or
+	# /restart with nothing at all. Shown a page at a time, as the update list.
+	page, pages = update_keyboard_page(botones, page)
+	start = page * UPDATE_KEYBOARD_PAGE_SIZE
+	markup.add(*botones[start:start + UPDATE_KEYBOARD_PAGE_SIZE])
+	if pages > 1:
+		navigation = []
+		if page > 0:
+			navigation.append(InlineKeyboardButton("◀️", callback_data=f"pickPage|{action_type}|{host_id}|{page - 1}"))
+		navigation.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data=f"pickPage|{action_type}|{host_id}|{page}"))
+		if page < pages - 1:
+			navigation.append(InlineKeyboardButton("▶️", callback_data=f"pickPage|{action_type}|{host_id}|{page + 1}"))
+		markup.row(*navigation)
 
 	# Add cancel button. Once something has been acted upon there is nothing
 	# left to cancel, only to close
@@ -6526,10 +6963,20 @@ def resolve_container_argument(argument):
 		if host is not None and remainder:
 			host_id, text = host["id"], remainder.strip()
 
-	matches = find_containers_by_name(text, host_id)
+	missing = []
+	if host_id:
+		matches = find_containers_by_name(text, host_id)
+	else:
+		sections = hosts_with_containers()
+		matches = [(entry, container) for entry, _, containers in sections
+				for container in containers if container.name == text]
+		missing = unreachable_hosts(sections)
 	if not matches:
 		return None, text, []
-	if len(matches) == 1:
+	# One match is only the one meant if every host answered. With one silent,
+	# a "/stop plex" meant for its plex stopped the namesake on another
+	# machine without asking; now the one found has to be picked.
+	if len(matches) == 1 and not missing:
 		entry, container = matches[0]
 		return container_ref(entry["id"], container), container.name, []
 	return None, text, matches
@@ -6553,7 +7000,13 @@ def send_container_disambiguation(action_type, container_name, candidates):
 			callback_data=f'{spec["container_callback"]}|{container_ref(entry["id"], container)}'))
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 
-	sent = send_message(message=get_text("container_on_several_hosts", container_name), reply_markup=markup)
+	text = get_text("container_on_several_hosts", container_name)
+	if len(candidates) == 1:
+		# Asked because a host did not answer, which may have the name too.
+		silent = unreachable_hosts(hosts_with_containers())
+		if silent:
+			text += "\n\n" + "\n".join(get_text("list_host_unreachable", host_alias(e["id"]), "") for e in silent)
+	sent = send_message(message=text, reply_markup=markup)
 	if sent:
 		# One entry per candidate, each with its own host: they come from
 		# different machines, so a single host id would mislabel all but one.
@@ -6871,7 +7324,7 @@ def build_project_level2_menu(action_type, project_name, chatId, messageId, mark
 	# Save container cache
 	save_container_cache(chatId, messageId, project_info.containers, host_id)
 
-	return markup, get_text(message_key, project_name)
+	return markup, get_text(message_key, html.escape(str(project_name)))
 
 def handle_enter_project_level2(action_type, project_name, chatId, messageId, marked_names=None, host_id=None):
 	"""
@@ -6890,7 +7343,7 @@ def handle_enter_project_level2(action_type, project_name, chatId, messageId, ma
 	menu = build_project_level2_menu(action_type, project_name, chatId, messageId, marked_names, host_id)
 
 	if not menu:
-		send_message(message=f'{get_text("error_project_not_found", project_name)}'
+		send_message(message=f'{get_text("error_project_not_found", html.escape(str(project_name)))}'
 							f'{host_suffix(host_id or host_registry.local_host_id())}')
 		return
 
@@ -7148,7 +7601,10 @@ def build_back_to_level1_keyboard(action_type, chatId, messageId, exclude_own=Tr
 		filter_projects_with_all_status=config['filter_projects_with_all_status'],
 		marked_names=marked_names,
 		host_id=host_id,
-		back_to_hosts=bool(read_cache_item(host_level_key(chatId, messageId)))
+		back_to_hosts=bool(read_cache_item(host_level_key(chatId, messageId))),
+		# The page the list was on: acting on a container on page 3 does not
+		# send the list back to page 1.
+		page=read_cache_item(picker_page_key(chatId, messageId)) or 0,
 	)
 
 	# Save container cache for standalone containers
@@ -7266,12 +7722,38 @@ def build_compose_project_level2_keyboard(project_info, project_name, action_typ
 		)
 	)
 
-	markup.add(*bottom_buttons)
+	# One row, whatever the columns: with one, add() stacked them in two, the
+	# whole-project button outside the last row, counted as one still to act on,
+	# and an emptied project never went back to the list.
+	markup.row(*bottom_buttons)
 
 	return markup
 
 def is_admin(userId):
-	return str(userId) in str(TELEGRAM_ADMIN).split(',')
+	return str(userId) in ADMIN_IDS
+
+
+# When each user who is not an administrator was last told so. Answering
+# every command and button let anyone who found the bot fill the one queue the
+# notifications go through, so it is said once an hour at most, and not waited
+# for.
+NOT_ADMIN_REPLY_EVERY = 3600
+_not_admin_told = {}
+_not_admin_lock = threading.Lock()
+
+def tell_not_admin(user_id, username):
+	now = time.monotonic()
+	with _not_admin_lock:
+		last = _not_admin_told.get(user_id)
+		if last is not None and now - last < NOT_ADMIN_REPLY_EVERY:
+			debug(f"User {user_id} ({username}) is not an administrator, already told")
+			return
+		if len(_not_admin_told) > 1000:
+			for stale in [u for u, t in _not_admin_told.items() if now - t >= NOT_ADMIN_REPLY_EVERY]:
+				del _not_admin_told[stale]
+		_not_admin_told[user_id] = now
+	warning(f"User {user_id} ({username}) tried to use admin command without permission")
+	message_queue.add_message(_send_message_direct, user_id, get_text("user_not_admin"), None, "html", True, None, idempotent=False)
 
 def update_available(container, host_id=None):
 	"""
@@ -7381,7 +7863,7 @@ def display_containers(containers, host_id=None):
 	for project_name in sorted(project_containers.keys()):
 		project_conts = project_containers[project_name]
 		container_count = len(project_conts)
-		result += f"📦 {project_name} ({get_text('compose_project_containers', container_count)})\n"
+		result += f"📦 {html.escape(project_name)} ({get_text('compose_project_containers', container_count)})\n"
 
 		# Sort containers within project: running first, then stopped (all alphabetically)
 		sorted_project_conts = sort_containers_by_priority(project_conts)
@@ -7391,7 +7873,7 @@ def display_containers(containers, host_id=None):
 			# tagged only with the project label, no service label).
 			_, service_name = container_info_cache[container.id]
 			display_name = service_name or container.name
-			result += f"  {get_status_emoji(container.status, container.name, container, host_id)} {display_name}"
+			result += f"  {get_status_emoji(container.status, container.name, container, host_id)} {html.escape(display_name)}"
 			if update_cache[container.id]:
 				result += " ⬆️"
 			result += "\n"
@@ -7569,6 +8051,16 @@ def get_random_available_port(host_id=None):
 		warning(f"Could not generate a port on {host_id}: {e}")
 		return None
 
+def _port_sort_key(port):
+	"""Sorts "8000-8010/tcp" by 8000, and anything unreadable last."""
+	number, _, protocol = str(port).partition("/")
+	try:
+		first = int(number.split("-", 1)[0])
+	except ValueError:
+		first = 65536
+	return first, protocol, str(port)
+
+
 def show_container_ports(host_id=None):
 	"""
 	Show all ports used by containers on one host.
@@ -7611,7 +8103,9 @@ def show_container_ports(host_id=None):
 				status = container.status
 				emoji = "🟢" if status == "running" else "🔴"
 				# Remove duplicates and sort
-				unique_ports = sorted(set(ports), key=lambda x: (int(x.split('/')[0]), x.split('/')[1]))
+				# By the first port of each: a range such as 8000-8010 made int()
+				# raise, and the container was left out of the list altogether.
+				unique_ports = sorted(set(ports), key=_port_sort_key)
 				block.append(f"{emoji} {container.name}:")
 				# Add each port on a separate line with indentation
 				for port in unique_ports:
@@ -7759,7 +8253,7 @@ def print_donors():
 	if donors:
 		result = ""
 		for donor in donors:
-			result += f"· {donor}\n"
+			result += f"· {html.escape(str(donor))}\n"
 		send_message(message=get_text("donors_list", result))
 	else:
 		send_message(message=get_text("error_getting_donors"))
@@ -7770,13 +8264,19 @@ def get_array_donors_online():
 		'Pragma': 'no-cache'
 	}
 
-	response = requests.get(DONORS_URL, headers=headers)
+	# With a deadline and its failures caught, like every other request the
+	# bot makes: a server that accepted the connection and never answered
+	# held the worker for good, and a network error reached nobody.
+	try:
+		response = requests.get(DONORS_URL, headers=headers, timeout=10)
+	except requests.RequestException as e:
+		error(f"Error getting donors: {e}")
+		return []
 	if response.status_code == 200:
 		try:
 			data = response.json()
 			if isinstance(data, list):
-				data.sort()
-				return data
+				return sorted(data, key=str)
 			else:
 				error(f"Error getting donors: data is not a list [{str(data)}]")
 				return []
@@ -7897,7 +8397,9 @@ def runs_latest_image(ref, name):
 		return False
 	try:
 		image_with_tag = container.attrs['Config']['Image']
-		if container.image.id != owner.client.images.get(image_with_tag).id:
+		local_id = container.image.id
+		latest = owner.client.images.get(image_with_tag)
+		if local_id != latest.id and not same_running_manifest(owner.client, container, local_id, latest):
 			return False
 	except Exception as e:
 		debug(f"Could not compare the image of {name}: {e}")
@@ -7974,6 +8476,13 @@ def split_for_telegram(text, budget=MESSAGE_SPLIT_BUDGET):
 	# Room kept for the tags reopened at the start and closed at the end.
 	room = budget - 100
 	for line in text.split("\n"):
+		# A line that only closes tags stays with what it closes, in the
+		# room kept above. Cut before it, a listing's final "</pre>" became a
+		# last piece with no text in it, which Telegram refuses, and that
+		# last piece is the one carrying the keyboard.
+		if current and re.fullmatch(r"(?:</\w+>)+", line.strip()):
+			current.append(line)
+			continue
 		# A loop, not an if: what is left after cutting at a blank line can
 		# still be too long with this line on it.
 		while current and len("\n".join(current + [line])) > room:
@@ -8533,7 +9042,7 @@ def save_schedule_state(user_id, state):
 	of the mapped volume, nothing ever swept it, and its errors went to stdout
 	with print() instead of the log.
 	"""
-	_save_cache("schedule_state", user_id, state)
+	_save_cache("schedule_state", user_id, asked_here(state))
 
 def load_schedule_state(user_id):
 	"""The user's in-progress schedule, or None once it has expired."""
@@ -8604,10 +9113,24 @@ def load_command_cache(command_id):
 def clear_command_cache(command_id):
 	_clear_cache("exec", command_id)
 
+_command_take_lock = threading.Lock()
+
+def take_command_cache(command_id):
+	"""
+	The command waiting to be confirmed, handed out once.
+
+	Read and cleared in one step: done apart, a double tap on Confirm let both
+	presses read it before either cleared it, and the command ran twice.
+	"""
+	with _command_take_lock:
+		command = load_command_cache(command_id)
+		clear_command_cache(command_id)
+	return command
+
 # Command request state functions
 def save_command_request_state(user_id, containerId, containerName, deleteMessage):
 	value = {"containerId": containerId, "containerName": containerName, "deleteMessage": deleteMessage}
-	_save_cache("pending_command", user_id, value)
+	_save_cache("pending_command", user_id, asked_here(value))
 
 def load_command_request_state(user_id):
 	return _load_cache("pending_command", user_id)
@@ -8619,7 +9142,7 @@ def clear_command_request_state(user_id):
 def save_port_check_request_state(user_id, deleteMessage, host_id=None):
 	value = {"deleteMessage": deleteMessage,
 			"host": host_id or host_registry.local_host_id()}
-	_save_cache("pending_port_check", user_id, value)
+	_save_cache("pending_port_check", user_id, asked_here(value))
 
 def load_port_check_request_state(user_id):
 	return _load_cache("pending_port_check", user_id)
@@ -8798,18 +9321,27 @@ def find_container_id_on_host(host_id, container_name):
 	same name on a different host, which is the one mistake in all of this
 	that would be both silent and destructive.
 	"""
+	return locate_container_on_host(host_id, container_name)[0]
+
+
+def locate_container_on_host(host_id, container_name):
+	"""
+	As find_container_id_on_host, telling apart a host that did not answer.
+
+	Returns (short id or None, why the host could not be asked or None). A
+	host that is down says nothing about whether the container is there.
+	"""
 	try:
 		owner = manager(host_id)
 	except host_registry.HostUnavailable as e:
 		debug(f"Cannot reach host {host_id} to look up {container_name}: {e.reason}")
-		return None
+		return None, str(e.reason)
 	try:
 		container = owner.container_named(container_name)
-		if container is not None:
-			return container.id[:CONTAINER_ID_LENGTH]
 	except Exception as e:
 		debug(f"Could not look up {container_name} on {host_id}: {e}")
-	return None
+		return None, str(e)
+	return (container.id[:CONTAINER_ID_LENGTH] if container is not None else None), None
 
 def get_container_name(chat_id, message_id, container_id):
 	"""
@@ -8887,9 +9419,42 @@ def pull_image(client, image, container):
 	announced on every check that, once applied, switched its architecture.
 	"""
 	platform = container_platform(container) if container is not None else None
-	if platform:
-		return client.images.pull(image, platform=platform)
-	return client.images.pull(image)
+	# Checked: the SDK's own pull ignores an error the daemon reports midway
+	# —a full disk, a dropped layer— and hands back the image already here,
+	# which read as "up to date".
+	return pull_checked(client, image, platform=platform)
+
+
+def same_running_manifest(client, container, local_id, image):
+	"""
+	Whether `container`, running the image `local_id`, already runs `image`.
+
+	By id first, which is all the classic image store needs: there an id is
+	the platform's own. With containerd's store, the default on new installs,
+	an id is the digest of the multi-platform index, which changes when its
+	author republishes any one platform: compared alone, it announced an
+	update "X → X" that changed nothing here, and applying it recreated the
+	container for nothing. The manifest the container runs is in its
+	ImageManifestDescriptor (API 1.48); the index's manifests only come in
+	an inspect that asks for them, which docker-py's inspect_image cannot.
+	"""
+	if local_id == getattr(image, "id", None):
+		return True
+	digest = ((container.attrs or {}).get("ImageManifestDescriptor") or {}).get("digest")
+	if not isinstance(digest, str) or not digest:
+		return False
+	try:
+		api = client.api
+		attrs = api._result(api._get(api._url("/images/{0}/json", image.id), params={"manifests": "1"}), True)
+	except Exception as e:
+		debug(f"Could not read the manifests of {image.id}: {e}")
+		return False
+	for manifest in (attrs.get("Manifests") if isinstance(attrs, dict) else None) or []:
+		if not isinstance(manifest, dict) or manifest.get("Kind", "image") != "image":
+			continue
+		if digest in (manifest.get("ID"), (manifest.get("Descriptor") or {}).get("digest")):
+			return True
+	return False
 
 
 def generate_docker_compose(container):
@@ -8902,7 +9467,15 @@ def generate_docker_compose(container):
 	(PATH, the image ENTRYPOINT, its LABELs...) are already filtered out there.
 	"""
 	config = extract_container_config(container)
-	return ComposeGenerator(container.name, config).to_yaml()
+	compose_text = ComposeGenerator(container.name, config).to_yaml()
+	# The bot's own token is the one secret the file does not need to carry:
+	# whoever recreates the bot from it has it in their .env already, and
+	# compose fills it in. Sent in the clear, it stayed in the chat history,
+	# readable by anyone in the group. Replaced after the dump, which escapes
+	# every `$` it is given.
+	if TELEGRAM_TOKEN and TELEGRAM_TOKEN in compose_text:
+		compose_text = compose_text.replace(TELEGRAM_TOKEN, "${TELEGRAM_TOKEN}")
+	return compose_text
 
 # ============================================================================
 # INTERNAL TELEGRAM FUNCTIONS (without queue)
@@ -9264,20 +9837,81 @@ def sort_tags_newest_first(tags):
 	return stable + named + rest
 
 
+# The most a registry answer is read to. The registry is whatever an image
+# name says, so it may be anyone's, and a tag list of hundreds of megabytes
+# was read whole, up to twenty pages of it.
+REGISTRY_MAX_BYTES = 5 * 1024 * 1024
+
+
+def _is_private_host(host):
+	"""Whether a host is written as a loopback, private or link-local address."""
+	if (host or "").lower() == "localhost":
+		return True
+	try:
+		address = ipaddress.ip_address(host)
+	except ValueError:
+		return False
+	return address.is_private or address.is_loopback or address.is_link_local
+
+
+def _realm_allowed(realm, url):
+	"""
+	Whether the bot may ask `realm` for the token `url` wants.
+
+	The realm comes in the registry's own answer and was asked whatever it
+	was: an http address, or one inside the user's network handed out by a
+	registry on the internet, had the bot make that request from in there.
+	So https, and a private address only for a registry that is private too;
+	plain http only for a registry on localhost, as Docker itself allows.
+	"""
+	realm_parts, url_parts = urlsplit(realm), urlsplit(url)
+	if not realm_parts.hostname:
+		return False
+	if realm_parts.scheme == "http":
+		return realm_parts.hostname in ("localhost", "127.0.0.1") and url_parts.hostname in ("localhost", "127.0.0.1")
+	if realm_parts.scheme != "https":
+		return False
+	return not _is_private_host(realm_parts.hostname) or _is_private_host(url_parts.hostname)
+
+
+def _registry_json(response):
+	"""A registry answer's JSON, read only up to REGISTRY_MAX_BYTES."""
+	if not hasattr(response, "iter_content"):
+		return response.json()
+	body = bytearray()
+	for chunk in response.iter_content(65536):
+		body += chunk
+		if len(body) > REGISTRY_MAX_BYTES:
+			response.close()
+			raise ValueError(f"registry answer larger than {REGISTRY_MAX_BYTES} bytes")
+	return json.loads(body.decode("utf-8") or "null")
+
+
 def _registry_get(url, session):
-	"""A registry request, with the anonymous token most of them want first."""
-	response = session.get(url, timeout=10)
+	"""
+	A registry request, with the anonymous token most of them want first.
+
+	Redirects are not followed: the tag list and the token are not answers a
+	registry redirects, and following them let any registry send the bot to
+	any address.
+	"""
+	response = session.get(url, timeout=10, stream=True, allow_redirects=False)
 	if response.status_code == 401:
 		challenge = response.headers.get("WWW-Authenticate", "")
 		if challenge.lower().startswith("bearer"):
 			fields = dict(re.findall(r'(\w+)="([^"]*)"', challenge))
-			token_response = session.get(fields.get("realm", ""), timeout=10, params={
+			realm = fields.get("realm", "")
+			if not _realm_allowed(realm, url):
+				warning(f"Not asking {realm!r} for a token: {url} is not allowed to send the bot there")
+				return response
+			token_response = session.get(realm, timeout=10, stream=True, allow_redirects=False, params={
 				key: fields[key] for key in ("service", "scope") if key in fields})
-			body = token_response.json() if token_response.ok else {}
+			body = _registry_json(token_response) if token_response.ok else {}
+			body = body if isinstance(body, dict) else {}
 			token = body.get("token") or body.get("access_token")
 			if token:
 				session.headers["Authorization"] = f"Bearer {token}"
-				response = session.get(url, timeout=10)
+				response = session.get(url, timeout=10, stream=True, allow_redirects=False)
 	return response
 
 
@@ -9303,7 +9937,8 @@ def get_docker_tags_from_registry(registry, repo_name):
 				if response.status_code != 200:
 					error(f"{registry} answered {response.status_code} listing the tags of {repo_name}")
 					return []
-				tags.extend(t for t in (response.json().get("tags") or []) if t)
+				listed = _registry_json(response)
+				tags.extend(t for t in ((listed.get("tags") if isinstance(listed, dict) else None) or []) if isinstance(t, str) and t)
 				# The next page, if any, is announced in a Link header.
 				match = re.search(r"<([^>]+)>\s*;\s*rel=\"?next\"?", response.headers.get("Link", ""))
 				if not match:
@@ -9314,6 +9949,9 @@ def get_docker_tags_from_registry(registry, repo_name):
 		except requests.exceptions.RequestException as e:
 			debug(f"Could not reach {scheme}://{registry}: {e}")
 			continue
+		except ValueError as e:
+			error(f"{registry} gave an answer that could not be read listing the tags of {repo_name}: {e}")
+			return []
 		if not tags:
 			debug(f"No tags returned by {registry} for {repo_name}")
 		return sort_tags_newest_first(list(dict.fromkeys(tags)))[:REGISTRY_TAGS_SHOWN]
@@ -9384,14 +10022,43 @@ def _stop_on_signal(signum, frame):
 		return
 	_stopping = True
 	debug(f"Received {signal.Signals(signum).name}, stopping")
-	if updates_in_progress():
-		debug(f"Waiting for {updates_in_progress()} update(s) in progress to finish before stopping")
-		while updates_in_progress():
+	# The dependents an update stops and starts again count too: stopping
+	# while they wait for their parent left them stopped, and a manual stop
+	# is one their restart policy does not undo.
+	if updates_in_progress() or dependents_in_progress():
+		debug(f"Waiting for {updates_in_progress()} update(s) and {dependents_in_progress()} dependent restart(s) to finish before stopping")
+		while updates_in_progress() or dependents_in_progress():
 			time.sleep(0.5)
 	if not message_queue.drain(STOP_MESSAGES_SECONDS):
 		warning(f"Stopping with messages still queued after {STOP_MESSAGES_SECONDS}s")
 	debug("Stopped")
 	raise SystemExit(0)
+
+
+# What the image's HEALTHCHECK reads. Touched through the same workers that
+# answer commands and buttons, so it goes stale when every one of them is
+# stuck: alive, but deaf, which is what a health check is for.
+HEARTBEAT_PATH = "/tmp/dcb-heartbeat"
+HEARTBEAT_SECONDS = 30
+
+
+def _beat():
+	try:
+		with open(HEARTBEAT_PATH, "a"):
+			pass
+		os.utime(HEARTBEAT_PATH, None)
+	except OSError as e:
+		debug(f"Could not write the heartbeat: {e}")
+
+
+def _heartbeat_loop():
+	while True:
+		pool = getattr(bot, "worker_pool", None)
+		if pool is not None:
+			pool.put(_beat)
+		else:
+			_beat()
+		time.sleep(HEARTBEAT_SECONDS)
 
 
 def main():
@@ -9404,6 +10071,8 @@ def main():
 	"""
 	debug(f"Starting bot version {VERSION}")
 	signal.signal(signal.SIGTERM, _stop_on_signal)
+	_beat()
+	threading.Thread(target=_heartbeat_loop, name="heartbeat", daemon=True).start()
 
 	# One event stream per host, kept in step with what is configured.
 	event_monitors = EventMonitorSupervisor()
@@ -9423,8 +10092,17 @@ def main():
 	# sweep it only ever grows, one file per menu opened.
 	_schedule_cache_sweep()
 
-	register_bot_commands()
-	delete_updater()
+	# Neither is a reason not to start. Raised from here, a Telegram not yet
+	# reachable after a reboot, or a local Docker not answering, put the
+	# container in a restart loop with nothing said anywhere.
+	try:
+		register_bot_commands()
+	except Exception as e:
+		warning(f"Could not publish the command menu: {e}")
+	try:
+		delete_updater()
+	except Exception as e:
+		warning(f"Could not look for a leftover updater container: {e}")
 	check_own_container()
 	check_mute()
 	send_message(message=build_starting_message())

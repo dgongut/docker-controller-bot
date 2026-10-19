@@ -334,6 +334,162 @@ def test_the_same_machine_cannot_be_registered_twice():
 	shutil.rmtree(root, ignore_errors=True)
 
 
+# What _daemons() is told for a URL that cannot even be connected to.
+DOWN = object()
+
+
+def _daemons(answers, built=None):
+	"""
+	A stubbed SDK whose clients answer /info as the daemon behind their URL.
+
+	`answers` maps a URL to an (ID, Name) pair; to an exception, which /info
+	raises; to a function, which /info runs; or to DOWN, for a client that
+	cannot be built at all. Every client made is appended to `built`.
+	"""
+	def sdk(base_url=None, **kwargs):
+		answer = answers.get(base_url)
+		if answer is DOWN:
+			raise Exception("connection refused")
+		fake = MagicMock()
+		if isinstance(answer, tuple):
+			fake.info.return_value = {"ID": answer[0], "Name": answer[1], "Containers": 3}
+		elif answer is not None:
+			fake.info.side_effect = answer
+		if built is not None:
+			built.append(fake)
+		return fake
+	return sdk
+
+
+def test_the_same_daemon_under_another_url_cannot_be_registered_twice():
+	"""
+	The local socket and a tcp:// or ssh:// to the same machine are two URLs
+	for one daemon, which same_url cannot tell. Under the second alias the
+	bot's own container was just one more, and could be stopped or removed
+	from there. A paused host counts, as it does for the URL.
+	"""
+	import docker
+
+	store_, root = setup([
+		{"id": "h_local", "alias": "casa", "url": host_registry.LOCAL_SOCKET_URL, "local": True},
+		{"id": "h_nas", "alias": "nas", "url": "tcp://nas:2375", "paused": True},
+	])
+	built = []
+	docker.DockerClient = _daemons({
+		host_registry.LOCAL_SOCKET_URL: ("ID-CASA", "casa"),
+		"tcp://nas:2375": ("ID-NAS", "nas"),
+		"tcp://192.168.1.10:2375": ("ID-CASA", "casa"),
+		"tcp://nas.lan:2375": ("ID-NAS", "nas"),
+		"tcp://otro:2375": ("ID-OTRO", "otro"),
+	}, built)
+	try:
+		for url in ("tcp://192.168.1.10:2375", "tcp://nas.lan:2375"):
+			try:
+				host_registry.add_host("otra vez", url)
+				raise AssertionError(f"debería rechazar {url}")
+			except host_registry.HostRejected as e:
+				assert e.reason == "duplicate", url
+		assert len(store_.get("hosts")) == 2
+		assert built and all(fake.close.called for fake in built), "quedaron clientes de comprobación abiertos"
+		assert not host_registry._clients and not host_registry._probe_clients, "no debe dejar nada en caché"
+
+		host_registry.add_host("otro", "tcp://otro:2375")
+		assert len(store_.get("hosts")) == 3
+	finally:
+		host_registry.reset()
+		shutil.rmtree(root, ignore_errors=True)
+
+
+def test_machines_cloned_with_the_same_daemon_id_are_still_told_apart():
+	"""
+	The ID is generated once per install, so two machines cloned from one image
+	with Docker already set up can share it. Their names still differ, and the
+	same daemon reached twice always gives the same one.
+	"""
+	import docker
+
+	store_, root = setup([
+		{"id": "h_local", "alias": "casa", "url": host_registry.LOCAL_SOCKET_URL, "local": True},
+	])
+	docker.DockerClient = _daemons({
+		host_registry.LOCAL_SOCKET_URL: ("ID-PLANTILLA", "vm1"),
+		"tcp://vm2:2375": ("ID-PLANTILLA", "vm2"),
+	})
+	try:
+		host_registry.add_host("vm2", "tcp://vm2:2375")
+		assert len(store_.get("hosts")) == 2
+	finally:
+		host_registry.reset()
+		shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_daemon_id_that_cannot_be_read_does_not_block_adding_a_host():
+	"""
+	Not every daemon says, and not every registered host answers. A check that
+	could not be made is no reason to refuse a host that does answer.
+	"""
+	import docker
+
+	store_, root = setup([
+		{"id": "h_local", "alias": "casa", "url": host_registry.LOCAL_SOCKET_URL, "local": True},
+		{"id": "h_down", "alias": "apagado", "url": "tcp://apagado:2375"},
+	])
+	docker.DockerClient = _daemons({
+		host_registry.LOCAL_SOCKET_URL: Exception("info no disponible"),
+		"tcp://apagado:2375": DOWN,
+		"tcp://mudo:2375": Exception("info no disponible"),
+		"tcp://sin-id:2375": ("", "sin-id"),
+		"tcp://nuevo:2375": ("ID-NUEVO", "nuevo"),
+	})
+	try:
+		for alias_name in ("mudo", "sin-id", "nuevo"):
+			host_registry.add_host(alias_name, f"tcp://{alias_name}:2375")
+		assert len(store_.get("hosts")) == 5
+	finally:
+		host_registry.reset()
+		shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_registered_host_that_hangs_does_not_hold_up_adding_one():
+	"""
+	Every registered host is asked at once, and none is waited on past the
+	probe timeout: one that hangs costs the person adding a host a few seconds
+	at most, not however long it takes to come back.
+	"""
+	import threading
+	import time
+
+	import docker
+
+	store_, root = setup([
+		{"id": "h_local", "alias": "casa", "url": host_registry.LOCAL_SOCKET_URL, "local": True},
+		{"id": "h_nas", "alias": "nas", "url": "tcp://nas:2375"},
+	])
+	release = threading.Event()
+
+	def hangs():
+		release.wait(10)
+		return {"ID": "ID-OTRO", "Name": "otro"}
+
+	docker.DockerClient = _daemons({
+		host_registry.LOCAL_SOCKET_URL: ("ID-CASA", "casa"),
+		"tcp://nas:2375": hangs,
+		"tcp://otro:2375": ("ID-OTRO", "otro"),
+	})
+	original = host_registry.PROBE_TIMEOUT_SECONDS
+	host_registry.PROBE_TIMEOUT_SECONDS = 0.3
+	try:
+		started = time.monotonic()
+		host_registry.add_host("otro", "tcp://otro:2375")
+		assert time.monotonic() - started < 2, time.monotonic() - started
+		assert len(store_.get("hosts")) == 3
+	finally:
+		release.set()
+		host_registry.PROBE_TIMEOUT_SECONDS = original
+		host_registry.reset()
+		shutil.rmtree(root, ignore_errors=True)
+
+
 def test_generated_ids_do_not_collide():
 	_, root = setup()
 	seen = {"h_local"}

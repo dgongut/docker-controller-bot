@@ -609,3 +609,309 @@ def test_building_an_ssh_host_keeps_its_connection():
 	finally:
 		docker.DockerClient = original
 		without_paramiko(state)
+
+
+def test_a_closed_ssh_pool_is_opened_again_on_the_next_request():
+	"""
+	drop() closes a failing host's clients, but whoever already holds one goes
+	on using it. With the one pool fixed for good, every request after that
+	said "Pool is closed"; tcp:// and unix:// simply open a new one.
+	"""
+	import threading
+	state = with_paramiko()
+	try:
+		adapter = _ssh_adapter()
+		client = MagicMock()
+		client.api._custom_adapter = adapter
+		host_registry._reuse_ssh_connections(client, "h_nas")
+		first = adapter.get_connection("http+docker://ssh/v1.45/version")
+		adapter.close()
+		assert first.pool is None
+
+		reopened = adapter.get_connection("http+docker://ssh/v1.45/version")
+		assert reopened is not first and reopened.pool is not None
+		assert adapter.get_connection("http+docker://ssh/v1.45/containers/json") is reopened
+		# Registered again, so the adapter can still close it.
+		assert list(adapter.pools.keys()) == ["root@nas"] and adapter.pools["root@nas"] is reopened
+		adapter.close()
+		assert reopened.pool is None
+
+		# Threads that find it closed at the same time share the one they open.
+		barrier = threading.Barrier(8, timeout=10)
+		seen = []
+
+		def ask():
+			barrier.wait()
+			seen.append(adapter.get_connection("http+docker://ssh/v1.45/version"))
+
+		threads = [threading.Thread(target=ask) for _ in range(8)]
+		for thread in threads:
+			thread.start()
+		for thread in threads:
+			thread.join(10)
+		assert len(seen) == 8 and len({id(pool) for pool in seen}) == 1, seen
+		assert seen[0] is not reopened and seen[0].pool is not None
+	finally:
+		without_paramiko(state)
+
+
+def test_the_ssh_pipe_waits_only_when_nothing_is_buffered():
+	"""
+	The reader under every ssh:// response: it gives up at the timeout as a
+	socket would, but only when it has to go to the pipe. What is already
+	buffered comes back at once however short the timeout, None waits for as
+	long as it takes, and the end of the pipe is the end, not a timeout.
+	"""
+	import io
+	import socket
+	import threading
+
+	read_end, write_end = os.pipe()
+	stdout = os.fdopen(read_end, "rb")
+	timeout = [0.2]
+	reader = io.BufferedReader(host_registry._TimedPipe(stdout, lambda: timeout[0]))
+	try:
+		started = time.monotonic()
+		try:
+			reader.read(1)
+			raise AssertionError("debería agotar el plazo")
+		except socket.timeout:
+			pass
+		assert 0.15 < time.monotonic() - started < 2, time.monotonic() - started
+
+		os.write(write_end, b"HTTP/1.1 200 OK\r\nrest")
+		assert reader.readline() == b"HTTP/1.1 200 OK\r\n"
+		timeout[0] = 0
+		assert reader.read(4) == b"rest", "lo ya leído no debe esperar a la tubería"
+
+		timeout[0] = None
+		threading.Timer(0.3, lambda: os.write(write_end, b"late")).start()
+		assert reader.read(4) == b"late"
+
+		timeout[0] = 5
+		os.close(write_end)
+		write_end = None
+		assert reader.read(1) == b""
+
+		# The descriptor is the process's: closing the reader leaves it open.
+		reader.close()
+		os.fstat(read_end)
+	finally:
+		stdout.close()
+		if write_end is not None:
+			os.close(write_end)
+
+
+# A stand-in for `ssh … docker system dial-stdio`. Whatever host it is asked
+# for, it speaks just enough HTTP on stdin and stdout for the SDK and answers
+# each path the way the tests need. Every process writes its pid down, so a
+# test can tell a reused connection from a new one.
+FAKE_SSH = r'''
+import os
+import sys
+import time
+
+with open(os.environ["FAKE_SSH_LOG"], "a") as log:
+	log.write(f"{os.getpid()}\n")
+delay = float(os.environ["FAKE_SSH_DELAY"])
+incoming, outgoing = sys.stdin.buffer, sys.stdout.buffer
+
+
+def answer(body, content_type=b"text/plain"):
+	outgoing.write(b"HTTP/1.1 200 OK\r\nContent-Type: " + content_type
+				   + b"\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+	outgoing.flush()
+
+
+while True:
+	line = incoming.readline()
+	if not line:
+		break
+	if not line.strip():
+		# What the SDK writes before ending the process.
+		continue
+	path = line.split(b" ")[1]
+	length = 0
+	while True:
+		header = incoming.readline()
+		if header in (b"\r\n", b"\n", b""):
+			break
+		if header.lower().startswith(b"content-length:"):
+			length = int(header.split(b":", 1)[1])
+	incoming.read(length)
+	if path.endswith(b"/late"):
+		time.sleep(delay)
+		answer(b"late")
+	elif path.endswith(b"/stream"):
+		# An exec's raw stream, upgraded as Docker does it: part of it with the
+		# headers, the rest after a pause, and then the end.
+		outgoing.write(b"HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.raw-stream\r\n"
+					   b"Connection: Upgrade\r\nUpgrade: tcp\r\n\r\nearly")
+		outgoing.flush()
+		time.sleep(delay)
+		outgoing.write(b"late!")
+		outgoing.flush()
+		break
+	else:
+		answer(b"OK")
+'''
+
+
+class FakeSsh:
+	"""FAKE_SSH first on the PATH as `ssh`, while the block lasts."""
+
+	def __init__(self, delay):
+		self.delay = delay
+
+	def __enter__(self):
+		import tempfile
+		self.root = tempfile.mkdtemp()
+		script = os.path.join(self.root, "fake_ssh.py")
+		with open(script, "w") as f:
+			f.write(FAKE_SSH)
+		ssh = os.path.join(self.root, "ssh")
+		with open(ssh, "w") as f:
+			f.write(f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n')
+		os.chmod(ssh, 0o755)
+		self.log = os.path.join(self.root, "pids")
+		self.saved = {name: os.environ.get(name) for name in ("PATH", "FAKE_SSH_LOG", "FAKE_SSH_DELAY")}
+		os.environ["PATH"] = self.root + os.pathsep + os.environ.get("PATH", "")
+		os.environ["FAKE_SSH_LOG"] = self.log
+		os.environ["FAKE_SSH_DELAY"] = str(self.delay)
+		self.paramiko = with_paramiko()
+		# The SDK's client module takes the ssh adapter only if paramiko was
+		# there when it was first imported; on a laptop without it, it is
+		# handed over here, and taken back afterwards.
+		import docker.api.client
+		from docker.transport.sshconn import SSHHTTPAdapter
+		self.lent_adapter = not hasattr(docker.api.client, "SSHHTTPAdapter")
+		if self.lent_adapter:
+			docker.api.client.SSHHTTPAdapter = SSHHTTPAdapter
+		return self
+
+	def processes(self):
+		"""How many ssh processes have been started."""
+		try:
+			with open(self.log) as f:
+				return len(f.read().split())
+		except FileNotFoundError:
+			return 0
+
+	def client(self, timeout):
+		"""
+		The SDK's own client over it, as _build_client makes one. The class
+		itself, not docker.DockerClient: other modules stub that one out.
+		"""
+		from docker.client import DockerClient
+		client = DockerClient(base_url="ssh://root@nas", use_ssh_client=True, version="1.41", timeout=timeout)
+		assert host_registry._reuse_ssh_connections(client, "h_nas") is True
+		return client
+
+	@staticmethod
+	def connect(client):
+		"""
+		Starts the connection with time to spare: starting the stand-in is an
+		interpreter starting, which the short timeouts under test would
+		otherwise have to cover as well.
+		"""
+		assert client.api._get(client.api._url("/_ping"), timeout=10).text == "OK"
+
+	def __exit__(self, *exc):
+		import shutil
+		import docker.api.client
+		if self.lent_adapter:
+			del docker.api.client.SSHHTTPAdapter
+		for name, value in self.saved.items():
+			if value is None:
+				os.environ.pop(name, None)
+			else:
+				os.environ[name] = value
+		without_paramiko(self.paramiko)
+		shutil.rmtree(self.root, ignore_errors=True)
+		return False
+
+
+def test_an_ssh_read_gives_up_at_its_timeout_and_the_connection_is_not_reused():
+	"""
+	The SDK read an ssh:// response from the process's stdout with no deadline:
+	the timeout landed on a socket nothing reads, so a daemon that stopped
+	answering with sshd still up held the thread for good.
+
+	Giving up has to throw the connection away as well. The late answer is
+	still on its way down that pipe, and the next request would read it as its
+	own.
+	"""
+	import requests
+	import urllib3
+
+	with FakeSsh(delay=1.5) as ssh:
+		client = ssh.client(timeout=0.3)
+		try:
+			ssh.connect(client)
+			started = time.monotonic()
+			try:
+				client.api._get(client.api._url("/late"))
+				raise AssertionError("debería haberse rendido al agotar el plazo")
+			except requests.exceptions.ReadTimeout as e:
+				assert isinstance(e.args[0], urllib3.exceptions.ReadTimeoutError), repr(e.args[0])
+			assert time.monotonic() - started < 1.2, "esperó a la respuesta en vez de rendirse"
+
+			# Answered by a new process, not handed the late "late".
+			ssh.connect(client)
+			assert ssh.processes() == 2, ssh.processes()
+		finally:
+			client.close()
+
+
+def test_an_ssh_read_without_a_timeout_waits_for_as_long_as_it_takes():
+	"""What the event stream asks for, by passing None, and has to keep getting."""
+	with FakeSsh(delay=0.8) as ssh:
+		client = ssh.client(timeout=0.3)
+		try:
+			ssh.connect(client)
+			# The same connection serves a request with the short timeout first,
+			# so a deadline left behind on it would show here.
+			assert client.ping() is True
+			assert client.api._get(client.api._url("/late"), timeout=None).text == "late"
+			assert ssh.processes() == 1
+		finally:
+			client.close()
+
+
+def test_the_raw_stream_of_an_exec_over_ssh_is_read_as_over_a_socket():
+	"""
+	An exec's output is read from the connection itself once the headers are
+	in. It has to come through the same buffer the headers did, or whatever
+	arrived along with them is lost; and it waits with no deadline, as the SDK
+	does over a socket, where the timeout never bounded an exec.
+	"""
+	with FakeSsh(delay=0.6) as ssh:
+		client = ssh.client(timeout=0.2)
+		try:
+			ssh.connect(client)
+			response = client.api._post(client.api._url("/stream"), stream=True)
+			channel = client.api._get_raw_response_socket(response)
+			assert channel.gettimeout() == 0.2
+			assert channel.recv(5) == b"early"
+			assert channel.recv(5) == b"late!"
+			assert channel.recv(5) == b""
+			response.close()
+		finally:
+			client.close()
+
+
+def test_an_ssh_client_still_answers_after_it_was_closed():
+	"""
+	The whole way through the SDK: closing is what drop() does to a failing
+	host's clients while an update may still be holding one, and that update
+	has to be able to finish, or at least roll itself back.
+	"""
+	with FakeSsh(delay=0) as ssh:
+		client = ssh.client(timeout=5)
+		try:
+			assert client.ping() is True
+			client.close()
+			assert client.ping() is True
+			assert ssh.processes() == 2, ssh.processes()
+		finally:
+			client.close()

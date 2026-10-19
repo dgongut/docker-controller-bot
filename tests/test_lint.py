@@ -184,6 +184,34 @@ def test_no_string_uses_a_character_with_no_emoji_form():
 	assert not problems, "caracteres sin forma emoji:\n" + "\n".join(sorted(set(problems)))
 
 
+# The tags Telegram's HTML knows, the same as test_bot's _assert_telegram_html.
+TELEGRAM_TAGS = ("b", "strong", "i", "em", "u", "ins", "s", "strike", "del", "code", "pre", "a",
+					"tg-spoiler", "span", "blockquote")
+
+
+def test_no_text_has_a_stray_angle_bracket():
+	"""
+	ru.json said `<минуты>` where the other seven say `&lt;…&gt;`: with the bot
+	in Russian, `/mute abc` was refused by Telegram and the user got no answer
+	at all. Every text goes out as HTML, and any `<` that does not open one of
+	its tags makes Telegram refuse the whole message.
+
+	Except the menu_* ones, which are the command descriptions: BotCommand
+	takes plain text, and an entity there would show as typed.
+	"""
+	import re
+
+	tag = re.compile(r"</?(?:%s)(?:\s[^>]*)?>" % "|".join(sorted(TELEGRAM_TAGS, key=len, reverse=True)))
+	problems = []
+	for filename, key, value in _locale_strings():
+		if key.startswith("menu_"):
+			continue
+		if "<" in tag.sub("", value):
+			problems.append(f"  {filename}: {key}")
+
+	assert not problems, "«<» sin escapar:\n" + "\n".join(problems)
+
+
 # Callbacks whose argument is a container. Their buttons have to carry a
 # reference, not a bare short id: five hex characters name a different
 # container on another host, so a bare id resolves against the local machine
@@ -461,7 +489,8 @@ def test_a_message_about_one_host_says_which():
 # a dependency is something a static check can actually see.
 LOCK_HOLDERS = {
 	"host_registry.py": {"store", "logger", "docker", "paramiko", "shutil",
-							"threading", "time", "uuid", "json", "os"},
+							"threading", "time", "uuid", "json", "os",
+							"io", "select", "socket"},
 }
 
 

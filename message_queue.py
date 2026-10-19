@@ -53,6 +53,41 @@ def _is_permanent(error_message, error_code=None):
 	return any(marker in lowered for marker in PERMANENT_FAILURES)
 
 
+# Lo más que un mensaje puede tener parada la cola esperando lo que pide
+# Telegram en un 429. En un grupo pide de 30 a 60 segundos, así que caben dos
+# esperas; más allá el mensaje se da por perdido, porque la cola es serie y
+# todos los demás esperan con él.
+RATE_LIMIT_BUDGET_SECONDS = 120
+
+# Lo que espera quien envía y necesita la respuesta —el message_id para sus
+# botones—. Cubre una espera de las de un grupo y el envío; si se pasa, recibe
+# None como siempre, pero el mensaje no se retira: sigue en la cola y sale
+# igual. Esperar el tope entero de arriba dejaría un hilo de telebot parado dos
+# minutos, y lo que hay delante en la cola tampoco tiene tope.
+RESULT_TIMEOUT_SECONDS = 90
+
+
+def _is_rate_limited(error_message, error_code=None):
+	"""Whether Telegram asked to slow down."""
+	return error_code == 429 or "Too Many Requests" in error_message or "429" in error_message
+
+
+def _retry_after(exception):
+	"""Seconds Telegram asked to wait in a 429, or None when it did not say."""
+	# Lo trae ApiTelegramException en el JSON de la respuesta; un fallo de
+	# conexión, o un 429 que no viene de la API, no lo lleva.
+	result = getattr(exception, 'result_json', None)
+	parameters = result.get('parameters') if isinstance(result, dict) else None
+	if not isinstance(parameters, dict):
+		return None
+	try:
+		seconds = float(parameters.get('retry_after'))
+	except (TypeError, ValueError):
+		return None
+	# NaN no pasa de aquí: ninguna comparación con él es cierta.
+	return seconds if seconds >= 0 else None
+
+
 def _is_ambiguous(error_message):
 	"""Whether the request may have been carried out even though it failed."""
 	# Un tiempo de lectura agotado quiere decir que la petición salió y lo que
@@ -102,7 +137,11 @@ class MessageQueue:
 		idempotent = message_data.get('idempotent', True)
 
 		try:
-			for attempt in range(self.max_retries):
+			attempt = 0
+			# Lo esperado por los 429 que dijeron cuánto: ver
+			# RATE_LIMIT_BUDGET_SECONDS.
+			waited = 0
+			while True:
 				try:
 					result = func(*args, **kwargs)
 					if result_queue:
@@ -110,10 +149,11 @@ class MessageQueue:
 					return result
 				except Exception as e:
 					error_msg = str(e)
+					error_code = getattr(e, 'error_code', None)
 					# Nothing to gain from asking again, and the queue is
 					# serial: give up now instead of sleeping through two more
 					# attempts while every other message waits.
-					if _is_permanent(error_msg, getattr(e, 'error_code', None)):
+					if _is_permanent(error_msg, error_code):
 						debug(f"Not retrying, Telegram will answer the same: {error_msg}")
 						if result_queue:
 							result_queue.put(None)
@@ -125,17 +165,35 @@ class MessageQueue:
 						if result_queue:
 							result_queue.put(None)
 						return None
-					# Detect Telegram rate limiting
-					if "Too Many Requests" in error_msg or "429" in error_msg:
+					if _is_rate_limited(error_msg, error_code):
+						# Telegram dice cuánto esperar, y antes de eso contesta
+						# 429 a todo: con 2, 4, 8 y 16 segundos fijos los
+						# intentos se gastaban dentro de los 30 a 60 que pide
+						# en un grupo y el mensaje se perdía. Esperar lo que
+						# pide no gasta intento, porque no ha fallado nada.
+						retry_after = _retry_after(e)
+						if retry_after is not None:
+							wait_time = retry_after + 1
+							if waited + wait_time <= RATE_LIMIT_BUDGET_SECONDS:
+								warning(f"Rate limit detected. Telegram asks for {retry_after:g}s, waiting {wait_time:g}s before retrying...")
+								time.sleep(wait_time)
+								waited += wait_time
+								continue
+							error(f"Giving up on a message: Telegram asks to wait {retry_after:g}s more, and it has already waited {waited:g}s: {error_msg}")
+							if result_queue:
+								result_queue.put(None)
+							return None
 						if attempt < self.max_retries - 1:
 							wait_time = (2 ** attempt) * 2  # Exponential backoff: 2, 4, 8 seconds
 							warning(f"Rate limit detected. Waiting {wait_time}s before retrying...")
 							time.sleep(wait_time)
+							attempt += 1
 							continue
 					elif attempt < self.max_retries - 1:
 						wait_time = 1 * (attempt + 1)
 						debug(f"Error sending message (attempt {attempt + 1}/{self.max_retries}). Retrying in {wait_time}s...")
 						time.sleep(wait_time)
+						attempt += 1
 						continue
 
 					error(f"Final error sending message after {self.max_retries} attempts: {str(e)}")
@@ -165,9 +223,11 @@ class MessageQueue:
 		})
 		if wait_for_result:
 			try:
-				return result_queue.get(timeout=60)  # Wait up to 60 seconds
+				return result_queue.get(timeout=RESULT_TIMEOUT_SECONDS)
 			except queue.Empty:
-				error("Error processing message queue: Timeout waiting for message result")
+				# El mensaje sigue en la cola y se seguirá intentando: lo que
+				# se pierde es su respuesta, no el envío.
+				error(f"Error processing message queue: no result after {RESULT_TIMEOUT_SECONDS}s, the message stays queued")
 				return None
 		return None
 
