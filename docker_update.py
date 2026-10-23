@@ -370,21 +370,214 @@ _ENDPOINT_TO_CONNECT_KWARGS = {
 	'links': 'links',
 	'link_local_ips': 'link_local_ips',
 	'driver_opts': 'driver_opt',
-	# Kept like the primary network's: one assigned by Docker stays the same
-	# across updates, and one set by hand — a DHCP reservation on macvlan —
-	# is not lost on a network that happens not to be the first.
+	# Given back as reported, assigned or set by hand —a DHCP reservation on
+	# macvlan—: Docker copies no other network's into Config.MacAddress, and
+	# /compose never writes these, so nothing gets pinned (unlike the main
+	# network's; see _primary_mac_to_keep). A container stopped after running
+	# reports none; one never started, only those set by hand.
 	'mac_address': 'mac_address',
 }
 
 
+def _main_network_name(container, host_config, network_settings):
+	"""
+	The container's network mode, with a network given by its id named.
+
+	`docker run --network <id>` keeps the id as the network mode, and so does
+	Compose 2.29, while the networks it is attached to are reported by name:
+	the main one then matched none of them, and its static IP, aliases and
+	MAC were lost on every update. A container never started reports no
+	network ids, so then the daemon is asked.
+	"""
+	mode = _get_val(host_config, 'NetworkMode')
+	networks = _get_dict(network_settings, 'Networks')
+	if not mode or len(mode) < 12 or ':' in mode:
+		return mode
+	# Asked for with endpoint options, Docker lists it twice: under the id as
+	# well as under the name (see _id_named_duplicates). With more than one
+	# network the mode is then the full id, which both start with.
+	duplicates = _id_named_duplicates(networks)
+	for name, endpoint in networks.items():
+		network_id = _get_val(endpoint, 'NetworkID') or ''
+		if name != mode and name not in duplicates and network_id.startswith(mode):
+			return name
+	if mode in networks:
+		return mode
+	try:
+		name = container.client.api.inspect_network(mode)['Name']
+	except Exception:
+		return mode
+	return name if name in networks else mode
+
+
+def _id_named_duplicates(networks):
+	"""
+	The endpoints Docker lists a second time under the network's id.
+
+	`docker run --network <short id> --ip ...` has Docker 25 and later report
+	the network under that id and under its name. Created again with both,
+	the container was attached twice to the same network, would not start,
+	and the old one —which Docker itself no longer restarts— was left
+	stopped. The name stays.
+	"""
+	names_by_id = {}
+	for name, endpoint in networks.items():
+		network_id = _get_val(endpoint, 'NetworkID')
+		if network_id:
+			names_by_id.setdefault(network_id, []).append(name)
+	duplicates = set()
+	for network_id, names in names_by_id.items():
+		by_id = {name for name in names if len(name) >= 12 and network_id.startswith(name)}
+		if by_id and len(by_id) < len(names):
+			duplicates |= by_id
+	return duplicates
+
+
+def _api_version(container):
+	"""The API version the container's client agreed with its daemon, or None."""
+	version = getattr(getattr(getattr(container, 'client', None), 'api', None), '_version', None)
+	return version if isinstance(version, str) else None
+
+
+def _derived_from_ipv4(mac, endpoint):
+	"""
+	Whether a MAC is the one Docker 25 to 27 assign from the endpoint's IPv4
+	address: 02:42 and its four octets.
+
+	Given back at create, it outlived the address it came from. A container
+	on a network without a fixed IP got another address from the update and
+	kept the old one's MAC, and the next container to get that address was
+	assigned the same MAC: two of them answering for it on the network.
+	Docker 28 assigns them at random, and older ones ignore it at create.
+	"""
+	try:
+		octets = [int(octet) for octet in (_get_val(endpoint, 'IPAddress') or '').split('.')]
+	except ValueError:
+		return False
+	if len(octets) != 4 or not mac:
+		return False
+	return mac.lower() == '02:42:' + ':'.join(f'{octet:02x}' for octet in octets)
+
+
+def _assigned_from_ipv4(container, mac, endpoint):
+	"""_derived_from_ipv4, on the daemons that derive it (API 1.44 to 1.47)."""
+	version = _api_version(container)
+	if version is None or docker.utils.version_lt(version, '1.44') or not docker.utils.version_lt(version, '1.48'):
+		return False
+	return _derived_from_ipv4(mac, endpoint)
+
+
+def _mac_set_on_a_stopped_container(container):
+	"""
+	The main network's MAC set by hand on a stopped container, on Docker 29.
+
+	Stopped, a container reports no MAC on its endpoints, and from API 1.52
+	there is no Config.MacAddress either: a stopped Pi-hole on macvlan lost
+	its DHCP reservation on the first update. The daemon still gives the
+	field to clients of 1.51, from what was set by hand. None when it says
+	nothing, or no longer serves 1.51.
+	"""
+	version = _api_version(container)
+	if version is None or docker.utils.version_lt(version, '1.52'):
+		return None
+	try:
+		api = container.client.api
+		old_view = api._result(api._get(f"{api.base_url}/v1.51/containers/{container.id}/json"), json=True)
+	except Exception:
+		return None
+	return _get_val(_get_dict(old_view, 'Config'), 'MacAddress') or None
+
+
+def _primary_mac_to_keep(config, api_version):
+	"""
+	The main network's MAC to give the new container, or None to let Docker
+	assign one.
+
+	Given back as it was —set by hand, or assigned— so an update does not
+	change it. Except one Docker assigned, on Docker 25 to 28 (API 1.44 to
+	1.51): those copy any MAC given at create into Config.MacAddress, where it
+	then reads as set by hand, and /compose wrote it out as the container's
+	`mac_address`. On those, Config.MacAddress says which it was —there only
+	when set by hand—, and an assigned one is left to Docker, which gives
+	another the way `docker compose up` does on every recreate. Before 1.44
+	the container's own MAC is what counts (see the create), and from Docker
+	29 (API 1.52) nothing is copied there.
+
+	By the API version the client agreed with the daemon, not by whether the
+	field is in the inspect: it is missing both for an assigned MAC on Docker
+	28 and for any MAC on Docker 29.
+
+	A container an update already pinned this way on 25 to 28 cannot be told
+	from one set by hand, and keeps its MAC: recreating it once from its
+	compose is what unpins it.
+	"""
+	if not isinstance(api_version, str):
+		return config.get('network_mac_address')
+	if docker.utils.version_lt(api_version, '1.44'):
+		# The container's own MAC carries it there (see the create).
+		return config.get('network_mac_address')
+	# A stopped container reports no MAC on its endpoints, while its
+	# Config.MacAddress still holds the one set by hand on Docker 25 to 28:
+	# it was lost from the update of a stopped Pi-hole on macvlan.
+	mac = config.get('network_mac_address') or config.get('mac_address')
+	if config.get('mac_address_unsaid'):
+		# Config.MacAddress stays empty even for one set by hand, and says
+		# nothing (see extract_container_config). Kept, as the create keeps
+		# the id, so nothing gets copied this time either. Docker 25 to 27
+		# make theirs from the address, and those are left out already.
+		return mac
+	copies_into_config = docker.utils.version_lt(api_version, '1.52')
+	if mac and copies_into_config and not config.get('mac_address'):
+		return None
+	return mac
+
+
+def _extra_endpoints_at_create(client, config):
+	"""
+	Every network beyond the main one, as endpoint settings for the create.
+
+	From API 1.44 (Docker 25) a container can be created on all of its
+	networks at once, as `docker run --network a --network b` and compose
+	do. Connected afterwards instead, Docker 25 to 28 ignore the MAC asked
+	for: one set by hand on a second network —a DHCP reservation— came back
+	different from every update. And the container starts with every
+	interface, never with just the main one.
+
+	Only when the main network is among those reported: under `default` the
+	daemon names it `bridge`, and the two could not be told apart. What is
+	left out is still connected afterwards by _connect_extra_networks, which
+	skips whatever is already attached.
+	"""
+	networks = config.get('networks') or {}
+	primary = config.get('network_mode')
+	if len(networks) <= 1 or primary not in networks:
+		return {}
+	endpoints = {}
+	for network_name, endpoint in networks.items():
+		if network_name == primary or str(network_name).lower() in ('host', 'none') or str(network_name).startswith('container:'):
+			continue
+		endpoint = endpoint or {}
+		endpoint_config = client.api.create_endpoint_config(**{
+			connect_key: endpoint[endpoint_key]
+			for endpoint_key, connect_key in _ENDPOINT_TO_CONNECT_KWARGS.items() if endpoint.get(endpoint_key)})
+		if endpoint.get('gw_priority'):
+			# The same gateway priority the connect would give it.
+			endpoint_config['GwPriority'] = endpoint['gw_priority']
+		endpoints[network_name] = endpoint_config
+	return endpoints
+
+
 def _connect_extra_networks(client, new_container, config, debug_func, error_func):
 	"""
-	Attaches the container to every network beyond the primary one.
+	Attaches the container to every network beyond the primary one that the
+	create did not already.
 
-	`containers.create()` only takes a single network, so a container sitting on
-	several used to come back from an update attached to just one of them. They
-	are connected before the container is started, the same way `compose up`
-	does it, so it comes up with all of its interfaces at once.
+	Before API 1.44 (Docker 25) a create takes a single network, so a
+	container sitting on several used to come back from an update attached to
+	just one of them; from 1.44 they all go in at create (see
+	_extra_endpoints_at_create), and this only connects what that left out.
+	They are connected before the container is started, the same way
+	`compose up` does it, so it comes up with all of its interfaces at once.
 
 	Raises on failure: a half-connected container is worse than a rolled back
 	update, and the caller restores the old one.
@@ -495,6 +688,26 @@ def _create_container(client, stop_timeout, exposed_ports, image, host_config_ex
 		container_config['Healthcheck'] = copy.deepcopy(raw_healthcheck)
 		response = api.create_container_from_config(container_config, name, platform)
 	return client.containers.get(response['Id'])
+
+
+def _api_1_44_hostname_alias(container, container_attrs):
+	"""
+	The hostname, when the inspect lists it among the aliases without anyone
+	having set it there.
+
+	Only API 1.44 (Docker 25) does that: from 1.45 the inspect shows the
+	aliases that were asked for, and up to 1.43 the hostname is no DNS name
+	at all, so an alias with its value is one somebody set to make it one.
+	Carried over, it would come back set by hand on every network, and
+	/compose would write it under `aliases:`.
+	"""
+	api_version = _api_version(container)
+	hostname = _get_val(container_attrs, 'Hostname')
+	if not hostname or api_version is None:
+		return ()
+	if docker.utils.version_lt(api_version, '1.44') or not docker.utils.version_lt(api_version, '1.45'):
+		return ()
+	return (hostname,)
 
 
 def extract_container_config(container, tag=None):
@@ -623,7 +836,17 @@ def extract_container_config(container, tag=None):
 			config['anonymous_targets'].append(destination)
 
 	# Network configuration
-	config['network_mode'] = _get_val(host_config, 'NetworkMode')
+	config['network_mode'] = _main_network_name(container, host_config, network_settings)
+	# The id it was given as, for the create to give it again (see
+	# _primary_mac_to_keep). Everything else goes by the name.
+	_given_mode = _get_val(host_config, 'NetworkMode')
+	config['network_mode_by_id'] = _given_mode if _given_mode != config['network_mode'] else None
+	# Docker 25 to 28 copy the main network's MAC into Config.MacAddress by
+	# looking the network mode up among the endpoints: an id they are not
+	# listed under finds nothing, and the field then says nothing, set by
+	# hand or not. A short id they are listed under does find it.
+	config['mac_address_unsaid'] = bool(config['network_mode_by_id']) and \
+		config['network_mode_by_id'] not in _get_dict(network_settings, 'Networks')
 	# Docker rejects hostname/domainname/mac_address when network_mode is host,
 	# container:<id> or none ("conflicting options: hostname and the network mode").
 	_nm = (config['network_mode'] or '').lower()
@@ -635,6 +858,7 @@ def extract_container_config(container, tag=None):
 	if _hostname == _old_short_id:
 		_hostname = None
 	config['hostname'] = None if _nm_conflicts_with_hostname else _hostname
+	_implicit_aliases = {_old_short_id, *_api_1_44_hostname_alias(container, container_attrs)}
 	config['domainname'] = None if _nm_conflicts_with_hostname else _get_val(container_attrs, 'Domainname')
 	config['dns'] = _get_list(host_config, 'Dns')
 	config['dns_opt'] = _get_list(host_config, 'DnsOptions')
@@ -663,6 +887,10 @@ def extract_container_config(container, tag=None):
 	if network_settings and config['network_mode']:
 		networks = _get_dict(network_settings, 'Networks')
 		network_config = _get_dict(networks, config['network_mode'])
+		if not network_config and config['network_mode'].lower() == 'default':
+			# Docker 25 and older keep `default` as the mode and report the
+			# endpoint as `bridge`. The create takes `default` back.
+			network_config = _get_dict(networks, 'bridge')
 		if network_config:
 			# IPAM config for static IPs
 			ipam_config = _get_dict(network_config, 'IPAMConfig')
@@ -677,42 +905,65 @@ def extract_container_config(container, tag=None):
 			# engine on some versions); it would become a stale DNS name.
 			aliases = _get_val(network_config, 'Aliases')
 			if aliases:
-				aliases = [a for a in aliases if a != _old_short_id]
+				aliases = [a for a in aliases if a not in _implicit_aliases]
 			network_aliases = aliases if aliases else None
 			links = _link_pairs(_get_val(network_config, 'Links'))
 			network_links = links if links else None
 			driver_opts = _get_val(network_config, 'DriverOpts')
 			network_driver_opts = driver_opts if driver_opts else None
 			mac = _get_val(network_config, 'MacAddress')
+			if _assigned_from_ipv4(container, mac, network_config):
+				mac = None
+			if not mac and not _nm_conflicts_with_hostname:
+				mac = _mac_set_on_a_stopped_container(container)
 			network_mac_address = mac if mac else None
-			link_local = _get_val(network_config, 'LinkLocalIPs')
+			# Docker reports them only inside IPAMConfig: read from the
+			# endpoint itself they were always empty and lost on update.
+			link_local = _get_val(ipam_config, 'LinkLocalIPs')
 			link_local_ips = link_local if link_local else None
 
-	# Every network endpoint, not only the primary one. `containers.create()`
-	# only accepts the primary network, so `_connect_extra_networks` reattaches
-	# the rest from here, and the compose generator uses it to declare them all.
+	# Every network endpoint, not only the primary one. The create takes them
+	# all from API 1.44 on (`_extra_endpoints_at_create`); older daemons only
+	# take the primary, and `_connect_extra_networks` reattaches the rest. The
+	# compose generator uses it to declare them all.
 	config['networks'] = {}
+	_duplicates = _id_named_duplicates(_get_dict(network_settings, 'Networks'))
 	for _net_name, _net_config in _get_dict(network_settings, 'Networks').items():
+		if _net_name in _duplicates:
+			continue
 		_endpoint = {}
 		_ipam = _get_dict(_net_config, 'IPAMConfig')
-		for _key, _api_key in (('ipv4_address', 'IPv4Address'), ('ipv6_address', 'IPv6Address')):
+		for _key, _api_key in (('ipv4_address', 'IPv4Address'), ('ipv6_address', 'IPv6Address'),
+								('link_local_ips', 'LinkLocalIPs')):
 			_value = _get_val(_ipam, _api_key)
 			if _value:
 				_endpoint[_key] = _value
 		# The engine adds an alias with the container's short id on some
 		# versions; it would become a stale DNS name.
-		_aliases = [a for a in (_get_val(_net_config, 'Aliases') or []) if a != _old_short_id]
+		_aliases = [a for a in (_get_val(_net_config, 'Aliases') or []) if a not in _implicit_aliases]
 		if _aliases:
 			_endpoint['aliases'] = _aliases
 		_links = _link_pairs(_get_val(_net_config, 'Links'))
 		if _links:
 			_endpoint['links'] = _links
-		for _key, _api_key in (('link_local_ips', 'LinkLocalIPs'), ('driver_opts', 'DriverOpts'),
-								('gw_priority', 'GwPriority'), ('mac_address', 'MacAddress')):
+		for _key, _api_key in (('driver_opts', 'DriverOpts'), ('gw_priority', 'GwPriority'),
+								('mac_address', 'MacAddress')):
 			_value = _get_val(_net_config, _api_key)
+			if _key == 'mac_address' and _assigned_from_ipv4(container, _value, _net_config):
+				continue
 			if _value:
 				_endpoint[_key] = _value
 		config['networks'][_net_name] = _endpoint
+
+	# For /compose, which writes Config.MacAddress: where that says nothing,
+	# on Docker 25 to 27 the endpoint's MAC still tells, since theirs come
+	# from the address and are left out above. A container Compose 2.29 had
+	# created by the network's id lost its MAC from the second /compose on.
+	_version = _api_version(container)
+	_endpoint_tells = (_version is not None and not docker.utils.version_lt(_version, '1.44')
+						and docker.utils.version_lt(_version, '1.48'))
+	config['mac_address_by_hand'] = (network_mac_address if config['mac_address_unsaid'] and _endpoint_tells
+									 else None)
 
 	config['ipv4_address'] = ipv4_address
 	config['ipv6_address'] = ipv6_address
@@ -1020,12 +1271,6 @@ def _perform_update_locked(client, container, config, container_name, message, e
 		try:
 			# Build networking config with EndpointConfig for static IP and network settings
 			networking_config = None
-			has_network_config = (
-				config['ipv4_address'] or config['ipv6_address'] or
-				config['network_aliases'] or config['network_links'] or
-				config['network_driver_opts'] or config['link_local_ips'] or
-				config['network_mac_address']  # Include MAC in network config check
-			)
 
 			# For macvlan and similar networks, MAC should be in EndpointConfig, not in containers.create()
 			# Otherwise the MAC gets lost
@@ -1037,8 +1282,22 @@ def _perform_update_locked(client, container, config, container_name, message, e
 			# every update, and with it another address.
 			api_version = getattr(client.api, '_version', None)
 			container_wide_mac = isinstance(api_version, str) and docker.utils.version_lt(api_version, '1.44')
+			primary_mac = _primary_mac_to_keep(config, api_version)
+			# As it was given: by name, or by id (see _primary_mac_to_keep).
+			# docker-py drops the networking config unless its main network
+			# goes under this same key.
+			main_network = config.get('network_mode_by_id') or config['network_mode']
+			has_network_config = (
+				config['ipv4_address'] or config['ipv6_address'] or
+				config['network_aliases'] or config['network_links'] or
+				config['network_driver_opts'] or config['link_local_ips'] or
+				primary_mac  # Include MAC in network config check
+			)
+			# From API 1.44 every network goes in at create; before it, only
+			# the main one can, and the rest are connected afterwards.
+			extra_endpoints = {} if container_wide_mac else _extra_endpoints_at_create(client, config)
 
-			if config['network_mode'] and has_network_config:
+			if config['network_mode'] and (has_network_config or extra_endpoints):
 				from docker.types import EndpointConfig
 				# Build endpoint config with all network parameters
 				# EndpointConfig requires version parameter
@@ -1056,9 +1315,9 @@ def _perform_update_locked(client, container, config, container_name, message, e
 					endpoint_kwargs['driver_opt'] = config['network_driver_opts']
 				if config['link_local_ips']:
 					endpoint_kwargs['link_local_ips'] = config['link_local_ips']
-				if config['network_mac_address']:
+				if primary_mac:
 					# MAC address goes in EndpointConfig for network-specific MAC (e.g., macvlan)
-					endpoint_kwargs['mac_address'] = config['network_mac_address']
+					endpoint_kwargs['mac_address'] = primary_mac
 
 				endpoint_config = EndpointConfig(**endpoint_kwargs)
 				# Which network the default route goes through, when there are
@@ -1067,8 +1326,9 @@ def _perform_update_locked(client, container, config, container_name, message, e
 				gw_priority = (config.get('networks') or {}).get(config['network_mode'], {}).get('gw_priority')
 				if gw_priority:
 					endpoint_config['GwPriority'] = gw_priority
-				networking_config = {config['network_mode']: endpoint_config}
-				debug_func(f"[CREATE_CONTAINER] Network config: IPv4={config['ipv4_address']}, IPv6={config['ipv6_address']}, MAC={config['network_mac_address']}, aliases={config['network_aliases']}")
+				networking_config = {main_network: endpoint_config, **extra_endpoints}
+				debug_func(f"[CREATE_CONTAINER] Network config: IPv4={config['ipv4_address']}, IPv6={config['ipv6_address']}, MAC={primary_mac}, aliases={config['network_aliases']}"
+						   + (f", and at create too: {', '.join(extra_endpoints)}" if extra_endpoints else ""))
 				if container_wide_mac and config['mac_address']:
 					effective_mac = config['mac_address']
 					debug_func(f"[CREATE_CONTAINER] Container MAC address: {effective_mac} (API {api_version} has no MAC per endpoint)")
@@ -1099,8 +1359,8 @@ def _perform_update_locked(client, container, config, container_name, message, e
 				# aliases, static IPs, links... - including the compose service-name
 				# DNS alias other containers rely on). When `network` is set it also
 				# becomes HostConfig.NetworkMode, so both paths keep the same mode.
-				network=config['network_mode'] if networking_config else None,
-				network_mode=config['network_mode'],
+				network=main_network if networking_config else None,
+				network_mode=main_network,
 				networking_config=networking_config,
 				hostname=config['hostname'],
 				domainname=config['domainname'],

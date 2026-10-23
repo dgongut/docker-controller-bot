@@ -3,7 +3,7 @@ Persistent storage for everything the bot writes.
 
 A single mapped volume holds it all, split by lifecycle:
 
-	<root>/settings.json         user configuration (hand-edited or via /settings)
+	<root>/settings.json         user configuration (hand-edited, via /settings or /info)
 	<root>/schedules.json        scheduled tasks
 	<root>/state/state.json      mute expiry and other small runtime scalars
 	<root>/state/updates.json    update-check cache (regenerable)
@@ -54,11 +54,20 @@ DEFAULTS = {
 	# The id is generated once and never changes, so cache entries and
 	# schedules survive an alias rename or a change of connection URL.
 	"hosts": [],
+	# How the bot treats each container, by host id and then container name:
+	# {"h_xxxx": {"jellyfin": {"updates": "auto"}}}. See container_update_mode.
+	"containers": {},
 }
 
 STATE_DEFAULTS = {
 	# Epoch seconds until which notifications are silenced. 0 means not muted.
 	"mute_until": 0,
+	# Whether an update check has ever completed on this install. See
+	# update_check_done.
+	"update_check_done": False,
+	# Since when each container with a setting has been missing from its host,
+	# as {"<host_id>:<name>": epoch seconds}. See reconcile_containers.
+	"containers_absent": {},
 }
 
 _lock = threading.RLock()
@@ -613,6 +622,239 @@ def clear_update_cache():
 	with _lock:
 		_updates_document()["entries"] = {}
 		_flush("updates")
+
+
+def update_check_done():
+	"""
+	Whether an update check has ever finished on this install.
+
+	An empty cache used to be the sign of a first pass, which has to fill it
+	without announcing anything. But the cache also empties when its last
+	entry is forgotten —the only container stopped being checked, or was
+	removed—, and the pass after that took every pending update for an old
+	one: it saved them as announced without saying a word.
+	"""
+	return bool(state_get("update_check_done")) or has_update_cache()
+
+
+def mark_update_check_done():
+	"""Records that a pass finished, once."""
+	if not state_get("update_check_done"):
+		state_set("update_check_done", True)
+
+
+# ---------------------------------------------------------------------------
+# Per-container settings
+# ---------------------------------------------------------------------------
+#
+# How the bot treats each container, chosen from /info or /settings, under
+# "containers" in settings.json:
+#
+#	"containers": {"h_a91c": {"jellyfin": {"updates": "auto"}}}
+#
+# Configuration the user chose, so in settings.json and not in state/: it
+# cannot be regenerated, and it takes on the rule that an unreadable settings
+# file is never written over. Keyed like the update cache, by host id and
+# name, because every update recreates a container under a new id and the
+# same name.
+#
+# Only what differs from the default is stored: no entry is "tell me", and a
+# container whose settings all go back to the default leaves the file.
+#
+# Functions of its own rather than get/set with a dotted path: Docker allows
+# dots in a container name, and the path would split it in two.
+
+# What the update check does with a container. None, the default, is to
+# announce what it finds; these are the other two, the same as the
+# DCB-Auto-Update and DCB-Ignore-Check-Updates labels.
+UPDATE_MODES = ("auto", "ignore")
+
+
+def _as_update_mode(value):
+	"""A stored mode as one of UPDATE_MODES, or None for anything else."""
+	if not isinstance(value, str):
+		return None
+	value = value.strip().lower()
+	return value if value in UPDATE_MODES else None
+
+
+def _stored_containers():
+	"""The "containers" object as stored, or {} when it is missing or not one."""
+	containers = _settings_document().get("containers")
+	return containers if isinstance(containers, dict) else {}
+
+
+def container_update_mode(host_id, name):
+	"""How the update check treats a container: "auto", "ignore", or None."""
+	with _lock:
+		on_host = _stored_containers().get(host_id)
+		entry = on_host.get(name) if isinstance(on_host, dict) else None
+		return _as_update_mode(entry.get("updates")) if isinstance(entry, dict) else None
+
+
+def set_container_update_mode(host_id, name, mode):
+	"""
+	Stores how the update check treats a container. None goes back to the
+	default.
+
+	Returns False when it could not be stored: with settings.json unreadable
+	the change would only live in memory, and be gone at the next restart
+	without anyone having been told.
+	"""
+	mode = _as_update_mode(mode)
+	if not isinstance(host_id, str) or not isinstance(name, str):
+		return False
+	with _lock:
+		document = _settings_document()
+		if _settings_unreadable is not None:
+			return False
+		containers = document.get("containers")
+		if not isinstance(containers, dict):
+			containers = document["containers"] = {}
+		on_host = containers.get(host_id)
+		if not isinstance(on_host, dict):
+			on_host = containers[host_id] = {}
+		entry = on_host.get(name)
+		if not isinstance(entry, dict):
+			entry = on_host[name] = {}
+		if mode is None:
+			entry.pop("updates", None)
+		else:
+			entry["updates"] = mode
+		# Nothing left to say about it: out of the file, and its host too.
+		if not entry:
+			del on_host[name]
+		if not on_host:
+			del containers[host_id]
+		_flush("settings")
+		_forget_absence(lambda key: key == _update_key(host_id, name))
+		return True
+
+
+def forget_container_settings(host_id, name):
+	"""Drops everything stored about one container. True when there was something."""
+	with _lock:
+		on_host = _stored_containers().get(host_id)
+		if not isinstance(on_host, dict) or name not in on_host:
+			return False
+		del on_host[name]
+		if not on_host:
+			del _settings_document()["containers"][host_id]
+		_flush("settings")
+		_forget_absence(lambda key: key == _update_key(host_id, name))
+		return True
+
+
+def forget_host_containers(host_id):
+	"""
+	Drops the settings of every container on one host, for a host removed.
+
+	Not for one that is down or paused: those keep theirs until they are back.
+	"""
+	with _lock:
+		containers = _stored_containers()
+		if host_id not in containers:
+			return False
+		del containers[host_id]
+		_flush("settings")
+		_forget_absence(lambda key: key.startswith(_update_key(host_id, "")))
+		return True
+
+
+def _forget_absence(matches):
+	"""
+	Drops the absence marks `matches` picks, for settings set or gone.
+
+	A mark outliving its setting counted for the next one: a container set
+	again weeks later lost it the first time it was recreated, with a
+	message saying it had been missing for a month.
+	"""
+	absent = state_get("containers_absent")
+	if isinstance(absent, dict) and any(matches(key) for key in absent):
+		state_set("containers_absent", {key: since for key, since in absent.items() if not matches(key)})
+
+
+def container_settings():
+	"""
+	Every stored per-container setting, {host_id: {name: {...}}}. A copy.
+
+	Only what has the shape: a hand edit that left a host or a container as
+	something other than an object is no setting at all, here as it is for
+	container_update_mode, and must not reach the screens that count them.
+	"""
+	with _lock:
+		return json.loads(json.dumps({
+			host_id: {name: entry for name, entry in on_host.items() if isinstance(entry, dict)}
+			for host_id, on_host in _stored_containers().items() if isinstance(on_host, dict)}))
+
+
+def reconcile_containers(present, now, grace_seconds):
+	"""
+	Forgets the settings of containers that are gone for good.
+
+	`present` is {host_id: names} for the hosts whose listing came back whole,
+	just now. Only those are judged: a host that is down, paused or too slow
+	says nothing about its containers, and a setting is not lost because a
+	machine was switched off for a week. An empty listing is not judged either:
+	a daemon that answers with nothing is more likely a wrong one than one
+	where everything was removed.
+
+	A container missing from its host is noted as absent from `now`, and its
+	settings go when a listing still misses it `grace_seconds` later. Not
+	straight away, because recreating a container is removing it and creating
+	it again: `docker compose up -d`, Watchtower, and a `down` followed by an
+	`up` all leave a moment —or a weekend— without it. Docker's own events
+	cannot tell those apart either, and they are lost while the bot is down.
+
+	The marks are in state/, so a restart does not start the count again, and
+	losing them only delays a cleanup. The time a host spends down counts:
+	what was already missing before it went, and is still missing when it is
+	back, has been missing all along.
+
+	Returns the (host_id, name) pairs whose settings were forgotten.
+	"""
+	with _lock:
+		_settings_document()
+		if _settings_unreadable is not None:
+			return []
+		containers = _stored_containers()
+		absent = state_get("containers_absent")
+		absent = dict(absent) if isinstance(absent, dict) else {}
+		forgotten = []
+		with batch("settings"):
+			for host_id, names in present.items():
+				names = builtins.set(names or ())
+				on_host = containers.get(host_id)
+				if not names or not isinstance(on_host, dict):
+					continue
+				# Only what is a setting: an entry a hand edit left as something
+				# other than an object is none, and has nothing to count down.
+				for name in [n for n, entry in on_host.items() if isinstance(entry, dict)]:
+					key = _update_key(host_id, name)
+					if name in names:
+						absent.pop(key, None)
+						continue
+					since = absent.get(key)
+					if not isinstance(since, (int, float)):
+						absent[key] = now
+					elif now - since >= grace_seconds:
+						forget_container_settings(host_id, name)
+						absent.pop(key, None)
+						forgotten.append((host_id, name))
+		# A mark for a setting that is no longer there —changed back to the
+		# default, or its host removed— has nothing left to count down to. Nor
+		# one that cannot be placed at all: written by hand without a host, or
+		# for a host whose value is not an object.
+		stored = _stored_containers()
+
+		def placed(key):
+			host_id, separator, name = str(key).partition(":")
+			on_host = stored.get(host_id)
+			return bool(separator) and isinstance(on_host, dict) and isinstance(on_host.get(name), dict)
+		absent = {key: since for key, since in absent.items() if placed(key)}
+		if absent != state_get("containers_absent"):
+			state_set("containers_absent", absent)
+		return forgotten
 
 
 def reload():

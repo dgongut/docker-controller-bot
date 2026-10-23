@@ -51,6 +51,11 @@ COMPOSE_MANAGED_LABEL_PREFIX = "com.docker.compose."
 # Reserved compose name for the network a project creates for itself
 DEFAULT_NETWORK_KEY = "default"
 
+# `priority` of the container's main network when it has several, for compose
+# to keep it as the primary rather than take the first by name. The rest are
+# at compose's default, 0.
+MAIN_NETWORK_PRIORITY = 1
+
 # Restart policies that mean "no restart policy at all"
 EMPTY_RESTART_POLICIES = ("", "no")
 
@@ -143,6 +148,8 @@ class ComposeGenerator:
 		# building it so they can be declared at the top level.
 		self._named_volumes = set()
 		self._named_networks = {}
+		# Whether the default bridge was left out next to other networks.
+		self._dropped_bridge = False
 
 	# ------------------------------------------------------------------
 	# Public API
@@ -338,11 +345,62 @@ class ComposeGenerator:
 		else:
 			self._add_named_networks(service, mode)
 
-		self._set(service, "mac_address", self._get("mac_address"))
+		self._keep_main_network_first(service, network_mode)
+		self._set_mac_address(service, network_mode)
 		self._set(service, "dns", self._get("dns"))
 		self._set(service, "dns_opt", self._get("dns_opt"))
 		self._set(service, "dns_search", self._get("dns_search"))
 		self._set(service, "extra_hosts", self._get("extra_hosts"))
+
+	def _keep_main_network_first(self, service, network_mode):
+		"""
+		Compose makes the primary network the one with the highest
+		`priority`, then the first by name, which on a container with several
+		need not be this one's: it came back with another main network, and
+		the MAC set by hand on another interface. With more than one, the
+		main network gets the priority.
+		"""
+		networks = service.get("networks")
+		if not networks or len(networks) < 2:
+			return
+		if not isinstance(networks, dict):
+			networks = service["networks"] = {name: {} for name in networks}
+		key = network_mode if network_mode in networks else None
+		if key is None and network_mode == self._project_default_network() and DEFAULT_NETWORK_KEY in networks:
+			key = DEFAULT_NETWORK_KEY
+		if key is not None:
+			networks[key] = dict(networks[key] or {}, priority=MAIN_NETWORK_PRIORITY)
+
+	def _set_mac_address(self, service, network_mode):
+		"""
+		The MAC set by hand, at service level: compose gives it to the primary
+		network, kept as the main one by _keep_main_network_first.
+
+		Not under its own network: Docker only says a MAC was set by hand
+		(Config.MacAddress) for the primary, so with compose taking another
+		one the next /compose had lost it. And Compose before 2.20.2 refuses
+		it there.
+		"""
+		mac = self._get("mac_address") or self._get("mac_address_by_hand")
+		if not mac or service.get("network_mode"):
+			return
+		if self._dropped_bridge and str(network_mode).lower() in ("bridge", "default"):
+			# On the default bridge, which compose cannot put next to other
+			# networks (see _add_named_networks): it has nowhere to go.
+			return
+		# Compose 2.29 only gives it to a network written as a mapping:
+		# `networks: [lan]`, `lan:` with nothing, or no networks at all, and
+		# the container came back with another MAC.
+		networks = service.get("networks")
+		if not networks:
+			service["networks"] = {DEFAULT_NETWORK_KEY: {}}
+		elif not isinstance(networks, dict):
+			service["networks"] = {name: {} for name in networks}
+		else:
+			for name, entry in networks.items():
+				if entry is None:
+					networks[name] = {}
+		service["mac_address"] = mac
 
 	def _add_named_networks(self, service, mode):
 		"""
@@ -364,8 +422,11 @@ class ComposeGenerator:
 			# `default` key they survive without pinning the network's name.
 			# A static IP is the exception, it needs the network declared with
 			# its subnet, so that one keeps the real name.
-			if name == project_default and not endpoint.get("ipv4_address"):
-				if endpoint:
+			# Listed even with nothing to say when it is not the only one: a
+			# service that declares networks joins those and no other, and
+			# the container came back off its own stack's network.
+			if name == project_default and not (endpoint.get("ipv4_address") or endpoint.get("ipv6_address")):
+				if endpoint or len(raw_networks) > 1:
 					service.setdefault("networks", {})[DEFAULT_NETWORK_KEY] = endpoint
 				continue
 			networks[name] = endpoint
@@ -380,6 +441,14 @@ class ComposeGenerator:
 			self._set(endpoint, "aliases", self._get("network_aliases"))
 			self._set(endpoint, "link_local_ips", self._get("link_local_ips"))
 			networks = {self._get("network_mode"): self._clean_endpoint(endpoint)}
+
+		# Compose cannot put a service on the default bridge next to other
+		# networks: declared as one more, every `up` failed ("network-scoped
+		# alias is supported only for containers in user defined networks").
+		# Left out, the file at least comes up, on the others.
+		if "bridge" in networks and len(networks) + (DEFAULT_NETWORK_KEY in (service.get("networks") or {})) > 1:
+			del networks["bridge"]
+			self._dropped_bridge = True
 
 		# A container sitting only on the default bridge needs no declaration
 		if not networks or (len(networks) == 1 and not any(networks.values())

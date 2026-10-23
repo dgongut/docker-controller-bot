@@ -329,3 +329,147 @@ def test_an_unsupported_language_is_warned_about_once():
 	finally:
 		i18n.warning = original
 		shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_container_setting_is_kept_by_host_and_name():
+	"""
+	By name, as the update cache is: every update gives the container a new
+	id. Dots are allowed in a name, and a dotted path would have split it.
+	"""
+	root = fresh_root()
+	assert store.set_container_update_mode("h_casa", "my.app", "auto") is True
+	assert store.set_container_update_mode("h_nas1", "my.app", "ignore") is True
+	store.reload()
+	assert store.container_update_mode("h_casa", "my.app") == "auto"
+	assert store.container_update_mode("h_nas1", "my.app") == "ignore"
+	assert store.container_update_mode("h_casa", "other") is None
+	# Back to the default, nothing is left of it: not the entry, not the host.
+	store.set_container_update_mode("h_casa", "my.app", None)
+	assert store.container_settings() == {"h_nas1": {"my.app": {"updates": "ignore"}}}
+	shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_hand_written_container_setting_is_read_for_what_it_says():
+	"""Anything but the two modes is the default, rather than something truthy."""
+	root = fresh_root()
+	with open(store.settings_path(), "w", encoding="utf-8") as handle:
+		json.dump({"containers": {"h_casa": {"plex": {"updates": " AUTO "}, "radarr": {"updates": "sí"},
+											"sonarr": "auto"}}}, handle)
+	store.reload()
+	assert store.container_update_mode("h_casa", "plex") == "auto"
+	assert store.container_update_mode("h_casa", "radarr") is None
+	assert store.container_update_mode("h_casa", "sonarr") is None
+	shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_container_setting_is_refused_while_the_settings_cannot_be_read():
+	"""Changed only in memory, it would be gone at the next restart without a word."""
+	root = fresh_root()
+	broken = '{"containers": {"h_casa": {"plex": {"updates": "auto"},}}}'
+	with open(store.settings_path(), "w", encoding="utf-8") as handle:
+		handle.write(broken)
+	store.reload()
+	assert store.set_container_update_mode("h_casa", "plex", "ignore") is False
+	assert store.reconcile_containers({"h_casa": ["nginx"]}, 10 ** 9, 0) == []
+	with open(store.settings_path(), encoding="utf-8") as handle:
+		assert handle.read() == broken
+	shutil.rmtree(root, ignore_errors=True)
+
+
+def test_forgetting_a_host_takes_its_container_settings_and_nothing_else():
+	root = fresh_root()
+	store.set_container_update_mode("h_nas1", "plex", "auto")
+	store.set_container_update_mode("h_casa", "plex", "ignore")
+	assert store.forget_host_containers("h_nas1") is True
+	assert store.forget_host_containers("h_nas1") is False
+	assert store.container_settings() == {"h_casa": {"plex": {"updates": "ignore"}}}
+	assert store.forget_container_settings("h_casa", "plex") is True
+	assert store.container_settings() == {}
+	shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_container_setting_goes_only_when_it_has_been_missing_long_enough():
+	"""
+	Recreating a container is removing it and creating it again: a compose
+	up, Watchtower, or a down that lasts a weekend. One listing without it
+	says nothing; the same absence a grace period later does.
+	"""
+	root = fresh_root()
+	store.set_container_update_mode("h_casa", "plex", "auto")
+	store.set_container_update_mode("h_casa", "sonarr", "ignore")
+	store.set_container_update_mode("h_nas1", "radarr", "auto")
+	day = 24 * 60 * 60
+
+	# plex missing: noted, kept. h_nas1 not listed (down or paused): untouched.
+	assert store.reconcile_containers({"h_casa": ["sonarr"]}, 0, 30 * day) == []
+	assert store.state_get("containers_absent") == {"h_casa:plex": 0}
+	# Back before the grace ran out: the count starts again.
+	assert store.reconcile_containers({"h_casa": ["plex", "sonarr"]}, 10 * day, 30 * day) == []
+	assert store.state_get("containers_absent") == {}
+	# Missing again, and long enough this time. A restart in between does not
+	# reset the count, which lives in state/.
+	store.reconcile_containers({"h_casa": ["sonarr"]}, 20 * day, 30 * day)
+	store.reload()
+	assert store.reconcile_containers({"h_casa": ["sonarr"]}, 49 * day, 30 * day) == []
+	assert store.reconcile_containers({"h_casa": ["sonarr"]}, 50 * day, 30 * day) == [("h_casa", "plex")]
+	assert store.container_update_mode("h_casa", "plex") is None
+	assert store.state_get("containers_absent") == {}
+	# A daemon answering with nothing is more likely the wrong one.
+	assert store.reconcile_containers({"h_nas1": []}, 999 * day, 30 * day) == []
+	assert store.container_update_mode("h_nas1", "radarr") == "auto"
+	shutil.rmtree(root, ignore_errors=True)
+
+
+def test_the_first_update_check_is_remembered_beyond_the_cache():
+	"""
+	An empty cache was the sign of a first pass, which announces nothing. The
+	cache also empties when its last entry is forgotten, and the pass after
+	that took real news for old news and saved it as announced.
+	"""
+	root = fresh_root()
+	assert store.update_check_done() is False
+	store.set_update_status("h_casa", "plex", "plex:latest", False)
+	assert store.update_check_done() is True
+	store.mark_update_check_done()
+	store.forget_update_status("h_casa", "plex")
+	store.reload()
+	assert store.update_check_done() is True
+	shutil.rmtree(root, ignore_errors=True)
+
+
+def test_an_absence_mark_goes_with_its_setting():
+	"""
+	Left behind, it counted for the next setting: a container set again weeks
+	later lost it the first time it was recreated, said to be a month gone.
+	"""
+	root = fresh_root()
+	day = 24 * 60 * 60
+	store.set_container_update_mode("h_casa", "app", "auto")
+	store.reconcile_containers({"h_casa": ["other"]}, 0, 30 * day)
+	assert store.state_get("containers_absent") == {"h_casa:app": 0}
+	store.set_container_update_mode("h_casa", "app", None)
+	assert store.state_get("containers_absent") == {}
+	store.set_container_update_mode("h_casa", "app", "auto")
+	assert store.reconcile_containers({"h_casa": ["other"]}, 60 * day, 30 * day) == []
+	store.forget_host_containers("h_casa")
+	assert store.state_get("containers_absent") == {}
+	shutil.rmtree(root, ignore_errors=True)
+
+
+def test_hand_written_settings_of_the_wrong_shape_count_as_none():
+	"""
+	A host left as `true`, or a container as a string, crashed the screens
+	that count them, the host removal among them; and a mark written without
+	a host made the cleanup raise on every pass.
+	"""
+	root = fresh_root()
+	with open(store.settings_path(), "w", encoding="utf-8") as handle:
+		json.dump({"containers": {"h_bad": True, "h_list": ["x"], "h_ok": {"plex": {"updates": "auto"}, "junk": "auto"}}}, handle)
+	os.makedirs(store.state_dir(), exist_ok=True)
+	with open(os.path.join(store.state_dir(), store.STATE_FILE), "w", encoding="utf-8") as handle:
+		json.dump({"containers_absent": {"sin-host": 5, "h_bad:x": 5, "h_ok:plex": "ayer"}}, handle)
+	store.reload()
+	assert store.container_settings() == {"h_ok": {"plex": {"updates": "auto"}}}
+	assert store.reconcile_containers({"h_ok": ["plex"], "h_bad": ["x"]}, 100, 50) == []
+	assert store.state_get("containers_absent") == {}
+	shutil.rmtree(root, ignore_errors=True)

@@ -415,21 +415,23 @@ def test_the_update_check_inspects_what_it_is_about_to_pull():
 	owner = dcb.DockerManager("h_local", client=client)
 	containers = owner.list_containers()
 	assert not daemon.inspects()
-	# The loop's own rule, applied the way the loop applies it.
-	previous = _store.get("bot.check_update_stopped_containers")
+	# Through the loop itself, with the pull standing in: a copy of its rules
+	# here went on passing while the loop reloaded everything it listed.
+	previous = (_store.get("bot.check_update_stopped_containers"), dcb.pull_image)
 	_store.set("bot.check_update_stopped_containers", False)
 	pulled = []
+
+	def pull(connection, image, container):
+		pulled.append(container.name)
+		return MagicMock(id="sha256:" + "01" * 32)
+	dcb.pull_image = pull
 	try:
-		for container in containers:
-			if container.status in ("exited", "dead") and not _store.get("bot.check_update_stopped_containers"):
-				continue
-			if dcb.label_enabled(container.labels, dcb.LABEL_IGNORE_CHECK_UPDATES):
-				continue
-			if getattr(container, "listed", False):
-				container.reload()
-			pulled.append(container.name)
+		dcb.DockerUpdateMonitor()._check_host({"id": "h_local", "alias": "casa"}, owner, True, containers)
 	finally:
-		_store.set("bot.check_update_stopped_containers", previous)
+		_store.set("bot.check_update_stopped_containers", previous[0])
+		dcb.pull_image = previous[1]
+		for name in ("plex", "sonarr", "radarr"):
+			dcb.save_container_update_status("x", name, None, "h_local")
 	assert pulled == ["plex"], pulled
 	assert daemon.inspects() == [("inspect", "01" * 32)], daemon.calls
 
@@ -485,7 +487,9 @@ def with_paramiko():
 	"""
 	The SDK imports paramiko to load its ssh transport at all, even when the
 	connection is handed to the ssh binary. The image ships it; a laptop may
-	not, so it is stood in for. Returns what to hand back to without_paramiko().
+	not, so it is stood in for. So is the `ssh` binary, which a plain python
+	image does not have either: the suite passed on a laptop and failed there.
+	Returns what to hand back to without_paramiko().
 	"""
 	import types
 	installed = "paramiko" in sys.modules
@@ -495,12 +499,17 @@ def with_paramiko():
 			installed = True
 		except ImportError:
 			sys.modules["paramiko"] = types.ModuleType("paramiko")
-	return installed
+	original_which = host_registry.shutil.which
+	if not original_which("ssh"):
+		host_registry.shutil.which = lambda name: "/usr/bin/ssh" if name == "ssh" else original_which(name)
+	return installed, original_which
 
 
-def without_paramiko(installed):
+def without_paramiko(state):
+	installed, original_which = state
 	if not installed:
 		sys.modules.pop("paramiko", None)
+	host_registry.shutil.which = original_which
 
 
 def _ssh_adapter():

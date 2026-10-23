@@ -306,17 +306,16 @@ def render_container_info(info):
 		old, new = info.get("update_versions") or (None, None)
 		sections.append(f"⬆️ <b>{get_text('info_update_available')}</b>{version_lines(old, new)}")
 
-	# How the bot treats it
+	# How the bot treats it. What it does with a new version is not here but
+	# on the button below the message, which can also change it: said in both
+	# places, it was read twice, the way /settings used to be.
 	bot = [f"🤖 <b>{get_text('info_bot')}</b>"]
-	if info.get("ignore_checks"):
-		bot.append(f"   🚫 {get_text('info_ignore_checks')}")
-	else:
-		bot.append(f"   {get_text('info_auto_update')}: {get_text('schedule_yes') if info.get('auto_update') else get_text('schedule_no')}")
-		if info.get("last_check_seconds") is not None:
-			bot.append(f"   🕐 {get_text('info_last_check')}: {get_text('info_ago', human_duration(info['last_check_seconds']))}")
+	if info.get("update_mode") != "ignore" and info.get("last_check_seconds") is not None:
+		bot.append(f"   🕐 {get_text('info_last_check')}: {get_text('info_ago', human_duration(info['last_check_seconds']))}")
 	for name, cron in info.get("schedules") or []:
 		bot.append(f"   ⏰ {get_text('info_schedule')}: <i>{e(name)}</i> · {_code(cron)}")
-	sections.append("\n".join(bot))
+	if len(bot) > 1:
+		sections.append("\n".join(bot))
 
 	# Resources
 	resources = []

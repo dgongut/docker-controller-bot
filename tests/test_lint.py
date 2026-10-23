@@ -220,7 +220,7 @@ CONTAINER_CALLBACKS = (
 	"run", "stop", "restart", "confirmDelete", "delete", "logs", "logfile",
 	"info", "compose", "checkUpdate", "confirmUpdate", "update",
 	"changeTagContainer", "changeTag", "askCommand", "exec", "cancelExec",
-	"toggleUpdate",
+	"toggleUpdate", "infoSetUpdates",
 )
 
 # How a reference is built. Anything interpolated into a container callback

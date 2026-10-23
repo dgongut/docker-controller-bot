@@ -122,18 +122,22 @@ En el compose solo van las variables que el bot necesita **antes** de poder leer
 | `TELEGRAM_THREAD` | ❌ | Tema dentro de un supergrupo (2, 3, 4…). Por defecto 1. Se usa junto a `TELEGRAM_GROUP` |
 | `TELEMETRY` | ❌ | `false` para desactivar las estadísticas anónimas sin pasar por `/settings` |
 
-Todo lo demás se cambia desde **`/settings`** y se aplica al momento: idioma, columnas de botones, mensajes ampliados, selección múltiple, comprobación de actualizaciones (si se hace, cada cuántas horas y si incluye los contenedores parados), canal de notificaciones, hosts de Docker y estadísticas.
+Todo lo demás se cambia desde **`/settings`** y se aplica al momento: idioma, columnas de botones, mensajes ampliados, selección múltiple, comprobación de actualizaciones (si se hace, cada cuántas horas, si incluye los contenedores parados y qué hace con cada contenedor), canal de notificaciones, hosts de Docker y estadísticas.
 
 **¿Necesitas `docker login`?** Mapea tu `~/.docker/config.json` en `/root/.docker/config.json` y el bot usará esas credenciales para descargar imágenes.
 
-### 🏷️ Labels en tus otros contenedores
+### 🔄 Contenedores que se actualizan solos o que no se comprueban
+
+Por defecto el bot te avisa de cada versión nueva. Para cada contenedor puedes elegir que se **actualice solo** (todos los de una comprobación en un único resumen) o que **no se compruebe**. Se elige en su `/info`, o para muchos a la vez en `/settings` → Actualizaciones → 📦 Por contenedor (cada toque pasa al siguiente: 🔔 avisar → 🔄 actualizar solo → 🚫 no comprobar), y se guarda en `settings.json`.
+
+También sirven las labels, que mandan sobre lo elegido en el bot:
 
 | Label | Efecto |
 |:---|:---|
 | `DCB-Auto-Update` | El contenedor se actualiza solo, sin preguntar |
 | `DCB-Ignore-Check-Updates` | No se comprueban sus actualizaciones |
 
-Con el valor `false` (`DCB-Auto-Update=false`) cuentan como desactivadas. Ejemplo:
+Con el valor `false` (`DCB-Auto-Update=false`) cuentan como desactivadas, pero siguen mandando: el contenedor se queda en «avisar» y no se puede cambiar desde el bot mientras lleve la label. Ejemplo:
 
 ```yaml
 services:
@@ -143,13 +147,13 @@ services:
       - "DCB-Auto-Update"
 ```
 
-El propio bot también se puede actualizar desde el chat, como cualquier otro contenedor, o solo con esa label.
+El propio bot también se puede actualizar desde el chat, como cualquier otro contenedor, o solo: eligiéndolo en su `/info` o con esa label.
 
 ---
 
 ## 🖥️ Varios hosts Docker
 
-Los hosts se añaden desde el propio bot: `/settings` → **🖥️ Hosts de Docker** → **➕ Añadir host**, y le mandas la URL con el nombre que quieras delante (`nas ssh://usuario@nas`). El bot prueba la conexión antes de guardarla y, si falla, te dice por qué.
+Los hosts se añaden desde el propio bot: `/settings` → **🖥️ Hosts de Docker** → **➕ Añadir host**, y le mandas la URL con el nombre que quieras delante (`nas ssh://usuario@nas`). El bot prueba la conexión antes de guardarla y, si falla, te dice por qué. Si la máquina cambia de IP o pasas de `tcp://` a `ssh://`, usa **🔗 Cambiar URL** en la pantalla del host: conserva sus ajustes y programaciones.
 
 | Forma | Qué necesita | Cuándo |
 |:---|:---|:---|

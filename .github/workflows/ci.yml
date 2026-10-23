@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Los tests sin Docker: harness.py carga el bot con Docker sustituido por
+  # un doble y el almacenamiento en un directorio temporal, así que no hace
+  # falta ni demonio ni token
+  unit:
+    runs-on: ubuntu-latest
+    # La batería tarda alrededor de medio minuto: un test que se cuelgue no
+    # puede tener el job ocupado las 6 h que GitHub da por defecto
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      # La misma versión que usa la imagen (alpine:3.24.3 trae Python 3.14)
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+          cache: pip
+
+      # Solo requirements.txt: los tests no tienen dependencias propias.
+      # paramiko y el cliente ssh, que la imagen instala con apk, los
+      # sustituyen los propios tests cuando no están
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Tests
+        run: python tests/run_all.py
+
+  # Los mismos tests sobre la base de la imagen: Alpine (musl), su Python,
+  # paramiko y ssh de apk como los instala el Dockerfile. Es lo que corre en
+  # producción, y con paramiko presente test_listing usa el de verdad. No se
+  # construye ninguna imagen: el código se monta tal cual en un alpine:3.24.3
+  unit-alpine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tests en alpine:3.24.3
+        run: |
+          docker run --rm -v "$PWD":/app:ro -w /app -e PYTHONDONTWRITEBYTECODE=1 alpine:3.24.3 sh -euc '
+            apk add --no-cache -q python3 py3-pip py3-paramiko openssh-client tzdata
+            PIP_BREAK_SYSTEM_PACKAGES=1 PIP_ROOT_USER_ACTION=ignore pip3 install --no-cache-dir -q -r requirements.txt
+            python3 tests/run_all.py'
+
+  # test_real_docker.py contra el Docker del runner: crea, actualiza y compara
+  # contenedores de verdad. Es lo único que ve si una versión nueva de docker-py
+  # cambia _create_container_args o api._post_json, que docker_update.py usa
+  #
+  # En dos runners, porque Docker no se porta igual en todas sus versiones: el
+  # 26.04 trae Docker 29 y Compose 5, como el Docker Desktop de desarrollo, y
+  # el 24.04 Docker 28 y Compose 2, que es lo que lleva buena parte de los que
+  # usan el bot. Ahí se perdía la MAC fija de una segunda red al actualizar, y
+  # Docker 25 a 28 copia la MAC que se le da al crear en un campo que /compose
+  # leía como puesta a mano
+  #
+  # Los tests corren en la máquina del runner, no en un contenedor: comparten
+  # /tmp y localhost con el demonio (compose monta ficheros que los tests
+  # escriben en /tmp, y el registro está en 127.0.0.1:55000), y el bot no se
+  # reconoce a sí mismo en ningún contenedor, que es lo que harness.py supone
+  docker:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-26.04, ubuntu-24.04]
+    runs-on: ${{ matrix.runner }}
+    # Unos 4 minutos en local; las descargas de Docker Hub y la emulación del
+    # test de plataforma pueden alargarlo
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      # test_a_container_forced_to_another_platform_keeps_it ejecuta alpine
+      # para la otra arquitectura (arm64 en un runner x86_64) y mira su
+      # `uname -m`. El runner no trae QEMU registrado en binfmt_misc
+      - uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64,amd64
+
+      # Para que un fallo diga contra qué se ha probado. El test de macvlan
+      # cuelga la red de eth0: si el runner la llamara de otra forma, se ve aquí
+      - name: Entorno
+        run: |
+          docker version
+          docker compose version
+          docker info --format 'storage={{.Driver}} cgroup={{.CgroupDriver}} v{{.CgroupVersion}}'
+          ip -br link
+          ip link show eth0 >/dev/null || echo "::warning::El runner no tiene eth0: test_docker_run_oddities_survive_their_update fallará en la red macvlan"
+
+      # Necesitan registry:2 y alpine:3.24.3 de Docker Hub (anónimo, sin
+      # secretos), levantan un registro en 127.0.0.1:55000 y solo tocan lo que
+      # crean: todo se llama dcbtest-… y lleva la etiqueta dcbtest=1
+      - name: Tests contra Docker
+        run: python tests/run_all.py --docker

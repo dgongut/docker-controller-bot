@@ -287,6 +287,98 @@ def test_a_dollar_in_the_container_survives_compose():
 	assert "'8080:80'" in rendered, rendered
 
 
+def test_the_main_network_stays_the_primary_in_compose():
+	"""
+	Compose makes the primary network the one with the highest priority,
+	then the first by name. With the main one sorting after another, the
+	container came back with another main network, and the MAC set by hand
+	on another interface; written under its own network instead, the next
+	/compose had lost it, since Docker only says a MAC was set by hand for
+	the primary. The main network gets the priority and the MAC stays at
+	service level, where every Compose takes it.
+	"""
+	mac = "02:42:c0:a8:01:0a"
+
+	def service(network_mode, networks, project=None, with_mac=True):
+		config = {"image": "pihole/pihole", "mac_address": mac if with_mac else None, "network_mode": network_mode,
+				  "networks": networks, "labels": {"com.docker.compose.project": project} if project else {}}
+		return yaml.safe_load(compose_generator.ComposeGenerator("pihole", config).to_yaml())["services"]["pihole"]
+
+	for main, other in (("lan", "iot"), ("iot", "lan")):
+		generated = service(main, {"lan": {}, "iot": {}})
+		assert generated["mac_address"] == mac, generated
+		assert generated["networks"][main] == {"priority": compose_generator.MAIN_NETWORK_PRIORITY}, generated["networks"]
+		assert not generated["networks"][other], generated["networks"]
+	# Without a MAC too: the main network is the main network.
+	generated = service("iot", {"lan": {}, "iot": {}}, with_mac=False)
+	assert "mac_address" not in generated and generated["networks"]["iot"]["priority"], generated
+
+	# Alone, a mapping too: Compose 2.29 only gives the MAC to a network
+	# written as one, and dropped it for `[lan]` or no networks at all.
+	alone = service("lan", {"lan": {}})
+	assert alone["mac_address"] == mac and alone["networks"] == {"lan": {}}, alone
+	assert service("lan", {"lan": {}}, with_mac=False)["networks"] == ["lan"]
+	# What only the endpoint could say goes the same way.
+	config = {"image": "pihole/pihole", "mac_address": None, "mac_address_by_hand": mac,
+			  "network_mode": "lan", "networks": {"lan": {}}, "labels": {}}
+	generated = yaml.safe_load(compose_generator.ComposeGenerator("pihole", config).to_yaml())["services"]["pihole"]
+	assert generated["mac_address"] == mac and generated["networks"] == {"lan": {}}, generated
+
+
+def test_the_stacks_own_network_is_kept_next_to_another():
+	"""
+	A service that declares networks joins those and no other. The stack's
+	`<project>_default`, with nothing to say about it, was left out next to
+	a second network: the container came back off its own stack's network,
+	and the MAC on the other one. Alone, it still needs no declaration.
+	"""
+	mac = "02:42:c0:a8:01:0a"
+
+	def generate(network_mode, networks):
+		config = {"image": "pihole/pihole", "mac_address": mac, "network_mode": network_mode,
+				  "networks": networks, "labels": {"com.docker.compose.project": "stack"}}
+		return yaml.safe_load(compose_generator.ComposeGenerator("pihole", config).to_yaml())
+
+	priority = {"priority": compose_generator.MAIN_NETWORK_PRIORITY}
+	service = generate("stack_default", {"stack_default": {}, "iot": {}})["services"]["pihole"]
+	assert service["networks"] == {"default": priority, "iot": {}}, service["networks"]
+	assert service["mac_address"] == mac
+	service = generate("iot", {"stack_default": {}, "iot": {}})["services"]["pihole"]
+	assert service["networks"] == {"default": {}, "iot": priority}, service["networks"]
+	alone = generate("stack_default", {"stack_default": {}})["services"]["pihole"]
+	assert alone["networks"] == {"default": {}} and alone["mac_address"] == mac, alone
+	# A fixed IPv6 address needs the network's subnet, as a fixed IPv4 one
+	# does: under `default`, compose created it without one and refused it.
+	document = generate("stack_default", {"stack_default": {"ipv6_address": "fd00::10"}, "iot": {}})
+	assert document["services"]["pihole"]["networks"]["stack_default"]["ipv6_address"] == "fd00::10"
+	assert document["networks"]["stack_default"] == {"external": True}, document["networks"]
+
+
+def test_the_default_bridge_next_to_another_network_is_left_out_of_compose():
+	"""
+	Compose cannot put a service on the default bridge next to other
+	networks: with it declared as one more, every `up` was refused. Left
+	out, the file comes up on the others; a MAC set on the bridge has
+	nowhere to go then, and is not moved onto another interface.
+	"""
+	mac = "02:42:ac:11:00:0a"
+
+	def service(network_mode, networks):
+		config = {"image": "nginx", "mac_address": mac, "network_mode": network_mode, "networks": networks}
+		return yaml.safe_load(compose_generator.ComposeGenerator("web", config).to_yaml())
+
+	for main in ("bridge", "default"):
+		document = service(main, {"bridge": {}, "app": {}})
+		assert document["services"]["web"]["networks"] == ["app"], document
+		assert "mac_address" not in document["services"]["web"], document
+		assert "bridge" not in document["networks"], document["networks"]
+	document = service("app", {"bridge": {}, "app": {}})
+	assert document["services"]["web"]["networks"] == {"app": {}} and document["services"]["web"]["mac_address"] == mac
+	# Alone on it, nothing changes but the mapping the MAC needs.
+	document = service("bridge", {"bridge": {}})
+	assert document["services"]["web"]["networks"] == {"default": {}} and document["services"]["web"]["mac_address"] == mac
+
+
 # ---------------------------------------------------------------------------
 # port_manager
 # ---------------------------------------------------------------------------

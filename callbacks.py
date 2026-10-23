@@ -95,6 +95,28 @@ def cb_info(ctx):
 	core.info(ctx.containerId, ctx.containerName)
 
 @callback(
+	name='infoSetUpdates',
+	params=('value', 'containerId'),
+	keeps_message=True,
+	answer_immediately=False,
+)
+def cb_infoSetUpdates(ctx):
+	"""
+	Sets what to do with a container's new versions —the next one round, the
+	button says which— and repaints its /info buttons showing it.
+	"""
+	if ctx.value not in core.UPDATE_MODE_CODES:
+		core.answer_callback_quietly(ctx.call.id)
+		return
+	owner, container = core.find_container(ctx.containerId)
+	if container is None:
+		core.answer_callback_quietly(ctx.call.id)
+		return
+	refused = core.set_update_mode(owner.host_id, container.name, container.labels,
+								   core.container_image(container), core.UPDATE_MODE_CODES[ctx.value])
+	core.repaint_info(ctx.call.id, ctx.chatId, ctx.messageId, ctx.containerId, alert=refused, found=(owner, container))
+
+@callback(
 	name='confirmUpdate',
 	params=('containerId',),
 )
@@ -186,10 +208,7 @@ def cb_delete(ctx):
 	params=('containerId',),
 )
 def cb_changeTagContainer(ctx):
-	# Get container name from cache or Docker
-	ctx.containerName = core.get_container_name(ctx.chatId, ctx.messageId, ctx.containerId)
-	if not ctx.containerName:
-		ctx.containerName = "Unknown"
+	# The dispatcher has already named it, or answered for it.
 	core.change_tag_container(ctx.containerId, ctx.containerName)
 
 @callback(
@@ -197,10 +216,7 @@ def cb_changeTagContainer(ctx):
 	params=('containerId', 'tag'),
 )
 def cb_confirmChangeTag(ctx):
-	# Get container name from cache or Docker
-	ctx.containerName = core.get_container_name(ctx.chatId, ctx.messageId, ctx.containerId)
-	if not ctx.containerName:
-		ctx.containerName = "Unknown"
+	# The dispatcher has already named it, or answered for it.
 	core.confirm_change_tag(ctx.containerId, ctx.containerName, ctx.tag)
 
 @callback(
@@ -208,10 +224,7 @@ def cb_confirmChangeTag(ctx):
 	params=('containerId', 'tag'),
 )
 def cb_changeTag(ctx):
-	# Get container name from cache or Docker
-	ctx.containerName = core.get_container_name(ctx.chatId, ctx.messageId, ctx.containerId)
-	if not ctx.containerName:
-		ctx.containerName = "Unknown"
+	# The dispatcher has already named it, or answered for it.
 	core.update_container(ctx.containerId, ctx.containerName, tag=ctx.tag)
 
 @callback(
@@ -502,7 +515,10 @@ def cb_confirmDeleteWholeProject(ctx):
 		return
 
 	# What will actually go: the bot is left out of a whole-project delete.
-	container_count = len(core.without_the_bot(ctx.hostId, project_info.containers)[0])
+	going = core.without_the_bot(ctx.hostId, project_info.containers)[0]
+	container_count = len(going)
+	settings_note = (get_text("confirm_delete_settings")
+					 if any(store.container_update_mode(ctx.hostId, c.name) for c in going) else "")
 	markup = InlineKeyboardMarkup(row_width=2)
 	markup.add(
 		InlineKeyboardButton(
@@ -516,7 +532,7 @@ def cb_confirmDeleteWholeProject(ctx):
 	)
 	core.edit_message_text(
 		f'{core.host_label(ctx.hostId)}'
-		f'{get_text("confirm_delete_project", html.escape(str(project_name)), container_count)}',
+		f'{get_text("confirm_delete_project", html.escape(str(project_name)), container_count)}{settings_note}',
 		ctx.chatId,
 		ctx.messageId,
 		reply_markup=markup
@@ -667,7 +683,85 @@ def cb_settingsToggle(ctx):
 	keeps_message=True,
 )
 def cb_settingsUpdates(ctx):
+	# Back here from a per-container list, which is not shown any more: a tap
+	# still on its way only says so, instead of landing on what this shows.
+	with core.container_list_lock:
+		core.clear_container_list(ctx.chatId, ctx.messageId)
 	core.render_settings(ctx.chatId, ctx.messageId, "updates")
+
+@callback(
+	name='settingsContainers',
+	keeps_message=True,
+)
+def cb_settingsContainers(ctx):
+	"""What the update check does with each container: the hosts, or the only list."""
+	# Back here from a list, which is not shown any more.
+	with core.container_list_lock:
+		core.clear_container_list(ctx.chatId, ctx.messageId)
+	core.show_settings_containers(ctx.chatId, ctx.messageId)
+
+@callback(
+	name='ctrHost',
+	params=('value',),
+	keeps_message=True,
+)
+def cb_ctrHost(ctx):
+	"""One host's containers in the per-container settings."""
+	# Paused since the picker was drawn: it is not asked anything, as the
+	# pause promises, and the picker names it with what it keeps instead.
+	if host_registry.host(ctx.value) is None or host_registry.is_paused(ctx.value):
+		core.show_settings_containers(ctx.chatId, ctx.messageId)
+		return
+	core.show_settings_containers_list(ctx.chatId, ctx.messageId, ctx.value)
+
+@callback(
+	name='ctrToggle',
+	params=('field', 'containerIdx', 'value'),
+	keeps_message=True,
+	answer_immediately=False,
+)
+def cb_ctrToggle(ctx):
+	"""Moves a container of the list on to the mode its button says."""
+	data = core.load_container_list(ctx.chatId, ctx.messageId, ctx.field)
+	try:
+		index = int(ctx.containerIdx)
+	except (TypeError, ValueError):
+		index = -1
+	if data is None or not 0 <= index < len(data["items"]) or ctx.value not in core.UPDATE_MODE_CODES:
+		core.expire_container_list(ctx.call.id)
+		return
+	refused = core.toggle_in_container_list(data, index, core.UPDATE_MODE_CODES[ctx.value])
+	# The tap asked the daemon, which takes a moment. Back, another page or
+	# another host may have been pressed meanwhile: the list as it is now is
+	# what gets the refreshed item and the repaint, or nothing does.
+	with core.container_list_lock:
+		current = core.load_container_list(ctx.chatId, ctx.messageId, ctx.field)
+		if (current is None or index >= len(current["items"])
+				or current["items"][index][0] != data["items"][index][0]):
+			core.expire_container_list(ctx.call.id)
+			return
+		current["items"][index] = data["items"][index]
+		core.save_container_list(ctx.chatId, ctx.messageId, current)
+	_text, markup = core.build_settings_containers_list(current)
+	core.repaint_markup(ctx.call.id, ctx.chatId, ctx.messageId, markup, alert=refused)
+
+@callback(
+	name='ctrPage',
+	params=('field', 'value'),
+	keeps_message=True,
+	answer_immediately=False,
+)
+def cb_ctrPage(ctx):
+	"""Another page of a per-container list too long for one keyboard."""
+	with core.container_list_lock:
+		data = core.load_container_list(ctx.chatId, ctx.messageId, ctx.field)
+		if data is None:
+			core.expire_container_list(ctx.call.id)
+			return
+		data["page"], _pages = core.update_keyboard_page(data["items"], ctx.value)
+		core.save_container_list(ctx.chatId, ctx.messageId, data)
+	_text, markup = core.build_settings_containers_list(data)
+	core.repaint_markup(ctx.call.id, ctx.chatId, ctx.messageId, markup)
 
 @callback(
 	name='settingsLanguage',
@@ -1418,6 +1512,21 @@ def cb_settingsHostAdd(ctx):
 	core.ask_text_input(ctx.userId, "host_add", "settings_host_ask", back_to="hosts")
 
 
+@callback(name="settingsHostUrl", params=("value",), keeps_message=False)
+def cb_settingsHostUrl(ctx):
+	core.ask_host_url(ctx.userId, ctx.value)
+
+
+@callback(name="settingsHostUrlConfirm", params=("value",), keeps_message=True, answer_immediately=False)
+def cb_settingsHostUrlConfirm(ctx):
+	core.confirm_host_url(ctx.call.id, ctx.userId, ctx.chatId, ctx.messageId, ctx.value)
+
+
+@callback(name="settingsHostUrlCancel", params=("value",), keeps_message=True, answer_immediately=False)
+def cb_settingsHostUrlCancel(ctx):
+	core.cancel_host_url(ctx.call.id, ctx.userId, ctx.chatId, ctx.messageId, ctx.value)
+
+
 @callback(name="settingsHostRename", params=("value",), keeps_message=False)
 def cb_settingsHostRename(ctx):
 	core.ask_text_input(ctx.userId, f"host_rename:{ctx.value}", "settings_host_ask_name", back_to="hosts")
@@ -1515,3 +1624,5 @@ def cb_cerrar(ctx):
 		core.clear_update_data(ctx.chatId, ctx.messageId)
 	core.clear_container_cache(ctx.chatId, ctx.messageId)
 	core.clear_multi_action(ctx.chatId, ctx.messageId)
+	core.clear_container_list(ctx.chatId, ctx.messageId)
+	core.clear_info_cache(ctx.chatId, ctx.messageId)

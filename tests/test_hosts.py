@@ -10,6 +10,7 @@ on something the user can rename.
 import os
 import shutil
 import sys
+import time
 from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -718,5 +719,159 @@ def test_the_clients_used_only_to_check_a_host_are_closed():
 		assert built[-1].close.called, "el cliente que falló el ping quedó abierto"
 	finally:
 		docker.DockerClient = original
+		host_registry.reset()
+		shutil.rmtree(root, ignore_errors=True)
+
+
+def _remote_fleet(ca=None):
+	nas = {"id": "h_nas", "alias": "nas", "url": "tcp://nas:2375", "timeout": 60}
+	if ca:
+		nas["tls"] = {"ca": ca}
+	return [
+		{"id": "h_local", "alias": "casa", "url": host_registry.LOCAL_SOCKET_URL, "local": True},
+		nas,
+		{"id": "h_pi", "alias": "pi", "url": "ssh://pi@pi", "paused": True},
+	]
+
+
+def test_a_new_url_is_checked_like_a_new_host_and_more():
+	"""
+	The same refusals as adding one —a transport the SDK does not speak, a URL
+	or a daemon already registered as another host, one that does not
+	answer— and the ones only a change has: the URL it already has, the local
+	host, a host that is gone.
+	"""
+	import docker
+
+	store_, root = setup(_remote_fleet())
+	built = []
+	docker.DockerClient = _daemons({
+		host_registry.LOCAL_SOCKET_URL: ("ID-CASA", "casa"),
+		"tcp://nas:2375": ("ID-NAS", "nas"),
+		"tcp://192.168.1.10:2375": ("ID-CASA", "casa"),
+		"tcp://apagado:2375": DOWN,
+	}, built)
+	state = with_paramiko()
+	try:
+		for host_id, url, reason in (("h_gone", "tcp://x:2375", "missing"),
+									 ("h_local", "tcp://x:2375", "local"),
+									 ("h_nas", "http://nas:2375", "scheme"),
+									 ("h_nas", "tcp://nas:2375/", "same"),
+									 ("h_nas", "ssh://pi@pi", "duplicate"),
+									 ("h_nas", "tcp://192.168.1.10:2375", "duplicate")):
+			try:
+				host_registry.probe_new_url(host_id, url)
+				raise AssertionError(f"debería rechazar {url} para {host_id}")
+			except host_registry.HostRejected as e:
+				assert e.reason == reason, (url, e.reason)
+		try:
+			host_registry.probe_new_url("h_nas", "tcp://apagado:2375")
+			raise AssertionError("una URL que no responde no se puede dar por buena")
+		except host_registry.HostUnavailable:
+			pass
+		assert store_.get("hosts") == _remote_fleet(), "comprobar no puede cambiar nada"
+		assert all(fake.close.called for fake in built), "quedaron clientes de comprobación abiertos"
+	finally:
+		without_paramiko(state)
+		host_registry.reset()
+		shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_new_url_says_whether_it_is_the_same_docker():
+	"""
+	True when both URLs reach one daemon —the same machine by another way—,
+	False when they reach two, and None when the current one does not
+	answer, which is the usual reason to change it.
+	"""
+	import docker
+
+	store_, root = setup(_remote_fleet())
+	answers = {
+		host_registry.LOCAL_SOCKET_URL: ("ID-CASA", "casa"),
+		"tcp://nas:2375": ("ID-NAS", "nas"),
+		"tcp://192.168.1.20:2375": ("ID-NAS", "nas"),
+		"tcp://nas-nuevo:2375": ("ID-OTRO", "nas-nuevo"),
+	}
+	built = []
+	docker.DockerClient = _daemons(answers, built)
+	try:
+		assert host_registry.probe_new_url("h_nas", "tcp://192.168.1.20:2375") is True
+		assert host_registry.probe_new_url("h_nas", "tcp://nas-nuevo:2375") is False
+		answers["tcp://nas:2375"] = DOWN
+		assert host_registry.probe_new_url("h_nas", "tcp://192.168.1.20:2375") is None
+		# Every client opened to ask is closed: over ssh:// each is a process.
+		assert built and all(fake.close.called for fake in built), "quedaron clientes de comprobación abiertos"
+		# A current URL that hangs is given up on, as the checks give up.
+		answers["tcp://nas:2375"] = lambda: time.sleep(30)
+		original = host_registry.PROBE_TIMEOUT_SECONDS
+		host_registry.PROBE_TIMEOUT_SECONDS = 0.5
+		try:
+			started = time.monotonic()
+			assert host_registry.probe_new_url("h_nas", "tcp://192.168.1.20:2375") is None
+			assert time.monotonic() - started < 5, "esperó a la URL colgada"
+		finally:
+			host_registry.PROBE_TIMEOUT_SECONDS = original
+	finally:
+		host_registry.reset()
+		shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_check_of_the_old_url_says_nothing_about_the_new_one():
+	"""
+	A check still running against the old URL was waited on by the next
+	sweep, and its "no answer" reported for the new one; and when it failed it
+	closed the clients just built for the new URL.
+	"""
+	import threading as _threading
+	store_, root = setup(_remote_fleet())
+	try:
+		stale = _threading.Thread(target=lambda: None)
+		with host_registry._probe_lock:
+			host_registry._probes["h_nas"] = stale
+			host_registry._probe_results["h_nas"] = (time.monotonic() + 60, (False, "old"))
+		host_registry.change_url("h_nas", "tcp://192.168.1.20:2375")
+		with host_registry._probe_lock:
+			assert "h_nas" not in host_registry._probes and "h_nas" not in host_registry._probe_results
+	finally:
+		host_registry.reset()
+		shutil.rmtree(root, ignore_errors=True)
+
+
+def test_changing_the_url_keeps_the_id_and_what_hangs_from_it():
+	"""
+	Removing the host and adding it again was the only way, and it came back
+	under a new id: its containers' settings and its update cache were lost,
+	and its schedules disabled.
+	"""
+	# The SDK only asks the certificate to exist.
+	ca = os.path.join(harness.tempdir(), "ca.pem")
+	open(ca, "w").close()
+	store_, root = setup(_remote_fleet(ca))
+	store_.set_container_update_mode("h_nas", "plex", "auto")
+	store_.set_update_status("h_nas", "plex", "plex:latest", True)
+	try:
+		first = host_registry.client("h_nas")
+		assert host_registry.change_url("h_nas", "tcp://192.168.1.20:2375") is True
+		entry = host_registry.host("h_nas")
+		assert (entry["id"], entry["alias"], entry["url"]) == ("h_nas", "nas", "tcp://192.168.1.20:2375")
+		assert entry["tls"] == {"ca": ca} and entry["timeout"] == 60, "tcp a tcp conserva TLS y timeout"
+		assert store_.container_update_mode("h_nas", "plex") == "auto"
+		assert store_.update_status("h_nas", "plex", "plex:latest") is True
+		assert first.close.called and host_registry.client("h_nas") is not first, "sigue usando el cliente viejo"
+		# Certificates for a TLS socket mean nothing to ssh, and break its client.
+		host_registry.change_url("h_nas", "ssh://admin@nas")
+		assert "tls" not in host_registry.host("h_nas")
+		# Paused stays paused; the order of the hosts does not move.
+		host_registry.change_url("h_pi", "ssh://pi@192.168.1.30")
+		assert host_registry.host("h_pi")["paused"] is True
+		assert [h["id"] for h in store_.get("hosts")] == ["h_local", "h_nas", "h_pi"]
+		for host_id, url, reason in (("h_local", "tcp://x:2375", "local"), ("h_gone", "tcp://x:2375", "missing"),
+									 ("h_pi", "ssh://admin@nas", "duplicate")):
+			try:
+				host_registry.change_url(host_id, url)
+				raise AssertionError(f"debería rechazar {url} para {host_id}")
+			except host_registry.HostRejected as e:
+				assert e.reason == reason, (host_id, e.reason)
+	finally:
 		host_registry.reset()
 		shutil.rmtree(root, ignore_errors=True)

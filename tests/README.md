@@ -40,6 +40,32 @@ deja pasar: el `stop_grace_period`, los puertos solo expuestos, las GPU, las
 anotaciones y la prioridad de pasarela. Una versión nueva puede cambiarlas sin
 avisar, y solo estos tests lo verían.
 
+Se ejecutan en la misma máquina que el demonio, no dentro de un contenedor:
+comparten con él `/tmp` (compose monta ficheros que los tests escriben ahí) y
+`localhost` (el registro), y el bot no tiene que reconocerse en ningún
+contenedor. Necesitan el cliente `docker` con su plugin de Compose. El test
+de otra plataforma necesita QEMU registrado, que Docker Desktop ya trae.
+
+## En GitHub
+
+`.github/workflows/ci.yml` pasa las dos baterías en cada push a `main`, en
+cada tag y en cada pull request:
+
+- `unit`: Python 3.14 con solo `requirements.txt`.
+- `unit-alpine`: lo mismo sobre `alpine:3.24.3` con paramiko y ssh de apk, que
+  es lo que corre en producción.
+- `docker`: `--docker` en `ubuntu-26.04` (Docker 29 y Compose 5) y en
+  `ubuntu-24.04` (Docker 28 y Compose 2). Docker no se porta igual en todas
+  sus versiones: con la MAC de una segunda red, o con la que copia en
+  `Config.MacAddress`, solo el 28 enseñaba lo que fallaba.
+
+Fuera de GitHub también pasan en Docker 25, 26 y 27, que no tienen runner
+propio. Lo que esas versiones no conocen —la prioridad de pasarela, los
+montajes de imagen— se salta, y Compose 2.29, que crea la red principal por
+su id, no puede devolver la MAC en un segundo `/compose`. Merece la pena
+pasarlos ahí al tocar la red de `docker_update.py`: la MAC que Docker saca de
+la IP, por ejemplo, solo existe hasta el 27.
+
 ## Cómo funcionan
 
 El bot es un único módulo que hace todo su arranque al importarse. `harness.py`

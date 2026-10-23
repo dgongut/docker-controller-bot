@@ -1,3 +1,4 @@
+import contextvars
 import docker
 import functools
 import hashlib
@@ -46,7 +47,7 @@ from i18n import get_text, language
 from logger import debug, error, warning
 from message_queue import MessageQueue
 
-VERSION = "5.1.1"
+VERSION = "5.2.0"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -562,7 +563,11 @@ class DockerManager:
 
 	def get_info(self, container_id, container_name):
 		"""
-		The /info of a container: (text, has_update, can_start).
+		The /info of a container: (text, has_update, can_start, info).
+
+		`info` is what was gathered, for the button that sets what to do with
+		a new version and to draw the text again when it is pressed; None when
+		it could not be gathered and there is nothing to set.
 
 		Everything is gathered here and drawn in formatting.render_container_info,
 		so what the message says and how it looks are tested apart.
@@ -571,10 +576,10 @@ class DockerManager:
 			container = self.client.containers.get(container_id)
 			info = gather_container_info(self, container)
 			return (render_container_info(info), info.get("has_update") is True,
-					info["status"] in ("exited", "dead", "created"))
+					info["status"] in ("exited", "dead", "created"), info)
 		except Exception as e:
 			error(f"Could not display information for container {container_name}. Error: [{e}]")
-			return get_text("error_showing_info_container", container_name), False, False
+			return get_text("error_showing_info_container", container_name), False, False, None
 
 	def update(self, container_id, container_name, message, bot, tag=None):
 		"""
@@ -632,8 +637,7 @@ class DockerManager:
 					telegram_group=message.chat.id if message else get_reply_chat_id(),
 					# Where the progress went: an auto-update reports to the
 					# notification channel, a button to the chat it was pressed in.
-					notify_func=lambda text: send_message(
-						chat_id=message.chat.id if message else None, message=f'{host_label(self.host_id)}{text}'),
+					notify_func=update_notify(self.host_id, message.chat.id if message else None),
 				)
 				return result
 		except Exception as e:
@@ -671,7 +675,7 @@ class DockerManager:
 				container_id_length=CONTAINER_ID_LENGTH,
 				telegram_group=TELEGRAM_GROUP,
 				skip_pull=True,
-				notify_func=lambda text: send_message(message=f'{host_label(self.host_id)}{text}'),
+				notify_func=update_notify(self.host_id, None),
 			)
 			return result
 		except Exception as e:
@@ -773,6 +777,7 @@ class DockerManager:
 				debug(f"Container {container_name} is running. It will be stopped.")
 				stop_container(container)
 			container.remove()
+			forget_container(self.host_id, container.name)
 			return get_text("deleted_container", container_name)
 		except Exception as e:
 			error(f"Could not delete container {container_name}. Error: [{e}]")
@@ -1395,6 +1400,8 @@ class DockerEventMonitor:
 
 	def __init__(self, host_id):
 		self.host_id = host_id
+		# The URL its events come from, for telling when the host moved.
+		self._url = (host_registry.host(host_id) or {}).get("url")
 		self._stop = threading.Event()
 		# Set to cut the wait before the next reconnection short.
 		self._retry_now = threading.Event()
@@ -1476,6 +1483,14 @@ class DockerEventMonitor:
 					debug(f"Event monitor ({self.alias}): closing the ssh stream: {ssh_error}")
 
 	def detectar_eventos_contenedores(self):
+		url = (host_registry.host(self.host_id) or {}).get("url")
+		if url != self._url:
+			# Its host was moved to another URL, and the supervisor has not yet
+			# put a monitor of its own there. Asking the new daemon for what
+			# came after the last event of the old one announced its last ten
+			# minutes as news: it starts from now instead.
+			self._url = url
+			self._last_event_ns = None
 		client = host_registry.client(self.host_id)
 		since = None
 		if self._last_event_ns is not None:
@@ -1802,23 +1817,32 @@ class EventMonitorSupervisor:
 
 	def __init__(self):
 		self._monitors = {}
+		# The URL each monitor was started on. A host keeps its id when its URL
+		# changes, and its stream would otherwise stay on the old daemon.
+		self._urls = {}
 		self._lock = threading.Lock()
 		self.availability = HostAvailability()
 
 	def reconcile(self):
 		"""
 		Starts monitors for new hosts, stops them for removed ones, and brings
-		back any that died or went deaf.
+		back any that died or went deaf. A host that now has another URL counts
+		as removed and added: its stream is started again, on the new one.
 		"""
-		configured = {entry["id"] for entry in host_registry.hosts()}
+		configured = {entry["id"]: entry.get("url") for entry in host_registry.hosts()}
 		with self._lock:
-			for host_id in configured - set(self._monitors):
+			for host_id in [h for h in self._monitors if h in configured and self._urls.get(h) != configured[h]]:
+				debug(f"Host {host_id} has a new URL: starting its event monitor again on it")
+				self._monitors.pop(host_id).stop()
+			for host_id in set(configured) - set(self._monitors):
 				monitor = DockerEventMonitor(host_id)
 				self._monitors[host_id] = monitor
+				self._urls[host_id] = configured[host_id]
 				monitor.demonio_event()
-			for host_id in set(self._monitors) - configured:
+			for host_id in set(self._monitors) - set(configured):
 				debug(f"Host {host_id} is gone: stopping its event monitor")
 				self._monitors.pop(host_id).stop()
+				self._urls.pop(host_id, None)
 			for host_id, monitor in list(self._monitors.items()):
 				if monitor.thread is not None and not monitor.thread.is_alive():
 					# Its loop never gives up, so a dead thread means something
@@ -1913,8 +1937,20 @@ def wait_for_next_update_check():
 
 
 class DockerUpdateMonitor:
-	# A labelled bot found to need an update, waiting for the end of the pass.
-	_deferred_self_update = None
+	def __init__(self):
+		# What the pass found to update on its own, as (host_id, reference,
+		# name, label): updated together once every host has been checked.
+		# `label` is the DCB-* label that asked for it, or None when it was the
+		# setting chosen from the bot. On the instance and emptied by every
+		# pass: a list on the class would be one list for every monitor.
+		self._auto_targets = []
+		# How many containers the pass reached a decision on —checked, or left
+		# out on purpose: stopped, ignored— and how many it failed to check.
+		# A pass is the first done when it decided and nothing failed: with a
+		# pull failing at boot, an ignored container alone does not make the
+		# next pass announce every update there was before the install.
+		self._decided = 0
+		self._failed = 0
 
 	def detectar_actualizaciones(self):
 		while True:
@@ -1924,20 +1960,26 @@ class DockerUpdateMonitor:
 				time.sleep(UPDATE_CHECK_POLL_SECONDS)
 				continue
 
-			# An empty cache means this is the first pass on this install, so
-			# anything found is pre-existing rather than new. Filling it quietly
-			# avoids announcing every pending update at once, which is what used
-			# to happen after every container recreation.
+			# The first pass on this install fills the cache quietly: anything
+			# it finds is pre-existing rather than new, and announcing every
+			# pending update at once is what used to happen after every
+			# container recreation.
 			# One bad pass must not end the checks for the life of the process:
 			# anything that raises outside the per-host guard —listing the
 			# hosts, sending the message, saving its state on a full disk—
 			# used to kill this thread with nothing said, and updates were
 			# never checked again until a restart.
 			try:
-				cold_cache = not store.has_update_cache()
+				cold_cache = not store.update_check_done()
 				if cold_cache:
 					debug("Update cache is empty: this pass will fill it without notifying")
 				self._check_fleet(cold_cache)
+				# Only once it has decided on something. Waiting for the cache
+				# to have an entry left an install whose containers were all
+				# ignored, or stopped, cold for good: the first update found
+				# after one came back was saved as announced without a word.
+				if store.has_update_cache() or (self._decided and not self._failed):
+					store.mark_update_check_done()
 			except Exception as e:
 				error(f"Update check pass failed, retrying at the next interval: [{e}]")
 			wait_for_next_update_check()
@@ -1954,8 +1996,11 @@ class DockerUpdateMonitor:
 		# down degrades its own check and nothing else.
 		all_updates = []  # list of [reference, name] pairs, across every host
 		anything_new = False
-		self._deferred_self_update = None
-		for entry, owner, containers in hosts_with_containers():
+		self._auto_targets = []
+		self._decided = 0
+		self._failed = 0
+		listed = hosts_with_containers()
+		for entry, owner, containers in listed:
 			try:
 				# The cache written once for the host, not once per container.
 				with store.batch("updates"):
@@ -1963,15 +2008,28 @@ class DockerUpdateMonitor:
 				all_updates.extend(found)
 				anything_new = anything_new or has_new
 			except Exception as e:
+				self._failed += 1
 				error(f"Update check failed on {entry.get('alias', entry['id'])}: [{e}]")
 		try:
-			self._announce(all_updates, anything_new)
+			forget_gone_container_settings(listed)
+		except Exception as e:
+			error(f"Could not tidy the per-container settings: [{e}]")
+
+		# What updates on its own goes first, then the message with buttons for
+		# the rest, so that one is left at the bottom of the chat and nothing
+		# it invites runs alongside the batch. The bot goes last of all and on
+		# its own: from there it is replaced by the new one, and anything after
+		# it would never happen. Each step in a finally, because the one before
+		# failing —a full disk saving the message— must not cost the next.
+		own = [t for t in self._auto_targets if is_own_container(t[0], ref_id(t[1]), t[2])]
+		others = [t for t in self._auto_targets if t not in own]
+		try:
+			self._auto_update(others)
 		finally:
-			# Last of all, once everything else has been checked and said:
-			# from here the bot is replaced by the new one.
-			if self._deferred_self_update:
-				reference, name = self._deferred_self_update
-				self._auto_update(ref_host(reference), reference, name)
+			try:
+				self._announce(all_updates, anything_new)
+			finally:
+				self._auto_update(own)
 
 	def _announce(self, all_updates, anything_new):
 		"""The single fleet-wide message for what a pass found."""
@@ -2002,31 +2060,58 @@ class DockerUpdateMonitor:
 			# nothing has to be asked of each daemon a second time.
 			save_container_refs(message.chat.id, message.message_id, all_updates)
 
-	def _auto_update(self, host_id, reference, name):
-		"""Updates a container labelled for it, saying so where notifications go."""
-		if store.get("bot.extended_messages") and not is_muted():
-			send_message_to_notification_channel(message=f'{host_label(host_id)}{get_text("auto_update", name)}')
-		debug(f"Auto-updating container {name}")
-		count_usage("auto_label_update")
-		# Build a send_fn that routes to the notification channel,
-		# or silently swallows messages (with a debug trace) when muted.
-		if is_muted():
-			def _auto_update_send_fn(msg):
-				debug(f"Message [{msg}] omitted because muted")
-				return None
-		else:
-			def _auto_update_send_fn(msg):
-				return send_message_to_notification_channel(message=msg)
-		update_container(reference, name, send=_auto_update_send_fn)
+	def _auto_update(self, targets):
+		"""
+		Updates what the pass found to update on its own, in a single batch.
+
+		The batch /updateall runs when they are ticked by hand: one progress
+		message and one summary for the whole pass, across hosts. Updated one
+		by one as they were found, each was a batch of its own, and four
+		containers on one machine left four messages.
+
+		What was updated from somewhere else in the meantime, or removed, is
+		left out without a word: the pass can take minutes, and a summary
+		saying "already up to date" about something nobody asked for is noise.
+		"""
+		live = []
+		for host_id, reference, name, label in targets:
+			owner, container = find_live_container(reference, name)
+			if container is None:
+				debug(f"Auto-update of {name} skipped: it is gone since the check")
+				continue
+			# Asked again: a tap from "tell me" to "do not check" goes through
+			# "update on its own", and the check may have passed by just then.
+			if update_mode(owner.host_id, container.name, container.labels)[0] != "auto":
+				debug(f"Auto-update of {name} skipped: it is no longer set to update on its own")
+				continue
+			reference = container_ref(owner.host_id, container)
+			if runs_latest_image(reference, container.name):
+				debug(f"Auto-update of {name} skipped: it already runs the newest image")
+				continue
+			debug(f"Auto-updating container {name}")
+			count_usage("auto_label_update" if label else "auto_bot_update")
+			live.append((owner.host_id, reference, container.name))
+		if not live:
+			return
+		if store.get("bot.extended_messages"):
+			# Step by step, as extended messages are asked for: each one said
+			# right before its own update, not all of them up front.
+			for host_id, reference, name in live:
+				auto_update_send(f'{host_label(host_id)}{get_text("auto_update", name)}')
+				update_containers([(reference, name)], send=auto_update_send, report_up_to_date=False)
+			return
+		update_containers([(reference, name) for _, reference, name in live],
+						  send=auto_update_send, report_up_to_date=False)
 
 	def _check_host(self, entry, owner, cold_cache, containers):
 		"""
 		Checks one host for updates, returning ([reference, name], has_new).
 
-		What it finds feeds the single fleet-wide message _check_fleet sends;
-		this sends nothing itself except the bot's own update — kept apart on
-		purpose, since updating it recreates the bot mid-batch — and the
-		progress of anything labelled for auto-update.
+		What it finds feeds the single fleet-wide message _check_fleet sends,
+		and what is to update on its own goes to self._auto_targets for the
+		batch at the end of the pass. This sends nothing itself except the
+		bot's own "update available" — kept apart on purpose, since updating it
+		recreates the bot mid-batch.
 
 		`containers` is what the sweep already listed for this host. Asking the
 		daemon again here would be a second round trip for one answer, and
@@ -2050,11 +2135,13 @@ class DockerUpdateMonitor:
 		for container in containers:
 			if (container.status == "exited" or container.status == "dead") and not store.get("bot.check_update_stopped_containers"):
 				debug(f"Ignoring update check for container {container.name} (stopped)")
+				self._decided += 1
 				continue
 
-			labels = container.labels
-			if label_enabled(labels, LABEL_IGNORE_CHECK_UPDATES):
-				debug(f"Ignoring update check for container {container.name} (label)")
+			mode, label = update_mode(host_id, container.name, container.labels)
+			if mode == "ignore":
+				debug(f"Ignoring update check for container {container.name} ({'label' if label else 'setting'})")
+				self._decided += 1
 				continue
 
 			# Listed, not inspected: the platform the pull has to ask for is
@@ -2063,8 +2150,7 @@ class DockerUpdateMonitor:
 			# answer for.
 			#
 			# A container gone since the listing —removed, or recreated under a
-			# new id, which an auto-update earlier in this same pass does to the
-			# services sharing its network— is skipped. Failing here, outside
+			# new id from outside the bot— is skipped. Failing here, outside
 			# the try below, threw away every update already found on the host,
 			# and those were saved as announced without ever being announced.
 			try:
@@ -2090,15 +2176,14 @@ class DockerUpdateMonitor:
 					raise remote_image
 				debug(f"Checking update: {container.name} ({image_with_tag}): LOCAL IMAGE [{local_image.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}] - REMOTE IMAGE [{remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}]")
 				if local_image != remote_image.id and not same_running_manifest(owner.client, container, local_image, remote_image):
-					if label_enabled(labels, LABEL_AUTO_UPDATE) and is_own_container(host_id, container.id, container.name):
-						# Updating the bot recreates it, which would end this
-						# pass halfway, with the hosts after this one unchecked.
-						# So it waits for the end of the pass.
-						debug(f"Auto-update of the bot itself deferred to the end of the pass")
-						self._deferred_self_update = (container_ref(host_id, container), container.name)
-						continue
-					if label_enabled(labels, LABEL_AUTO_UPDATE):
-						self._auto_update(host_id, container_ref(host_id, container), container.name)
+					if mode == "auto":
+						# Not here: all together at the end of the pass, in one
+						# batch. The bot among them, which updating would
+						# recreate halfway through, with the hosts after this one
+						# unchecked.
+						debug(f"{container.name} update detected! Updated at the end of the pass")
+						self._auto_targets.append((host_id, container_ref(host_id, container), container.name, label))
+						self._decided += 1
 						continue
 					old_has_update = read_container_update_status(image_with_tag, container.name, host_id)
 					has_update = True
@@ -2148,8 +2233,10 @@ class DockerUpdateMonitor:
 				# resolve, say— does not always say which container it was.
 				error(f"Could not check update for {container.name} ({image_with_tag}) "
 					  f"on {host_registry.alias(host_id)}: [{e}]")
+				self._failed += 1
 				continue
 			save_container_update_status(image_with_tag, container.name, has_update, host_id, versions)
+			self._decided += 1
 
 		return grouped_updates_containers, should_notify
 
@@ -3499,16 +3586,25 @@ def collect_telemetry_metrics():
 	try:
 		listed = hosts_with_containers()
 		if listed:
-			total = auto_update = ignore_updates = 0
-			for _entry, _owner, containers in listed:
+			total = auto_update = ignore_updates = auto_update_bot = ignore_updates_bot = 0
+			for entry, _owner, containers in listed:
 				for container in containers:
 					labels = container.labels or {}
 					total += 1
 					auto_update += label_enabled(labels, LABEL_AUTO_UPDATE)
 					ignore_updates += label_enabled(labels, LABEL_IGNORE_CHECK_UPDATES)
+					# Apart from the labels, rather than counted with them:
+					# those two are declared as what carries the label, and
+					# their history says so.
+					mode, label = update_mode(entry["id"], container.name, labels)
+					if label is None:
+						auto_update_bot += mode == "auto"
+						ignore_updates_bot += mode == "ignore"
 			metrics["containers"] = _containers_bucket(total)
 			metrics["containers_auto_update"] = auto_update
 			metrics["containers_ignore_updates"] = ignore_updates
+			metrics["containers_auto_update_bot"] = auto_update_bot
+			metrics["containers_ignore_updates_bot"] = ignore_updates_bot
 	except Exception as e:
 		debug(f"Telemetry could not count containers: {e}")
 
@@ -3698,10 +3794,246 @@ def build_settings_updates():
 		get_text("settings_row_interval", _format_interval(update_interval_hours())),
 		callback_data="settingsAskInterval"))
 	markup.add(_toggle_button("check_update_stopped_containers"))
+	markup.add(InlineKeyboardButton(get_text("settings_row_containers"), callback_data="settingsContainers"))
 	_add_navigation(markup, "settings")
 
 	text = f'{get_text("settings_updates_title")}\n\n{get_text("settings_updates_help")}'
 	return text, markup
+
+def _checks_off_warning():
+	"""What a per-container choice needs said while the checks are off."""
+	return "" if store.get("bot.check_updates") else f'\n\n{get_text("settings_containers_checks_off")}'
+
+# What a tap on a container moves it to: tell me, update on its own, do not
+# check, and round again. "Update on its own" first, because it is what most
+# taps are for. On the way to "do not check" it spends a moment there, which
+# _auto_update covers: it asks again before updating anything.
+NEXT_UPDATE_MODE = {None: "auto", "auto": "ignore", "ignore": None}
+
+def next_update_mode(host_id, mode, image):
+	"""
+	The mode a tap moves a container on to: the next one round, past "update
+	on its own" for what might be the bot, which would only be refused —and
+	every tap would then propose it again, with "do not check" out of reach.
+	"""
+	following = NEXT_UPDATE_MODE[mode]
+	if following == "auto" and might_be_the_bot(host_id, image):
+		following = NEXT_UPDATE_MODE[following]
+	return following
+
+# How each mode shows in front of a container's name in the list: the same
+# as on the /info button.
+UPDATE_MODE_ICONS = {None: "🔔", "auto": "🔄", "ignore": "🚫"}
+
+def _settings_containers_header():
+	return f'{get_text("settings_containers_title")}\n\n{get_text("settings_containers_help")}'
+
+def _away_lines(answered):
+	"""
+	The hosts that did not answer, or are paused, and have settings kept:
+	they have no list to show, and what they have stays until they are back,
+	or removed.
+	"""
+	stored = store.container_settings()
+	return [get_text("settings_containers_host_away", host_alias(entry["id"]), len(stored[entry["id"]]))
+			for entry in host_registry.hosts(include_paused=True)
+			if entry["id"] not in answered and stored.get(entry["id"])]
+
+def build_settings_containers_hosts(sections, answered):
+	"""
+	Which host's containers to list, when more than one has any.
+
+	A list per host rather than one for the fleet: across machines every
+	button has to carry the host's name, one to a row, and sixty containers
+	are sixty rows. `sections` are the hosts with containers to list, and
+	`answered` the ids of every host that answered, with them or without.
+	"""
+	markup = InlineKeyboardMarkup(row_width=1)
+	for entry, _owner, _containers in sections:
+		markup.add(InlineKeyboardButton(f'🖥️ - {entry.get("alias", entry["id"])}',
+										callback_data=f'ctrHost|{entry["id"]}'))
+	_add_navigation(markup, "settingsUpdates")
+
+	lines = [_settings_containers_header(), "",
+			 get_text("settings_containers_pick_host") if sections else get_text("error_no_containers_available")]
+	lines += _away_lines(answered)
+	return "\n".join(lines) + _checks_off_warning(), markup
+
+def container_list_items(containers):
+	"""
+	A host's containers as a per-container list keeps them: name, its DCB-*
+	labels and its image, which is all a tap needs to know without asking
+	the daemon again.
+	"""
+	def dcb_labels(labels):
+		labels = labels if isinstance(labels, dict) else {}
+		return {key: value for key, value in labels.items()
+				if key in (LABEL_AUTO_UPDATE, LABEL_IGNORE_CHECK_UPDATES)}
+	return [[container.name, dcb_labels(container.labels), container_image(container)]
+			for container in containers]
+
+def _container_list_key(chat_id, message_id):
+	return f"ctr_list_{chat_id}_{message_id}"
+
+def save_container_list(chat_id, message_id, data):
+	write_cache_item(_container_list_key(chat_id, message_id), data)
+
+def load_container_list(chat_id, message_id, host_id):
+	"""
+	A per-container list's data, or None when the button pressed is not from
+	the list the message shows: expired, or left for another host by a tap
+	or an admin quicker than this one. Its buttons carry the host for that.
+	"""
+	data = read_cache_item(_container_list_key(chat_id, message_id))
+	if not isinstance(data, dict) or not isinstance(data.get("items"), list) or data.get("host") != host_id:
+		return None
+	return data
+
+def clear_container_list(chat_id, message_id):
+	delete_cache_item(_container_list_key(chat_id, message_id))
+
+# Serialises what reads a per-container list and writes it back: a tap that
+# waited on the daemon must not save over a Back or a page change made
+# meanwhile, nor they over it.
+container_list_lock = threading.Lock()
+
+def container_list_icon(current, label):
+	"""How a container shows in the list: 🔔, 🔄 or 🚫, and 🏷️ in front when a label decides."""
+	if not label:
+		return UPDATE_MODE_ICONS[current]
+	return "🏷️" if current is None else f"🏷️{UPDATE_MODE_ICONS[current]}"
+
+def build_settings_containers_list(data):
+	"""
+	One host's containers, each a tap away from the next mode.
+
+	One list for the three rather than one per mode: each button says how
+	its container is set, and a tap moves it on. The buttons carry the host,
+	the container's place in the list and the mode the tap sets, never
+	"next": two taps, or two admins on the same list, then land on the same
+	answer instead of going round twice, and a tap on a list the message no
+	longer shows lands on nothing.
+
+	Saved on the spot, like the rest of /settings: /updateall asks to confirm
+	because updating is costly, and choosing is not.
+	"""
+	host_id = data["host"]
+	items = data["items"]
+	page, pages = update_keyboard_page(items, data.get("page", 0))
+	start = page * UPDATE_KEYBOARD_PAGE_SIZE
+
+	markup = InlineKeyboardMarkup(row_width=button_columns())
+	buttons = []
+	for index in range(start, min(start + UPDATE_KEYBOARD_PAGE_SIZE, len(items))):
+		name, labels, image = items[index]
+		current, label = update_mode(host_id, name, labels)
+		buttons.append(InlineKeyboardButton(
+			f"{container_list_icon(current, label)} {name}",
+			callback_data=f"ctrToggle|{host_id}|{index}|{update_mode_code(next_update_mode(host_id, current, image))}"))
+	markup.add(*buttons)
+	if pages > 1:
+		navigation = []
+		if page > 0:
+			navigation.append(InlineKeyboardButton("◀️", callback_data=f"ctrPage|{host_id}|{page - 1}"))
+		navigation.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data=f"ctrPage|{host_id}|{page}"))
+		if page < pages - 1:
+			navigation.append(InlineKeyboardButton("▶️", callback_data=f"ctrPage|{host_id}|{page + 1}"))
+		markup.row(*navigation)
+	# Back to the hosts when there was a choice of them.
+	_add_navigation(markup, "settingsContainers" if data.get("several_hosts") else "settingsUpdates")
+
+	lines = [_settings_containers_header()]
+	if not host_registry.is_single_host():
+		lines += ["", get_text("list_host_header", host_alias(host_id))]
+	if not items:
+		lines += ["", get_text("error_no_containers_available")]
+	if data.get("answered") is not None:
+		away = _away_lines(data["answered"])
+		if away:
+			lines += [""] + away
+	return "\n".join(lines) + _checks_off_warning(), markup
+
+def show_settings_containers(chat_id, message_id):
+	"""
+	The hosts to choose from, or straight to the list when only one has
+	containers to show — as the /info picker does.
+	"""
+	sections = hosts_with_containers()
+	answered = [entry["id"] for entry, _owner, _containers in sections]
+	sections = [section for section in sections if section[2]]
+	if len(sections) == 1:
+		entry, _owner, containers = sections[0]
+		show_settings_containers_list(chat_id, message_id, entry["id"], containers,
+									  several_hosts=False, answered=answered)
+		return
+	text, markup = build_settings_containers_hosts(sections, answered)
+	edit_message_text(text, chat_id, message_id, reply_markup=markup)
+
+def show_settings_containers_list(chat_id, message_id, host_id, containers=None, several_hosts=True, answered=None):
+	"""
+	Lists one host's containers, in place of the menu.
+
+	`answered` is given when there was no choice of host to make, and so no
+	screen that named the hosts not answering: the list names them instead.
+	"""
+	if containers is None:
+		try:
+			containers = manager(host_id).list_containers()
+		except Exception as e:
+			reason = e.reason if isinstance(e, host_registry.HostUnavailable) else e
+			send_message(message=get_text("host_unreachable", host_alias(host_id), html.escape(str(reason))))
+			return
+	data = {"host": host_id, "page": 0, "several_hosts": several_hosts,
+			"answered": answered, "items": container_list_items(containers)}
+	save_container_list(chat_id, message_id, data)
+	text, markup = build_settings_containers_list(data)
+	edit_message_text(text, chat_id, message_id, reply_markup=markup)
+
+def toggle_in_container_list(data, index, mode):
+	"""
+	Sets the container at `index` of a list to `mode`, the one its button
+	said a tap would set.
+
+	The container is looked at again first, one request: the list may have
+	been open a while. Removed since —from the bot, or with docker rm—, a
+	tap stored a setting for nothing, and its cleanup announced a month
+	later; recreated with a label since, it stored a value the label then
+	overrode, while the button said otherwise. The item is refreshed with
+	what was found, so the repaint shows it.
+
+	Returns None, or what to say in an alert when it was not done.
+	"""
+	name = data["items"][index][0]
+	host_id = data["host"]
+	try:
+		live = manager(host_id).container_named(name)
+	except Exception as e:
+		reason = e.reason if isinstance(e, host_registry.HostUnavailable) else e
+		return alert_text(get_text("host_unreachable", host_alias(host_id), html.escape(str(reason))))
+	if live is None:
+		return alert_text(get_text("container_does_not_exist", html.escape(name)))
+	data["items"][index] = container_list_items([live])[0]
+	_name, labels, image = data["items"][index]
+	current, label = update_mode(host_id, name, labels)
+	if label:
+		return get_text("container_updates_by_label", label)
+	if current == mode:
+		return None
+	return set_update_mode(host_id, name, labels, image, mode)
+
+def alert_text(text):
+	"""A message's text for an alert, which is plain: its tags taken out."""
+	return html.unescape(re.sub(r"<[^>]+>", "", text))
+
+def expire_container_list(call_id):
+	"""
+	Says a per-container list can no longer be used.
+
+	Without taking the buttons away, unlike an update list: the message may
+	already show another screen, and a removal queued behind its repaint
+	would leave that one without buttons.
+	"""
+	answer_callback_quietly(call_id, text=get_text("settings_containers_expired"), show_alert=True)
 
 def build_settings_hosts():
 	"""
@@ -3768,9 +4100,10 @@ def build_settings_host(host_id):
 	if not paused:
 		markup.add(InlineKeyboardButton(get_text("button_host_test"), callback_data=f"settingsHost|{host_id}"))
 	markup.add(InlineKeyboardButton(get_text("button_host_rename"), callback_data=f"settingsHostRename|{host_id}"))
-	# The local host has neither: the bot itself runs on it, so it can be
-	# neither removed nor left out of the sweeps.
+	# The local host has none of these: the bot itself runs on it, so it can be
+	# neither moved elsewhere, nor removed, nor left out of the sweeps.
 	if not entry.get("local"):
+		markup.add(InlineKeyboardButton(get_text("button_host_change_url"), callback_data=f"settingsHostUrl|{host_id}"))
 		markup.add(InlineKeyboardButton(
 			get_text("button_host_resume") if paused else get_text("button_host_pause"),
 			callback_data=f"settingsHostPause|{host_id}"))
@@ -3778,6 +4111,147 @@ def build_settings_host(host_id):
 	_add_navigation(markup, "settingsHosts")
 	return "\n".join(lines), markup
 
+
+def ask_host_url(user_id, host_id):
+	"""Asks for a remote host's new URL, saying what it is now."""
+	entry = host_registry.host(host_id)
+	if entry is None or entry.get("local"):
+		send_settings_menu(screen="hosts")
+		return
+	ask_text_input(user_id, f"host_url:{host_id}", "settings_host_ask_url", back_to="hosts",
+				   prompt_args=(host_alias(host_id), html.escape(entry.get("url", ""))))
+
+def _host_url_check(host_id, url):
+	"""
+	host_registry.probe_new_url, as (same_daemon, None), or (None, why not)
+	with the text that says so.
+	"""
+	try:
+		return host_registry.probe_new_url(host_id, url), None
+	except host_registry.HostRejected as e:
+		debug(f"Rejected new URL {url} for host {host_id}: {e.reason}")
+		if e.reason == "same":
+			return None, get_text("settings_host_url_same")
+		if e.reason in ("local", "missing"):
+			return None, get_text("error_can_not_do_that")
+		key = "settings_host_duplicate" if e.reason == "duplicate" else "settings_host_bad_scheme"
+		return None, get_text(key, html.escape(url))
+	except host_registry.HostUnavailable as e:
+		debug(f"New URL {url} for host {host_id} does not answer: {e.reason}")
+		return None, get_text("settings_host_unreachable", html.escape(url), html.escape(str(e.reason)))
+
+def _apply_host_url(host_id, url, same_daemon):
+	"""Changes the URL, and returns what to say about it."""
+	try:
+		host_registry.change_url(host_id, url)
+	except host_registry.HostRejected as e:
+		debug(f"Could not change host {host_id} to {url}: {e.reason}")
+		if e.reason == "duplicate":
+			return get_text("settings_host_duplicate", html.escape(url))
+		return get_text("error_can_not_do_that")
+	# Its manager held a client on the old URL; the next use builds one on the
+	# new. The event stream follows on the supervisor's next pass.
+	forget_manager(host_id)
+	if same_daemon is False:
+		# What the cache knew was about another machine's containers, and a
+		# name they happen to share would have carried it over.
+		store.forget_host_updates(host_id)
+	return get_text("settings_host_url_changed", host_alias(host_id), html.escape(url))
+
+def _send_host_screen(host_id, prefix):
+	"""The host's own screen, led by `prefix`, as a new message."""
+	built = build_settings_host(host_id)
+	if built is None:
+		send_settings_menu(prefix=prefix, screen="hosts")
+		return
+	text, markup = built
+	send_message(message=f"{prefix}\n\n{text}", reply_markup=markup)
+
+def receive_host_url(user_id, host_id, raw):
+	"""
+	Takes the URL typed for a host, and changes it or asks first.
+
+	Straight away when the new URL reaches the same Docker as the old one:
+	the same machine by another way, nothing for anyone to weigh. Otherwise
+	it asks, saying why: another Docker, or one it cannot compare because the
+	old URL does not answer. Either way what the host keeps —the settings of
+	its containers, its schedules— would then apply to the containers of
+	whatever machine that is, by name.
+
+	The URL waits for the confirmation in this admin's pending state, never in
+	the button: it is not limited to 64 bytes there, and a button cannot be
+	made to carry a URL nobody typed.
+	"""
+	_alias, url = parse_host_definition(raw)
+	if not url:
+		_send_host_screen(host_id, get_text("settings_host_invalid"))
+		return
+	same_daemon, refused = _host_url_check(host_id, url)
+	if refused:
+		_send_host_screen(host_id, refused)
+		return
+	if same_daemon:
+		_send_host_screen(host_id, _apply_host_url(host_id, url, same_daemon))
+		return
+	markup = InlineKeyboardMarkup(row_width=1)
+	markup.add(InlineKeyboardButton(get_text("button_host_url_confirm"), callback_data=f"settingsHostUrlConfirm|{host_id}"))
+	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data=f"settingsHostUrlCancel|{host_id}"))
+	key = "settings_host_url_other_daemon" if same_daemon is False else "settings_host_url_unknown_daemon"
+	sent = send_message(message=get_text(key, host_alias(host_id), html.escape(url)), reply_markup=markup)
+	if sent:
+		# With the message that asks: a question asked twice leaves two, and
+		# each one confirms its own URL —the one it shows—, not the latest.
+		_save_cache("pending_host_url", user_id, asked_here({
+			"host": host_id, "url": url, "message": sent.message_id}))
+
+def _pending_host_url(user_id, chat_id, message_id, host_id):
+	"""
+	The URL a confirmation message holds for this admin, or None: asked by
+	another admin, asked again since, or too long ago.
+	"""
+	pending = answerable(_load_cache("pending_host_url", user_id), chat_id)
+	if not pending or pending.get("host") != host_id or pending.get("message") != message_id:
+		return None
+	return pending
+
+def confirm_host_url(call_id, user_id, chat_id, message_id, host_id):
+	"""
+	Changes a host's URL once confirmed, checking it all again first: a
+	minute later the URL may have stopped answering, or another admin may
+	have registered it as a host of its own.
+
+	A tap on a confirmation that is not this admin's pending one only says
+	so, and leaves the message alone: in a group it may be another admin's
+	question, still waiting for its own answer.
+	"""
+	pending = _pending_host_url(user_id, chat_id, message_id, host_id)
+	if pending is None:
+		answer_callback_quietly(call_id, text=alert_text(get_text("settings_host_url_expired")), show_alert=True)
+		return
+	answer_callback_quietly(call_id)
+	_clear_cache("pending_host_url", user_id)
+	same_daemon, refused = _host_url_check(host_id, pending.get("url", ""))
+	result = refused or _apply_host_url(host_id, pending["url"], same_daemon)
+	built = build_settings_host(host_id)
+	if built is None:
+		render_settings(chat_id, message_id, "hosts")
+		return
+	text, markup = built
+	edit_message_text(f"{result}\n\n{text}", chat_id, message_id, reply_markup=markup)
+
+def cancel_host_url(call_id, user_id, chat_id, message_id, host_id):
+	"""Drops a URL waiting for confirmation, and goes back to the host."""
+	if _pending_host_url(user_id, chat_id, message_id, host_id) is None:
+		answer_callback_quietly(call_id, text=alert_text(get_text("settings_host_url_expired")), show_alert=True)
+		return
+	answer_callback_quietly(call_id)
+	_clear_cache("pending_host_url", user_id)
+	built = build_settings_host(host_id)
+	if built is None:
+		render_settings(chat_id, message_id, "hosts")
+		return
+	text, markup = built
+	edit_message_text(text, chat_id, message_id, reply_markup=markup)
 
 def schedules_on_host(host_id):
 	"""
@@ -3841,6 +4315,9 @@ def build_settings_host_remove(host_id):
 	if affected:
 		listed = "\n".join(f"· <b>{html.escape(s.get('name', ''))}</b>" for s in affected)
 		question += get_text("settings_host_remove_schedules", listed)
+	settings = len(store.container_settings().get(host_id) or {})
+	if settings:
+		question += get_text("settings_host_remove_containers", settings)
 	return question, markup
 
 
@@ -4001,18 +4478,18 @@ def typed_prompt(key, *args):
 		text += f"\n\n{get_text('reply_to_answer')}"
 	return text
 
-def ask_text_input(user_id, field, prompt_key, back_to="main"):
+def ask_text_input(user_id, field, prompt_key, back_to="main", prompt_args=()):
 	"""
 	Asks for a value that has to be typed rather than picked.
 
 	`back_to` names the settings screen to return to once answered, or is None
 	for /mute, which is reached from the main menu and has nothing to go back
-	to.
+	to. `prompt_args` fill the prompt's placeholders.
 	"""
 	debug(f"Running command: ask_text_input({field}) for user {user_id}")
 	markup = InlineKeyboardMarkup(row_width=1)
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cancelTextInput"))
-	sent = send_message(message=typed_prompt(prompt_key), reply_markup=markup)
+	sent = send_message(message=typed_prompt(prompt_key, *prompt_args), reply_markup=markup)
 	if sent:
 		save_text_input_state(user_id, field, sent.message_id, back_to)
 
@@ -4446,6 +4923,34 @@ def answer_callback_quietly(callback_id, text=None, show_alert=False):
 		return False
 
 
+def _host_did_not_answer(call, spec, host_id, why):
+	"""Says a button's host did not answer, the message kept to try again."""
+	if not spec.answer_immediately:
+		answer_callback_quietly(call.id)
+	send_message(message=get_text("host_unreachable", host_alias(host_id), html.escape(why)))
+
+
+def _container_is_gone(call, spec, chat_id, message_id, shown_name, host_id):
+	"""
+	Says a button's container no longer exists.
+
+	A message that stays after its presses —a list of updates, an /info—
+	stays here too, and the answer goes on the button: the list still holds
+	the rest of its containers, and the one gone is left out when it is
+	confirmed. Deleting it took them all away, and left the press without
+	an answer. Any other message goes, as it always did.
+	"""
+	text = f'{get_text("container_does_not_exist", shown_name)}{host_suffix(host_id)}'
+	if spec.keeps_message and not spec.answer_immediately:
+		answer_callback_quietly(call.id, text=_fit_alert(alert_text(text)), show_alert=True)
+		return
+	if spec.keeps_message:
+		send_message(message=text)
+		return
+	close_multi_action_menu(chat_id, message_id)
+	send_message(message=text)
+
+
 @bot.callback_query_handler(func=lambda mensaje: True)
 @with_reply_context
 def button_controller(call):
@@ -4497,11 +5002,22 @@ def button_controller(call):
 		if ctx.containerId:
 			ctx.hostId = ref_host(ctx.containerId)
 			if not ctx.containerName:
-				ctx.containerName = get_container_name(chatId, messageId, ctx.containerId)
+				ctx.containerName = load_container_name(chatId, messageId, ctx.containerId)
+			if not ctx.containerName:
+				# An update list outlives the names saved with it, which go
+				# a week after they were written: the list still says them.
+				ctx.containerName = listed_update_name(chatId, messageId, ctx.containerId)
+			if not ctx.containerName:
+				ctx.containerName, silent = name_by_reference(ctx.containerId)
+				if silent is not None:
+					# The host did not answer, which says nothing about the
+					# container: said so, and the message kept to try again.
+					# Taken for a container that does not exist, it got its
+					# id in place of a name, and its message deleted.
+					_host_did_not_answer(call, spec, ctx.hostId, silent)
+					return
 				if not ctx.containerName:
-					close_multi_action_menu(chatId, messageId)
-					send_message(message=f'{get_text("container_does_not_exist", ref_id(ctx.containerId))}'
-										f'{host_suffix(ctx.hostId)}')
+					_container_is_gone(call, spec, chatId, messageId, ref_id(ctx.containerId), ctx.hostId)
 					debug(f"Container {ctx.containerId} not found in cache or Docker")
 					return
 
@@ -4524,13 +5040,13 @@ def button_controller(call):
 				# The host did not answer, which says nothing about the container.
 				# Saying it did not exist, and deleting the message —the list of
 				# updates, the only way back into them— was wrong on both counts.
-				answer_callback_quietly(call.id)
-				send_message(message=get_text("host_unreachable", host_alias(ctx.hostId), html.escape(silent)))
+				_host_did_not_answer(call, spec, ctx.hostId, silent)
 				return
 			else:
-				close_multi_action_menu(chatId, messageId)
-				send_message(message=f'{get_text("container_does_not_exist", ctx.containerName)}'
-									f'{host_suffix(ctx.hostId)}')
+				# Not looked for again by its id: the reference carries five
+				# characters of it, which a container created since can share,
+				# and the action —a stop, a delete— would land on that one.
+				_container_is_gone(call, spec, chatId, messageId, ctx.containerName, ctx.hostId)
 				debug(f"Container {ctx.containerName} (stale {ctx.containerId}) not found on {ctx.hostId}")
 				return
 
@@ -4640,6 +5156,8 @@ def handle_text(message):
 		clear_text_input_state(userId)
 		if field == "mute_minutes":
 			COMMAND_ACTIONS["/mute"](user_id=userId, chat_id=message.chat.id, argument=raw_value)
+		elif field.startswith("host_url:"):
+			receive_host_url(userId, field.split(":", 1)[1], raw_value)
 		else:
 			confirmation = apply_settings_text_value(field, raw_value)
 			send_settings_menu(prefix=confirmation, screen=pending_input.get("back_to") or "main")
@@ -5406,6 +5924,48 @@ def _recreate_namespace_sharers(owner, old_parent_id, new_parent_container, send
 			release_container_events(owner.host_id, names)
 
 
+# Where an update's own warnings go —the old container left behind, a
+# namespace sharer that could not follow— when whoever runs the update says.
+# They are sent from deep inside it, to the chat of a progress message that a
+# summarised batch never has, so they went to the chat even from an automatic
+# update and even while muted. A batch with somewhere of its own to report sets
+# this for the length of each update; the update runs in that same thread.
+_update_notify = contextvars.ContextVar("update_notify", default=None)
+
+
+def update_notify(host_id, chat_id):
+	"""What an update calls to warn about something on its own, on `host_id`."""
+	route = _update_notify.get()
+	if route is not None:
+		return lambda text: route(f'{host_label(host_id)}{text}')
+	return lambda text: send_message(chat_id=chat_id, message=f'{host_label(host_id)}{text}')
+
+
+def _with_update_notify(send, update):
+	"""Runs `update()` with its own warnings going to `send`, when there is one."""
+	if send is None:
+		return update()
+	token = _update_notify.set(send)
+	try:
+		return update()
+	finally:
+		_update_notify.reset(token)
+
+
+def auto_update_send(message):
+	"""
+	Where the automatic updates report: the notification channel, or nowhere
+	while muted.
+
+	Asked on every message rather than once per batch: a batch takes minutes,
+	and a mute can start or end halfway through it.
+	"""
+	if is_muted():
+		debug(f"Message [{message}] omitted because muted")
+		return None
+	return send_message_to_notification_channel(message=message)
+
+
 def update_container(ref, name, tag=None, send=None):
 	"""
 	Updates one container, reporting it the way a batch does.
@@ -5419,8 +5979,8 @@ def update_container(ref, name, tag=None, send=None):
 	update recreates the bot, and a summary would never arrive. So do extended
 	messages, which are asked for precisely to see every step.
 
-	`send` takes the text and returns the sent message, or None to stay quiet:
-	the auto-update writes to the notification channel and goes silent muted.
+	`send` takes the text and returns the sent message, or None to stay
+	quiet. By default, the chat being answered.
 	"""
 	if send is None:
 		send = lambda msg: send_message(message=msg)
@@ -5434,7 +5994,7 @@ def update_container(ref, name, tag=None, send=None):
 	_update_containers_quietly([(ref, name)], tag=tag, send=send)
 
 
-def update_containers(targets, up_to_date=(), missing=()):
+def update_containers(targets, up_to_date=(), missing=(), send=None, report_up_to_date=True):
 	"""
 	Updates several containers, as (reference, name) pairs, in the order given.
 
@@ -5454,25 +6014,43 @@ def update_containers(targets, up_to_date=(), missing=()):
 	The bot's own container always goes last, and on its own with its usual
 	messages: updating it recreates the bot, which would cut the batch short
 	and leave the summary unsent.
+
+	`send` is where it all goes, as in update_container; None is the chat
+	being answered. The automatic updates pass the notification channel, and
+	no `report_up_to_date`: what turns out to be current already is left out
+	of their summary rather than reported to someone who asked for nothing.
+
+	Each update on its own guard, the way the summarised form has always had
+	them: one host that stops answering halfway through a long batch must not
+	take the updates after it, the bot's own included, down with it.
 	"""
+	reply = send or (lambda msg: send_message(message=msg))
 	current = [t for t in targets if runs_latest_image(*t)]
-	up_to_date = list(up_to_date) + [(ref_host(ref), name) for ref, name in current]
+	if report_up_to_date:
+		up_to_date = list(up_to_date) + [(ref_host(ref), name) for ref, name in current]
 	targets = [t for t in targets if t not in current]
 	own = [t for t in targets if is_own_container(ref_host(t[0]), ref_id(t[0]), t[1])]
 	others = [t for t in targets if t not in own]
 
+	def guarded(ref, name):
+		try:
+			_with_update_notify(send, lambda: perform_container_update(ref, name, send_fn=send))
+		except Exception as e:
+			error(f"Could not update container {name}. Error: [{e}]")
+			reply(update_result_text(ref_host(ref), name, ok=False))
+
 	if store.get("bot.extended_messages"):
 		for ref, name in others:
-			perform_container_update(ref, name)
+			guarded(ref, name)
 		for host_id, name in up_to_date:
-			send_message(message=update_result_text(host_id, name, up_to_date=True))
+			reply(update_result_text(host_id, name, up_to_date=True))
 		for host_id, name in missing:
-			send_message(message=update_result_text(host_id, name, ok=False))
+			reply(update_result_text(host_id, name, ok=False))
 	elif others or up_to_date or missing:
-		_update_containers_quietly(others, up_to_date=up_to_date, missing=missing)
+		_update_containers_quietly(others, up_to_date=up_to_date, missing=missing, send=send)
 
 	for ref, name in own:
-		perform_container_update(ref, name)
+		guarded(ref, name)
 
 
 def _batch_progress_text(index, total, host_id, name):
@@ -5528,7 +6106,8 @@ def _update_containers_quietly(targets, tag=None, send=None, up_to_date=(), miss
 		else:
 			progress = send(text)
 		try:
-			outcome = perform_container_update(ref, name, tag=tag, send_fn=lambda msg: None, hold_events=True)
+			outcome = _with_update_notify(send, lambda: perform_container_update(
+				ref, name, tag=tag, send_fn=lambda msg: None, hold_events=True))
 		except Exception as e:
 			error(f"Could not update container {name}. Error: [{e}]")
 			outcome = UpdateOutcome(False, "")
@@ -5605,6 +6184,7 @@ def delete_compose_project(project_name, host_id=None):
 			send_message(message=f'{label}{get_text("deleting_service", html.escape(str(service_name)))}')
 		try:
 			container.remove(force=True)
+			forget_container(host_id, container.name)
 		except Exception as e:
 			debug(f"Error deleting {service_name}: {e}")
 			send_message(message=f'{label}{get_text("error_deleting_service", html.escape(str(service_name)))}')
@@ -5889,10 +6469,11 @@ def gather_container_info(owner, container):
 			info["host_architecture"] = host_architecture
 
 	# Updates, and how the bot treats it.
-	info["has_update"] = read_container_update_status(info["image"], container.name, host_id)
+	info["update_mode"], info["update_mode_label"] = update_mode(host_id, container.name, labels)
+	# Ignored is never pending, here as in /updateall: see update_available.
+	info["has_update"] = (False if info["update_mode"] == "ignore"
+						  else read_container_update_status(info["image"], container.name, host_id))
 	info["update_versions"] = store.update_versions(host_id, container.name)
-	info["auto_update"] = label_enabled(labels, LABEL_AUTO_UPDATE)
-	info["ignore_checks"] = label_enabled(labels, LABEL_IGNORE_CHECK_UPDATES)
 	checked = store.update_checked_at(host_id, container.name)
 	if checked:
 		try:
@@ -5981,17 +6562,150 @@ def gather_container_info(owner, container):
 
 def info(containerId, containerName):
 	debug(f"Running command: info for container {containerName}")
-	markup = InlineKeyboardMarkup(row_width = 1)
 	x = send_message(message=get_text("obtaining_info", containerName))
-	result, possible_update, can_start = manager_for(containerId).get_info(container_id=ref_id(containerId), container_name=containerName)
+	result, possible_update, can_start, gathered = manager_for(containerId).get_info(container_id=ref_id(containerId), container_name=containerName)
 	if x:
 		delete_message(x.message_id)
-	if possible_update:
-		markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{containerId}"))
+	updates = None
+	if gathered is not None:
+		mode, label = gathered["update_mode"], gathered["update_mode_label"]
+		updates = (mode, label, next_update_mode(ref_host(containerId), mode, gathered.get("image") or ""))
+	sent = send_message(message=result, reply_markup=info_markup(containerId, possible_update, can_start, updates))
+	if sent and gathered is not None:
+		# Its buttons repaint this message, and each press would otherwise
+		# ask the daemon for the name that is already known here.
+		save_container_refs(sent.chat.id, sent.message_id, [(containerId, containerName)])
+		# And what it said, to say it again with the new mode when its button
+		# is pressed, without gathering it all a second time.
+		write_cache_item(_info_key(sent.chat.id, sent.message_id), gathered)
+
+def _info_key(chat_id, message_id):
+	return f"info_{chat_id}_{message_id}"
+
+def clear_info_cache(chat_id, message_id):
+	delete_cache_item(_info_key(chat_id, message_id))
+
+# The button of each update mode, by mode and by the letter a callback
+# carries for it: "n" is None, the default, which announces what it finds.
+UPDATE_MODE_BUTTONS = {None: "button_updates_notify", "auto": "button_updates_auto", "ignore": "button_updates_ignore"}
+UPDATE_MODE_CODES = {"n": None, "a": "auto", "i": "ignore"}
+
+def update_mode_code(mode):
+	return next(code for code, value in UPDATE_MODE_CODES.items() if value == mode)
+
+def info_markup(ref, has_update, can_start, updates):
+	"""
+	The buttons under a container's /info.
+
+	What the update check does with it is a button rather than a line of the
+	text, the way /settings shows its values: it says how it is set, and a
+	tap moves it on to the next, as in the list in /settings. The button
+	carries the mode it sets rather than "next", so a double tap lands once.
+
+	`updates` is (mode, label, the mode a tap sets), or None for an /info that
+	could not be gathered.
+	"""
+	markup = InlineKeyboardMarkup(row_width=1)
+	if has_update:
+		markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{ref}"))
 	if can_start:
-		markup.add(InlineKeyboardButton(get_text("button_start"), callback_data=f"run|{containerId}"))
+		markup.add(InlineKeyboardButton(get_text("button_start"), callback_data=f"run|{ref}"))
+	if updates is not None:
+		mode, label, following = updates
+		markup.add(InlineKeyboardButton(
+			get_text("button_info_updates", "🏷️" if label else "🤖", get_text(UPDATE_MODE_BUTTONS[mode])),
+			callback_data=f"infoSetUpdates|{update_mode_code(following)}|{ref}"))
 	markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
-	send_message(message=result, reply_markup=markup)
+	return markup
+
+def live_info(ref, found=None):
+	"""
+	A container's /info buttons as it is now: (container, markup, mode,
+	label, pending), or None when it is gone.
+
+	From one inspect and the cache, without gathering /info again: that is a
+	reading of its stats, a second or two, for buttons that only need to know
+	whether it is stopped and has an update waiting. `found` is the
+	(owner, container) a caller has just looked up, which spares the inspect.
+	"""
+	owner, container = found or find_container(ref)
+	if container is None:
+		return None
+	host_id = owner.host_id
+	mode, label = update_mode(host_id, container.name, container.labels)
+	image = container_image(container)
+	# Read as gather_container_info reads it, or the button could go while the
+	# text above it still offers the update.
+	pending = mode != "ignore" and read_container_update_status(image, container.name, host_id) is True
+	markup = info_markup(ref, pending, container.status in ("exited", "dead", "created"),
+						 (mode, label, next_update_mode(host_id, mode, image)))
+	return container, markup, mode, label, pending
+
+def live_info_markup(ref):
+	"""The /info buttons of a container as it is now, or None when it is gone."""
+	state = live_info(ref)
+	return state[1] if state else None
+
+def repaint_info(call_id, chat_id, message_id, ref, alert=None, found=None):
+	"""
+	Repaints an /info once its update button was pressed: its buttons, and
+	its text too, from what /info gathered, so both agree on whether an
+	update is waiting —choosing "do not check" takes it away from both—, on
+	the versions it would bring and on when it was last checked.
+	"""
+	state = live_info(ref, found)
+	if state is None:
+		answer_callback_quietly(call_id, text=_fit_alert(alert), show_alert=bool(alert))
+		return
+	container, markup, mode, label, pending = state
+	# Under the reference the buttons now carry: pressed after the container
+	# is recreated again, the name is still known, and found on its host as
+	# it was this time. Without it, that press said it did not exist.
+	save_container_refs(chat_id, message_id, [(ref, container.name)])
+	gathered = read_cache_item(_info_key(chat_id, message_id))
+	if not isinstance(gathered, dict):
+		repaint_markup(call_id, chat_id, message_id, markup, alert)
+		return
+	host_id = ref_host(ref)
+	gathered.update(update_mode=mode, update_mode_label=label, has_update=pending,
+					update_versions=store.update_versions(host_id, container.name))
+	gathered.pop("last_check_seconds", None)
+	checked = store.update_checked_at(host_id, container.name)
+	if checked:
+		try:
+			gathered["last_check_seconds"] = (datetime.now() - datetime.fromisoformat(checked)).total_seconds()
+		except ValueError:
+			pass
+	write_cache_item(_info_key(chat_id, message_id), gathered)
+	edit_message_text(render_container_info(gathered), chat_id, message_id, reply_markup=markup)
+	answer_callback_quietly(call_id, text=_fit_alert(alert), show_alert=bool(alert))
+
+ALERT_MAX_LENGTH = 200
+
+def _fit_alert(alert):
+	"""
+	Telegram refuses an alert over 200 characters, and the tap then shows
+	nothing at all. A container name is the part that can run long.
+	"""
+	if alert and len(alert) > ALERT_MAX_LENGTH:
+		return alert[:ALERT_MAX_LENGTH - 1] + "…"
+	return alert
+
+def repaint_markup(call_id, chat_id, message_id, markup, alert=None):
+	"""
+	Puts `markup` on a message straight away and answers the press, with an
+	alert when there is something to say.
+
+	Synchronous, like the update toggles, so the tap shows its effect before
+	the next one. Telegram refuses an identical keyboard ("message is not
+	modified"), which a second tap on the same choice asks for: nothing to
+	report.
+	"""
+	try:
+		edit_message_reply_markup_sync(chat_id, message_id, reply_markup=markup)
+	except Exception as e:
+		debug(f"Could not repaint the buttons of message {message_id}: {e}")
+	answer_callback_quietly(call_id, text=_fit_alert(alert), show_alert=bool(alert))
 
 def _confirm_prune_action(prune_type, host_id=None):
 	"""
@@ -6018,8 +6732,22 @@ def confirm_prune(prune_type, host_id=None):
 def confirm_delete(containerId, containerName):
 	debug(f"Running command: confirm_delete for container {containerName}")
 	markup = create_confirm_cancel_keyboard(f"delete|{containerId}", "button_confirm_delete")
-	send_message(message=f'{host_label(ref_host(containerId))}{get_text("confirm_delete", containerName)}',
-				reply_markup=markup)
+	question = get_text("confirm_delete", containerName)
+	if store.container_update_mode(ref_host(containerId), containerName):
+		question += get_text("confirm_delete_settings")
+	send_message(message=f'{host_label(ref_host(containerId))}{question}', reply_markup=markup)
+
+def forget_container(host_id, name):
+	"""
+	Forgets what the bot keeps about a container deleted from the bot.
+
+	Straight away, without the wait the cleanup after each check gives the
+	ones that disappear on their own: removing it from here says it is not
+	coming back. Its update state too, which nothing else ever cleared and
+	would have been taken up by the next container given its name.
+	"""
+	store.forget_container_settings(host_id, name)
+	store.forget_update_status(host_id, name)
 
 def ask_command(userId, containerId, containerName):
 	debug(f"Running command: ask_command for container {containerName}")
@@ -7755,6 +8483,126 @@ def tell_not_admin(user_id, username):
 	warning(f"User {user_id} ({username}) tried to use admin command without permission")
 	message_queue.add_message(_send_message_direct, user_id, get_text("user_not_admin"), None, "html", True, None, idempotent=False)
 
+def update_mode(host_id, name, labels):
+	"""
+	What the update check does with a container, and what decided it.
+
+	Returns (mode, label): mode is "auto", "ignore", or None to announce what
+	it finds; label is the DCB-* label that decided it, or None when it was
+	the setting chosen from /info or /settings.
+
+	A label in the container wins whatever it says, `=false` included: it is
+	in the compose, the bot cannot change it, and a setting overriding it
+	would leave the compose saying one thing and the bot doing another.
+	Ignoring wins over updating, as it always has.
+	"""
+	labels = labels if isinstance(labels, dict) else {}
+	if LABEL_IGNORE_CHECK_UPDATES in labels or LABEL_AUTO_UPDATE in labels:
+		if label_enabled(labels, LABEL_IGNORE_CHECK_UPDATES):
+			return "ignore", LABEL_IGNORE_CHECK_UPDATES
+		if label_enabled(labels, LABEL_AUTO_UPDATE):
+			return "auto", LABEL_AUTO_UPDATE
+		return None, LABEL_IGNORE_CHECK_UPDATES if LABEL_IGNORE_CHECK_UPDATES in labels else LABEL_AUTO_UPDATE
+	return store.container_update_mode(host_id or host_registry.local_host_id(), name), None
+
+def container_image(container):
+	"""The image reference a container was created from, as its config says it."""
+	return str(((getattr(container, "attrs", None) or {}).get("Config") or {}).get("Image") or "")
+
+def might_be_the_bot(host_id, image):
+	"""
+	Whether a container could be the bot without the bot being able to tell.
+
+	When it cannot identify itself —nothing found in /proc— an automatic
+	update could take it for any other container: stop it, and with it the
+	update halfway through. With a label that took editing the compose; from
+	a button it is one tap. Only the identification counts here, never a
+	name: one that does not match is exactly how the bot fails to recognise
+	itself. Going by the image is a guess, but it is only used to refuse.
+	"""
+	if own_container() is not None:
+		return False
+	if host_id != host_registry.local_host_id():
+		return False
+	return "docker-controller-bot" in image
+
+def set_update_mode(host_id, name, labels, image, mode):
+	"""
+	Changes how the update check treats a container, from /info or /settings.
+
+	`labels` and `image` are the container's, as last seen: whether a label
+	decides instead, and whether it might be the bot.
+
+	Returns None when it was changed, or the text that says why not: a
+	DCB-* label decides it, settings.json cannot be written, or it might be
+	the bot itself and the bot cannot tell.
+
+	Going into "ignore" or out of it, what the cache knew goes. Left in, an
+	update found by a /checkupdate while ignored stayed in /updateall for good,
+	and one announced before ignoring it was taken, back out, for one
+	already announced — and never announced again.
+	"""
+	if host_registry.host(host_id) is None:
+		return get_text("error_can_not_do_that")
+	current, label = update_mode(host_id, name, labels)
+	if label:
+		return get_text("container_updates_by_label", label)
+	if mode == "auto" and might_be_the_bot(host_id, image):
+		return get_text("container_updates_maybe_the_bot")
+	if not store.set_container_update_mode(host_id, name, mode):
+		return get_text("container_updates_not_saved")
+	if (current == "ignore") != (mode == "ignore"):
+		store.forget_update_status(host_id, name)
+	debug(f"Update mode of {name} on {host_registry.alias(host_id)}: {mode or 'notify'}")
+	return None
+
+# How long a container's settings are kept after it last showed up on a host
+# that answered. Recreating a container is removing it and creating it again,
+# and a `docker compose down` can last a weekend.
+CONTAINER_SETTINGS_GRACE_DAYS = 30
+
+def forget_gone_container_settings(sections, now=None):
+	"""
+	Tidies the per-container settings against what the hosts just listed.
+
+	Two things go. What a DCB-* label now decides: the label wins, and a
+	value kept underneath would come back the day the label is removed,
+	months later, when nobody remembers having set it. And the settings of
+	containers missing from a host that answered for
+	CONTAINER_SETTINGS_GRACE_DAYS, which are said once, where notifications
+	go. A host that is down or paused is not in `sections`, so nothing of
+	its is touched; a removed host takes its settings with it when removed.
+
+	`sections` is what hosts_with_containers returned. Returns the
+	(host_id, name) pairs forgotten for being gone.
+	"""
+	if not store.container_settings() or store.settings_unreadable():
+		return []
+	present = {}
+	for entry, _owner, containers in sections:
+		host_id = entry["id"]
+		present[host_id] = [container.name for container in containers]
+		for container in containers:
+			_mode, label = update_mode(host_id, container.name, container.labels)
+			if label and store.container_update_mode(host_id, container.name):
+				debug(f"{container.name} has the {label} label now: its own setting goes")
+				store.set_container_update_mode(host_id, container.name, None)
+	forgotten = store.reconcile_containers(
+		present, time.time() if now is None else now, CONTAINER_SETTINGS_GRACE_DAYS * 24 * 60 * 60)
+	if forgotten:
+		debug(f"Forgot the settings of {len(forgotten)} containers gone for {CONTAINER_SETTINGS_GRACE_DAYS} days")
+		for host_id, name in forgotten:
+			# Left, it would be taken up by the next container given that name,
+			# as forget_container explains for a delete from the bot.
+			store.forget_update_status(host_id, name)
+		if not is_muted():
+			# In pieces: a rebuilt host can leave a list too long for one.
+			for piece in split_for_telegram(get_text(
+					"container_settings_forgotten", CONTAINER_SETTINGS_GRACE_DAYS,
+					by_host([(host_id, container_line(name)) for host_id, name in forgotten]))):
+				send_message_to_notification_channel(message=piece)
+	return forgotten
+
 def update_available(container, host_id=None):
 	"""
 	Whether a container has a pending update, according to the cache.
@@ -7762,10 +8610,14 @@ def update_available(container, host_id=None):
 	`host_id` is which host it lives on. It defaults to the local one so the
 	single-host callers read as they always did, but anything iterating over
 	hosts has to pass it or it would read another machine's cache entry.
+
+	Never for a container the check ignores: a /checkupdate on it still
+	finds and records what is there, and it ended up in /updateall and its
+	button, with nothing that would ever take it out again.
 	"""
 	image_with_tag = container.attrs['Config']['Image']
 	update = False
-	if store.get("bot.check_updates"):
+	if store.get("bot.check_updates") and update_mode(host_id, container.name, getattr(container, "labels", None))[0] != "ignore":
 		try:
 			if read_container_update_status(image_with_tag, container.name, host_id) is True:
 				update = True
@@ -8021,8 +8873,7 @@ def get_update_emoji(containerName, host_id=None):
 		container = manager(host_id).container_named(containerName)
 		if container is None:
 			return status
-		image_with_tag = container.attrs['Config']['Image']
-		if read_container_update_status(image_with_tag, container.name, host_id) is True:
+		if update_available(container, host_id):
 			status = "⬆️"
 	except Exception as e:
 		error(f"Could not read the update status of {containerName} on {host_registry.alias(host_id)}: [{e}]")
@@ -8988,6 +9839,14 @@ def load_update_data(chat_id, message_id):
 		return [], set()
 	return containers, selected
 
+def listed_update_name(chat_id, message_id, reference):
+	"""The name an update list shows for a reference, or None when it is not one of its."""
+	containers, _selected = load_update_data(chat_id, message_id)
+	for entry in containers:
+		if entry[0] == reference:
+			return entry[1]
+	return None
+
 def selected_in_order(containers, selected):
 	"""
 	The selected references, in the order the list shows them.
@@ -9300,17 +10159,6 @@ def clear_multi_action(chat_id, message_id):
 	"""Clears the multi-action session for a message"""
 	delete_cache_item(f"multi_action_{chat_id}_{message_id}")
 
-def get_container_name_by_id(container_ref_or_id):
-	"""
-	The name of a container, asked of the host its reference points at.
-
-	Returns None when the host cannot be reached or the container is gone,
-	which the caller reports as "does not exist" either way.
-	"""
-	_, container = find_container(container_ref_or_id)
-	return container.name if container is not None else None
-
-
 def find_container_id_on_host(host_id, container_name):
 	"""
 	The short id of a container by name, on one host only.
@@ -9343,25 +10191,32 @@ def locate_container_on_host(host_id, container_name):
 		return None, str(e)
 	return (container.id[:CONTAINER_ID_LENGTH] if container is not None else None), None
 
-def get_container_name(chat_id, message_id, container_id):
+def name_by_reference(ref):
 	"""
-	Returns the container name from cache with fallback to the Docker API
-
-	Args:
-		chat_id: Chat ID
-		message_id: Message ID
-		container_id: Container ID
-
-	Returns:
-		str: Container name or None if it doesn't exist
+	The name of the container a reference points at, telling apart a host
+	that did not answer: (name or None, why the host could not be asked or
+	None). As locate_container_on_host does going the other way.
 	"""
-	# 1. Try the cache
-	name = load_container_name(chat_id, message_id, container_id)
-	if name:
-		return name
-
-	# 2. Fallback to the Docker API
-	return get_container_name_by_id(container_id)
+	try:
+		owner = manager_for(ref)
+	except host_registry.HostUnavailable as e:
+		debug(f"Cannot reach the host for {ref}: {e.reason}")
+		return None, str(e.reason)
+	try:
+		return owner.client.containers.get(ref_id(ref)).name, None
+	except docker.errors.NotFound:
+		return None, None
+	except docker.errors.APIError as e:
+		if e.status_code == 400:
+			# "multiple IDs found with provided prefix": the host answered,
+			# and which container the button meant cannot be told.
+			debug(f"Could not tell which container {ref} is: {e}")
+			return None, None
+		debug(f"Could not look up {ref}: {e}")
+		return None, str(e)
+	except Exception as e:
+		debug(f"Could not look up {ref}: {e}")
+		return None, str(e)
 
 def short_hash(text, length=30):
 	hash_obj = hashlib.sha256(text.encode())
@@ -9529,7 +10384,11 @@ def _is_message_not_modified(exception):
 def _edit_message_text_direct(chat_id, message_id, text, parse_mode, reply_markup):
 	"""Edits the text of a message directly without using the queue"""
 	try:
-		return bot.edit_message_text(text, chat_id, message_id, parse_mode=parse_mode, reply_markup=reply_markup)
+		# Without previews, as every message is sent: an edit that does not
+		# say so gets one, and an /info repainted from its button grew a
+		# GitHub card under it.
+		return bot.edit_message_text(text, chat_id, message_id, parse_mode=parse_mode, reply_markup=reply_markup,
+									 link_preview_options=telebot.types.LinkPreviewOptions(is_disabled=True))
 	except Exception as e:
 		if _is_message_not_modified(e):
 			debug(f"Message {message_id} already up to date, nothing to edit")

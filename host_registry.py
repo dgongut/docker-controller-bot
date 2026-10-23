@@ -81,7 +81,9 @@ class HostRejected(Exception):
 
 	`reason` is one of "scheme" or "duplicate", so the caller picks the message
 	instead of parsing text. "duplicate" covers the same URL and the same daemon
-	reached under a different one alike.
+	reached under a different one alike. Changing a host's URL adds "same" (the
+	URL it already has), "local" (the host the bot runs on, which keeps its
+	socket) and "missing" (a host no longer configured).
 	"""
 
 	def __init__(self, reason):
@@ -814,6 +816,7 @@ def status_snapshot(deadline_seconds=PROBE_TIMEOUT_SECONDS, entries=None):
 
 	def check(entry):
 		host_id = entry["id"]
+		broken = False
 		try:
 			connection = probe_client(host_id)
 			connection.ping()
@@ -821,13 +824,20 @@ def status_snapshot(deadline_seconds=PROBE_TIMEOUT_SECONDS, entries=None):
 		except HostUnavailable as e:
 			outcome = (False, e.reason)
 		except Exception as e:
-			drop(host_id)
+			broken = True
 			outcome = (False, str(e))
 		with _probe_lock:
+			# A check started before the host's URL changed says nothing about
+			# the new one: change_url forgot it, and it must neither answer
+			# for the host nor close the clients just built for the new URL.
+			if _probes.get(host_id) is not threading.current_thread():
+				return
 			# Stamped with when it finished: two sweeps can share a check, and
 			# each needs to tell an answer given during it from one left over.
 			_probe_results[host_id] = (time.monotonic(), outcome)
 			_probes.pop(host_id, None)
+		if broken:
+			drop(host_id)
 
 	started = time.monotonic()
 	threads = []
@@ -894,7 +904,7 @@ def _daemon_identity(connection):
 	return (daemon_id, info.get("Name") or "")
 
 
-def _registered_with_daemon(identity):
+def _registered_with_daemon(identity, exclude=None):
 	"""
 	The registered host whose daemon is `identity`, or None.
 
@@ -926,7 +936,7 @@ def _registered_with_daemon(identity):
 			_close((("", connection),), entry["id"])
 
 	threads = [threading.Thread(target=ask, args=(entry,), daemon=True)
-			   for entry in hosts(include_paused=True)]
+			   for entry in hosts(include_paused=True) if entry["id"] != exclude]
 	for thread in threads:
 		thread.start()
 	deadline = time.monotonic() + PROBE_TIMEOUT_SECONDS
@@ -1006,11 +1016,141 @@ def remove_host(host_id):
 		warning("Refusing to remove the local host: the bot itself runs on it")
 		return False
 
-	with _lock:
+	# The host and the settings of its containers in one write: those have
+	# nowhere left to apply, and come back under no id if the machine is added
+	# again.
+	with _lock, store.batch("settings"):
 		store.set("hosts", [h for h in hosts(include_paused=True) if h["id"] != host_id])
+		store.forget_host_containers(host_id)
 	drop(host_id)
 	store.forget_host_updates(host_id)
 	debug(f"Removed host {host_id}")
+	return True
+
+
+def _with_url(entry, url):
+	"""
+	A host entry pointed at `url`, the rest kept.
+
+	The TLS certificates go when the URL is no longer tcp://: they are for a
+	TLS daemon socket, and an ssh:// client handed them fails to build.
+	"""
+	moved = dict(entry)
+	moved["url"] = url
+	if not url.startswith("tcp://"):
+		moved.pop("tls", None)
+	return moved
+
+
+def probe_new_url(host_id, url):
+	"""
+	Checks a new URL for a host before it is changed to it.
+
+	The same checks as adding a host —a transport the SDK speaks, not a URL or
+	a daemon already registered as another host, a daemon that answers—, plus
+	the ones only a change has: a URL different from the one it has, and not
+	the local host, whose socket is where the bot itself runs.
+
+	Returns whether the new URL reaches the same daemon as the current one:
+	True, False, or None when that cannot be told —the current URL does not
+	answer, which is the usual reason to change it, or a daemon does not say
+	who it is. Raises HostRejected or HostUnavailable as add_host does.
+	"""
+	url = (url or "").strip()
+	entry = host(host_id)
+	if entry is None:
+		raise HostRejected("missing")
+	if entry.get("local"):
+		raise HostRejected("local")
+	if not url.startswith(SUPPORTED_SCHEMES):
+		raise HostRejected("scheme")
+	if same_url(entry.get("url"), url):
+		raise HostRejected("same")
+	if any(same_url(other.get("url"), url) for other in hosts(include_paused=True) if other["id"] != host_id):
+		raise HostRejected("duplicate")
+
+	checked = _build_client(_with_url(entry, url), verify=True)  # raises HostUnavailable
+	try:
+		identity = _daemon_identity(checked)
+	finally:
+		_close((("", checked),), host_id)
+	if identity is None:
+		return None
+	twin = _registered_with_daemon(identity, exclude=host_id)
+	if twin is not None:
+		debug(f"Host {url} reaches the same Docker daemon as host {twin.get('alias', twin['id'])}")
+		raise HostRejected("duplicate")
+
+	before = _identity_within(entry, PROBE_TIMEOUT_SECONDS)
+	return None if before is None else before == identity
+
+
+def _identity_within(entry, seconds):
+	"""
+	Which daemon a host's URL reaches, or None when it does not say in time.
+
+	On a thread of its own, given up on after `seconds`: a URL being changed
+	is usually one that no longer answers, and over ssh:// building the
+	client already asks the daemon, through a pipe with no deadline of its
+	own, so a hung daemon behind a live sshd held the admin's request —and a
+	worker— for good. The thread is left to finish on its own, and closes
+	what it opened.
+	"""
+	found = []
+
+	def ask():
+		try:
+			connection = _build_client(entry, timeout=seconds)
+		except Exception as e:
+			debug(f"Could not ask the current URL of host {entry['id']} which daemon it is: {e}")
+			return
+		try:
+			found.append(_daemon_identity(connection))
+		finally:
+			_close((("", connection),), entry["id"])
+
+	thread = threading.Thread(target=ask, daemon=True)
+	thread.start()
+	thread.join(seconds)
+	return found[0] if found else None
+
+
+def change_url(host_id, url):
+	"""
+	Points a host at a new URL, keeping its id.
+
+	Everything kept against the id stays with it: the settings of its
+	containers, its schedules and its update cache. Removing the host and
+	adding it again was the only way to change one, and that gave it a new
+	id and lost all three.
+
+	Checked again here, under the lock adding and removing take: probing the
+	new URL takes long enough for another admin to have registered it as a
+	host meanwhile. Its clients are closed, so the next use connects to the
+	new URL.
+	"""
+	url = (url or "").strip()
+	with _lock:
+		configured = hosts(include_paused=True)
+		target = next((entry for entry in configured if entry["id"] == host_id), None)
+		if target is None:
+			raise HostRejected("missing")
+		if target.get("local"):
+			raise HostRejected("local")
+		if any(same_url(entry.get("url"), url) for entry in configured if entry["id"] != host_id):
+			raise HostRejected("duplicate")
+		moved = _with_url(target, url)
+		target.clear()
+		target.update(moved)
+		store.set("hosts", configured)
+	# A check still running against the old URL would otherwise be waited on
+	# by the next sweep and taken for the new one's answer, as reset() avoids
+	# for a settings reload.
+	with _probe_lock:
+		_probes.pop(host_id, None)
+		_probe_results.pop(host_id, None)
+	drop(host_id)
+	debug(f"Host {host_id} now at {url}")
 	return True
 
 
