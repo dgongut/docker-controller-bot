@@ -55,8 +55,8 @@ class Context:
 		# from the container reference or the project hash the button carries.
 		"hostId",
 		"containerId", "containerName", "tag", "action", "containerIdx",
-		"originalMessageId", "commandId", "scheduleHash", "field",
-		"scheduleId", "value", "pruneType", "multiAction",
+		"originalMessageId", "commandId", "field",
+		"scheduleId", "value", "multiAction",
 	)
 
 	def __init__(self, **fields):

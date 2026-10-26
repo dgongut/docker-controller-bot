@@ -261,7 +261,9 @@ def _migrate_schedules(local_host_id):
 		# object cannot even be looked up in a set. No action the bot knows is
 		# one of those, so it is no host's.
 		action = schedule.get("action")
-		host_scoped = isinstance(action, str) and action in HOST_SCOPED_SCHEDULE_ACTIONS
+		# Lowercased, as the scheduler reads it: a hand-written "Restart" is a
+		# restart, and left without a host it could not run.
+		host_scoped = isinstance(action, str) and action.strip().lower() in HOST_SCOPED_SCHEDULE_ACTIONS
 		if host_scoped and not schedule.get("host"):
 			schedule["host"] = local_host_id
 			stamped += 1
@@ -273,7 +275,13 @@ def _migrate_schedules(local_host_id):
 
 	# Through the store's writer, flushed and synced before the rename: what a
 	# power cut at the wrong moment would cost here is every task there is.
-	store.write_document(path, document)
+	try:
+		store.write_document(path, document)
+	except Exception as e:
+		# Not a reason not to start. The scheduler leaves out a task with no
+		# host and says so, and this runs again on the next start.
+		warning(f"Could not write {path} to migrate schedules: {e}")
+		return
 	if stamped:
 		debug(f"Pinned {stamped} existing schedules to the local host")
 	if cleared:

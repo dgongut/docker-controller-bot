@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import harness
 
 # Every module of the bot, and what each may legitimately read from elsewhere.
-SOURCES = ("core.py", "commands.py", "callbacks.py", "i18n.py",
+SOURCES = ("core.py", "commands.py", "callbacks.py", "schedules.py", "schedule_manager.py", "i18n.py",
 			"store.py", "migration.py", "callback_registry.py",
 			"host_registry.py", "container_listing.py", "formatting.py",
 			"docker-controller-bot.py")
@@ -93,7 +93,7 @@ def test_the_entry_point_imports_everything_that_registers():
 	"""
 	path = os.path.join(harness.REPO, "docker-controller-bot.py")
 	source = io.open(path, encoding="utf-8").read()
-	for module in ("core", "commands", "callbacks"):
+	for module in ("core", "commands", "callbacks", "schedules"):
 		assert f"import {module}" in source, f"el punto de entrada no importa {module}"
 
 
@@ -266,7 +266,7 @@ def test_container_buttons_never_carry_a_bare_id():
 	# that only read double quotes was blind to eight `callback_data` lines —
 	# two of them container buttons, which is how /updateall shipped bare ids.
 	pattern = re.compile(r"""callback_data=f?(['"])([^'"]*)\1""")
-	for filename in ("core.py", "commands.py", "callbacks.py"):
+	for filename in ("core.py", "commands.py", "callbacks.py", "schedules.py"):
 		path = os.path.join(harness.REPO, filename)
 		source = io.open(path, encoding="utf-8").read()
 		lines = source.splitlines()
@@ -366,7 +366,7 @@ def test_a_message_that_was_never_sent_is_not_dereferenced():
 	the guard the manual commands had was missing there.
 	"""
 	problems = []
-	for filename in ("core.py", "commands.py", "callbacks.py"):
+	for filename in ("core.py", "commands.py", "callbacks.py", "schedules.py"):
 		path = os.path.join(harness.REPO, filename)
 		tree = ast.parse(io.open(path, encoding="utf-8").read())
 		parents = _parents(tree)
@@ -451,7 +451,7 @@ def test_a_message_about_one_host_says_which():
 
 	problems = []
 	key_pattern = re.compile(r"""get_text\(\s*['"]([a-z_]+)['"]""")
-	for filename in ("core.py", "commands.py", "callbacks.py"):
+	for filename in ("core.py", "commands.py", "callbacks.py", "schedules.py"):
 		path = os.path.join(harness.REPO, filename)
 		source = io.open(path, encoding="utf-8").read()
 		tree = ast.parse(source)
@@ -608,7 +608,7 @@ def test_the_crown_is_always_asked_about_a_host():
 	import re
 
 	problems = []
-	for filename in ("core.py", "commands.py", "callbacks.py"):
+	for filename in ("core.py", "commands.py", "callbacks.py", "schedules.py"):
 		path = os.path.join(harness.REPO, filename)
 		source = io.open(path, encoding="utf-8").read()
 		for node in ast.walk(ast.parse(source)):

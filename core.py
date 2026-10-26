@@ -7,7 +7,6 @@ import ipaddress
 import io
 import json
 import os
-import queue
 import re
 import requests
 import shlex
@@ -21,7 +20,6 @@ import migration
 import store
 import telemetry
 from config import *
-from croniter import croniter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -30,7 +28,7 @@ from telebot.types import InlineKeyboardButton
 from telebot.types import InlineKeyboardMarkup
 from compose_generator import ComposeGenerator
 from formatting import (
-	EVENT_LOG_LINES, by_host, render_container_info, comparison_version_change, comparison_version_line, comparison_version_notes, container_line, describe_exit_code, human_duration, log_excerpt, release_notes_url, version_lines,
+	EVENT_LOG_LINES, by_host, render_container_info, comparison_version_change, comparison_version_line, comparison_version_notes, container_line, describe_exit_code, human_duration, log_excerpt, release_notes_url, telegram_head, telegram_tail, version_lines,
 )
 from docker_update import container_platform, extract_container_config, image_repository, image_version, perform_update, pull_checked, stop_container, updates_in_progress
 from docker_compose_manager import (
@@ -47,7 +45,7 @@ from i18n import get_text, language
 from logger import debug, error, warning
 from message_queue import MessageQueue
 
-VERSION = "5.2.0"
+VERSION = "5.3.0"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -434,6 +432,7 @@ class DockerManager:
 			return get_text("error_starting_container", container_name)
 
 	def show_logs(self, container_id, container_name):
+		"""The end of a container's log, as the /logs message shows it, or None when it cannot be read."""
 		try:
 			container = self.client.containers.get(container_id)
 			# Only the end, which is all the message shows. Without a tail the
@@ -446,10 +445,10 @@ class DockerManager:
 			# in its output would have Telegram reject the whole message, and
 			# the user would see "the logs could not be shown" for a container
 			# that is working fine.
-			return get_text("showing_logs", container_name, html.escape(logs[-3500:]))
+			return get_text("showing_logs", container_name, html.escape(telegram_tail(logs, LOGS_SHOWN)))
 		except Exception as e:
 			error(f"The logs for container {container_name} could not be shown. Error: [{e}]")
-			return get_text("error_showing_logs_container", container_name)
+			return None
 
 	def show_logs_raw(self, container_id, container_name):
 		"""
@@ -2341,1266 +2340,6 @@ class DockerUpdateMonitor:
 				error(f"Update daemon error (attempt {retry_count}/{max_retries}). Retrying in 5 seconds... Error: [{e}]")
 				time.sleep(5)
 
-def schedule_container_ref(host_id, container_name):
-	"""
-	The reference for a scheduled task's container, on its own host.
-
-	Resolved on that host and nowhere else: a task names a container, and
-	acting on a same-named container elsewhere would be both silent and, for
-	stop or exec, destructive.
-
-	Returns None only when the answer is that the container is not there, which
-	disables the task. A host that cannot be asked raises HostUnavailable
-	instead: an ssh machine rebooting during a nightly restart, or one still
-	coming up when the @reboot tasks run, would otherwise burn the task for
-	good over a minute of downtime.
-	"""
-	if host_registry.host(host_id) is None:
-		# Removed from the bot: there is nowhere this task can ever run.
-		return None
-	owner = manager(host_id)
-	try:
-		container = owner.container_named(container_name)
-	except Exception as e:
-		raise host_registry.HostUnavailable(host_id, str(e))
-	return container_ref(host_id, container) if container is not None else None
-
-
-# What a scheduled prune can clean, and the name its output file goes by.
-SCHEDULED_PRUNE_LABELS = {
-	"containers": "button_containers",
-	"images": "button_images",
-	"networks": "button_networks",
-	"volumes": "button_volumes",
-}
-
-
-class DockerScheduleMonitor:
-	# How many minutes the loop makes up for when it falls behind —a slow
-	# action, a busy machine— before it gives up on them. Past that the gap is
-	# a suspended host or a clock that jumped, and replaying it would fire a
-	# burst of tasks for times long gone.
-	MAX_CATCH_UP_MINUTES = 5
-
-	def __init__(self):
-		super().__init__()
-		self.schedule_manager = schedule_manager  # Use the global instance
-		# The last minute whose tasks were evaluated. Each minute is looked at
-		# once, which is what keeps a task from running twice in it.
-		self._last_minute = None
-		# Hosts whose tasks are being skipped because they do not answer, as
-		# {host_id: True}. The user hears once when it starts and once when
-		# it ends, not on every skipped run.
-		self._down_hosts = {}
-		# Scheduled prunes, run by a worker of their own in the order they came
-		# due. Started on the first one: most installations never have any.
-		self._prunes = queue.Queue()
-		self._prune_lock = threading.Lock()
-		self._prune_worker = None
-
-	def _execute_reboot_tasks(self):
-		"""Execute all @reboot tasks, once, when the daemon starts"""
-		try:
-			for schedule in self.schedule_manager.get_all_schedules():
-				if schedule.get("enabled", True) and schedule.get("cron") == "@reboot":
-					self._execute_schedule_action(schedule)
-		except Exception as e:
-			error(f"Error reading schedule file: [{e}]")
-
-	def _execute_schedule_action(self, schedule: dict):
-		"""
-		Execute a schedule action from JSON format.
-
-		Args:
-			schedule: Schedule dict from JSON
-
-		Returns:
-			True if successful, False if failed
-		"""
-		try:
-			# `or ""` y no el segundo argumento de get(): get devuelve el valor
-			# guardado cuando la clave existe, aunque sea None, así que el
-			# default no protege de una tarea con action a nulo.
-			action = (schedule.get("action") or "").lower()
-			container = schedule.get("container", "")
-			# Tasks created before hosts existed carry none, and mean the local
-			# machine: that is where they were set up to run.
-			schedule_host = schedule.get("host") or host_registry.local_host_id()
-			minutes = schedule.get("minutes")
-			command = schedule.get("command", "")
-			show_output = show_output_mode(schedule.get("show_output"))
-			prune_type = schedule.get("prune_type", "")
-			schedule_name = schedule.get("name", "")
-
-			if action in HOST_SCOPED_SCHEDULE_ACTIONS and host_registry.is_paused(schedule_host):
-				# Skipped, and deliberately not through handle_error: that
-				# disables the task for good. A paused machine cannot resolve
-				# the container, so every run against it used to burn one more
-				# schedule — which is the opposite of what pausing a host you
-				# intend to bring back is for.
-				debug(f"Schedule {schedule_name or action} skipped: host "
-					f"{host_registry.alias(schedule_host)} is paused")
-				return True
-
-			if action in SCHEDULE_ACTIONS:
-				count_usage(f"sched_{action}")
-
-			# Helper function to handle errors consistently
-			def handle_error(error_msg, notice="error_schedule_disabled"):
-				error(error_msg)
-				# Disable the schedule instead of deleting it
-				if schedule_name:
-					self.schedule_manager.update_schedule(schedule_name, enabled=False)
-					send_message(message=get_text(notice, html.escape(schedule_name)))
-				return False
-
-			# A removed host is not coming back, unlike a paused or unreachable
-			# one, so the task is disabled rather than skipped. A prune used to
-			# reach manager() and be skipped as a host not answering, on every
-			# firing and naming the bare id; a container task was disabled, but
-			# with a notice that only said it had failed.
-			if schedule_host_missing(schedule):
-				return handle_error(f"Host {schedule_host} of schedule {schedule_name or action} no longer exists",
-					notice="schedule_disabled_host_missing")
-			# With settings.json unreadable the host list is the defaults, and
-			# the local host an id made up in memory, so every task's host looks
-			# gone. That is what schedule_host_missing answers then, so that
-			# nothing is switched off for it; the task waits here instead.
-			if (action.lower() in HOST_SCOPED_SCHEDULE_ACTIONS and store.settings_unreadable()
-					and host_registry.host(schedule_host) is None):
-				warning(f"Schedule {schedule_name or action} skipped: settings.json is unreadable")
-				return False
-
-			# Execute action based on type
-			if action == "run":
-				containerId = schedule_container_ref(schedule_host, container)
-				if not containerId:
-					return handle_error(f"Container {container} not found for action {action}")
-				run(containerId, container, from_schedule=True)
-
-			elif action == "stop":
-				containerId = schedule_container_ref(schedule_host, container)
-				if not containerId:
-					return handle_error(f"Container {container} not found for action {action}")
-				stop(containerId, container, from_schedule=True)
-
-			elif action == "restart":
-				containerId = schedule_container_ref(schedule_host, container)
-				if not containerId:
-					return handle_error(f"Container {container} not found for action {action}")
-				restart(containerId, container, from_schedule=True)
-
-			elif action == "mute":
-				try:
-					minutes = int(minutes)
-					if minutes <= 0:
-						return handle_error(f"Invalid minutes value: {minutes}")
-					mute(minutes, extend_only=True)
-				except (ValueError, TypeError):
-					return handle_error(f"Invalid minutes value: {minutes}")
-
-			elif action == "exec":
-				containerId = schedule_container_ref(schedule_host, container)
-				if not containerId:
-					return handle_error(f"Container {container} not found for action {action}")
-				# Not waited for: a long or endless command would hold up every
-				# task after it. Its output, if asked for, arrives when it ends.
-				execute_command(containerId, container, command, show_output, wait=False)
-
-			elif action == "prune":
-				if prune_type not in SCHEDULED_PRUNE_LABELS:
-					return handle_error(f"Unknown prune type: {prune_type}")
-				# Handed to its own worker: a prune can take minutes, and this
-				# loop runs every task in line. One that outlasted the catch-up
-				# window made the loop skip the minutes after it —logged as if
-				# the bot had not been running— and their tasks with them.
-				self._queue_prune(manager(schedule_host), prune_type, show_output)
-
-			return True
-
-		except host_registry.HostUnavailable as e:
-			# Skipped for this run only, and said once per outage: a task that
-			# fires every minute against a machine down for an hour would be
-			# sixty messages, and saying nothing left a host down for days
-			# with nobody knowing its tasks were not running.
-			warning(f"Schedule {schedule.get('name') or action} skipped: {e}")
-			if e.host_id not in self._down_hosts:
-				self._down_hosts[e.host_id] = True
-				self._notify(get_text("schedule_skipped_host_down",
-										html.escape(schedule.get("name") or action), host_alias(e.host_id)))
-			return False
-		except Exception as e:
-			error(f"Error executing schedule action [{action}]: [{str(e)}]")
-			return False
-
-	def _queue_prune(self, owner, prune_type, show_output):
-		"""Leaves a scheduled prune to the prune worker, starting it if needed."""
-		self._prunes.put((owner, prune_type, show_output))
-		with self._prune_lock:
-			if self._prune_worker is None or not self._prune_worker.is_alive():
-				self._prune_worker = threading.Thread(target=self._prune_loop, daemon=True)
-				self._prune_worker.start()
-
-	def _prune_loop(self):
-		"""
-		Runs the queued prunes one after another.
-
-		One at a time and in order, as the loop used to: a containers prune
-		due with an images one frees images the second can then remove, and
-		two at once on the same host only get Docker's "already running".
-		"""
-		while True:
-			owner, prune_type, show_output = self._prunes.get()
-			try:
-				self._run_prune(owner, prune_type, show_output)
-			except Exception as e:
-				error(f"Error executing schedule action [prune]: [{str(e)}]")
-
-	def _run_prune(self, owner, prune_type, show_output):
-		result_message, data, cleaned = getattr(owner, f"prune_{prune_type}")()
-		# A failure always says so in that mode; a prune that worked only
-		# when it removed something.
-		if show_output == SHOW_OUTPUT_FAILURES and data is not None and not cleaned:
-			debug(f"Scheduled prune removed nothing: {result_message}")
-			return
-		# Show output if requested, otherwise just log
-		if show_output and result_message and data is None:
-			send_message(message=result_message)
-		elif show_output and result_message:
-			# Send the same format as manual /prune command
-			markup = InlineKeyboardMarkup(row_width=1)
-			markup.add(InlineKeyboardButton(get_text("button_delete"), callback_data="cerrar"))
-			fichero_temporal = get_temporal_file(data, get_text(SCHEDULED_PRUNE_LABELS[prune_type]))
-			x = send_message(message=get_text("loading_file"))
-			send_document(document=fichero_temporal, reply_markup=markup, caption=result_message)
-			if x:
-				delete_message(x.message_id)
-		else:
-			debug(f"Scheduled prune executed: {result_message}")
-
-	def run(self):
-		"""
-		Main loop: evaluates every minute exactly once.
-
-		It used to sleep 60 s after doing the work and then look at whatever
-		minute it had landed in. The work pushed every lap later, so sooner or
-		later a lap jumped from :00:55 to :02:05 and the tasks due at :01 never
-		ran. Now it wakes at the start of each minute and makes up for any it
-		missed.
-
-		The @reboot tasks run here and not when the monitor is built: that is
-		the main thread, and an exec that hangs there held up the start of
-		polling with it.
-		"""
-		self._execute_reboot_tasks()
-		while True:
-			try:
-				self._tick(datetime.now())
-			except Exception as e:
-				error(f"Error reading schedule file: [{e}]")
-			time.sleep(60.5 - time.time() % 60)
-
-	def _minutes_due(self, now):
-		"""The minutes to evaluate now, oldest first, and marks them as done."""
-		current = now.replace(second=0, microsecond=0)
-		last = self._last_minute
-		# The gap in real time, which a change of the clock's hour does not
-		# move. In spring the wall clock goes from 01:59 to 03:00 in a minute:
-		# taken for an hour the bot was not running, the tasks of 02:xx were
-		# skipped that day. That is a gap of a minute, and those minutes are
-		# replayed —each task once, like any catch-up— as cron does.
-		long_gap = last is not None and current - last > timedelta(minutes=self.MAX_CATCH_UP_MINUTES) \
-			and current.timestamp() - last.timestamp() > self.MAX_CATCH_UP_MINUTES * 60
-		if last is None or long_gap or last - current > timedelta(hours=2):
-			# First lap, a gap too long to replay, or the clock set well back:
-			# start over from here.
-			if last is not None and current > last:
-				warning(f"Schedules: skipping {int((current - last).total_seconds() // 60) - 1} "
-						f"minute(s) the bot was not running for")
-			due = [current]
-		elif current <= last:
-			# The same minute again, or the clock went back a little —the
-			# autumn change—: those minutes were already evaluated.
-			due = []
-		else:
-			due = []
-			minute = last + timedelta(minutes=1)
-			while minute <= current:
-				due.append(minute)
-				minute += timedelta(minutes=1)
-		if due:
-			self._last_minute = due[-1]
-		return due
-
-	def _notify(self, message):
-		"""One of the scheduler's own notices, kept quiet while muted."""
-		if is_muted():
-			debug(f"Message [{message}] omitted because muted")
-			return
-		send_message_to_notification_channel(message=message)
-
-	def _check_down_hosts(self):
-		"""
-		Says when a host whose tasks were being skipped answers again.
-
-		Asked every minute rather than left for its next task to find out: a
-		daily task would otherwise announce the host back up to a day late.
-		Only the hosts that are down are asked, so a healthy fleet costs
-		nothing here.
-
-		A remote host's return is told by HostAvailability, for every host and
-		not only the ones with tasks, so here it is only noted: saying it twice
-		would be one message too many. What is left to say here is the local
-		host, which that one does not watch.
-		"""
-		if not self._down_hosts:
-			return
-		entries = [host_registry.host(host_id) for host_id in self._down_hosts]
-		for host_id in [h for h, entry in zip(list(self._down_hosts), entries) if entry is None]:
-			# Removed meanwhile: nothing will come back.
-			self._down_hosts.pop(host_id, None)
-		statuses = host_registry.status_snapshot(entries=[e for e in entries if e])
-		watched = {e["id"] for e in entries if e and HostAvailability.watched(e)}
-		for host_id, (ok, _reason) in statuses.items():
-			if ok and self._down_hosts.pop(host_id, None) and host_id not in watched:
-				self._notify(get_text("schedule_host_back", host_alias(host_id)))
-
-	def _tick(self, now):
-		"""Runs every task due in the minutes not yet evaluated."""
-		try:
-			self._check_down_hosts()
-		except Exception as e:
-			debug(f"Could not check the hosts whose schedules were skipped: {e}")
-		due = self._minutes_due(now)
-		if not due:
-			return
-		for schedule in self.schedule_manager.get_all_schedules():
-			if not schedule.get("enabled", True):
-				continue
-			cron_expr = schedule.get("cron")
-			# @reboot tasks run once, when the daemon starts
-			if cron_expr == "@reboot":
-				continue
-			# Once even if it matches more than one of the minutes made up for:
-			# catching up is about not losing a run, not about bunching them.
-			if any(self.should_run(schedule.get("name"), cron_expr, minute) for minute in due):
-				self._execute_schedule_action(schedule)
-
-	def should_run(self, schedule_name, cron_expr, now):
-		"""Whether a cron expression fires in the minute of `now`."""
-		try:
-			minute = now.replace(second=0, microsecond=0)
-			return croniter.match(cron_expr, minute)
-		except Exception as e:
-			debug(f"Error checking cron schedule '{schedule_name}' with expression '{cron_expr}': {e}")
-			return False
-
-	def demonio_schedule(self):
-		"""Start schedule daemon with limited retries to prevent infinite restart loops."""
-		max_retries = 5
-		retry_count = 0
-
-		while retry_count < max_retries:
-			try:
-				thread = threading.Thread(target=self.run, daemon=True)
-				thread.start()
-				return  # Successfully started
-			except Exception as e:
-				retry_count += 1
-				if retry_count >= max_retries:
-					error(f"Schedule daemon failed {max_retries} times. Stopping. Last error: [{e}]")
-					return
-				error(f"Schedule daemon error (attempt {retry_count}/{max_retries}). Retrying in 5 seconds... Error: [{e}]")
-				time.sleep(5)
-
-# ============================================================================
-# SCHEDULE INTERACTIVE FLOW FUNCTIONS
-# ============================================================================
-
-def schedule_button_value(schedule):
-	"""What a list button carries to name a task: its id, never its place."""
-	return f"i{schedule.get('id')}"
-
-def _validate_schedule_index(index_str: str, schedules: list) -> int:
-	"""
-	Where in `schedules` the task a list button names is, or -1.
-
-	Found by the task's id. The button used to carry the place the task had
-	when the list was drawn, which named another task once the list changed
-	underneath —one deleted from a newer list, by another admin, a double
-	tap— and deleted that one, with no confirmation. A button from before
-	carries only that place, so it is refused rather than guessed.
-	"""
-	value = str(index_str or "")
-	if not (value.startswith("i") and value[1:].isdigit()):
-		return -1
-	for idx, sched in enumerate(schedules):
-		if str(sched.get("id")) == value[1:]:
-			return idx
-	return -1
-
-# The buttons that answer "show output?", by the value each one stores.
-SHOW_OUTPUT_CHOICES = {"yes": True, "no": False, "failures": SHOW_OUTPUT_FAILURES}
-
-
-def show_output_mode(value):
-	"""
-	A task's show_output as the bot acts on it: True, False or
-	SHOW_OUTPUT_FAILURES.
-
-	The one reader of the stored value. Each screen used to turn it into
-	yes or no on its own, which a third value would have shown as "Yes"
-	wherever one was missed.
-	"""
-	if value == SHOW_OUTPUT_FAILURES:
-		return SHOW_OUTPUT_FAILURES
-	return bool(value)
-
-
-def show_output_text(value):
-	"""How a task's show_output reads on screen."""
-	mode = show_output_mode(value)
-	if mode == SHOW_OUTPUT_FAILURES:
-		return get_text("schedule_show_output_failures")
-	return get_text("schedule_yes") if mode else get_text("schedule_no")
-
-
-def show_output_question(action):
-	"""The question that asks for show_output, with what the third answer means for this action."""
-	hint = "schedule_show_output_failures_prune" if action == "prune" else "schedule_show_output_failures_exec"
-	return f"{get_text('schedule_ask_show_output')}\n<i>{get_text(hint)}</i>"
-
-
-def add_show_output_buttons(markup, callback_prefix):
-	"""The three answers to show_output, each sending `<callback_prefix>|<choice>`."""
-	markup.add(
-		InlineKeyboardButton(get_text("button_yes"), callback_data=f"{callback_prefix}|yes"),
-		InlineKeyboardButton(get_text("button_no"), callback_data=f"{callback_prefix}|no"))
-	markup.add(InlineKeyboardButton(get_text("button_show_output_failures"), callback_data=f"{callback_prefix}|failures"))
-
-
-def _build_schedule_summary(state: dict) -> str:
-	"""Build a consistent schedule summary message from state dict"""
-	lines = []
-
-	# Add schedule details
-	if state.get("name"):
-		lines.append(f"<b>{get_text('schedule_label_name')}:</b> {html.escape(str(state.get('name')))}")
-	if state.get("cron"):
-		lines.append(f"<b>{get_text('schedule_label_cron')}:</b> {state.get('cron')}")
-	if state.get("action"):
-		lines.append(f"<b>{get_text('schedule_label_action')}:</b> {state.get('action')}")
-	if state.get("container"):
-		# Typed by hand when a task is edited, so not necessarily a name Docker
-		# would have allowed.
-		lines.append(f"<b>{get_text('schedule_label_container')}:</b> {html.escape(str(state.get('container')))}")
-	if state.get("minutes") is not None:  # Use is not None to handle 0
-		lines.append(f"<b>{get_text('schedule_label_minutes')}:</b> {state.get('minutes')}")
-	if state.get("prune_type"):
-		lines.append(f"<b>{get_text('schedule_label_prune_type')}:</b> {state.get('prune_type')}")
-	# Which machine the task will run on, once one has been chosen. Never
-	# defaulted here: the step that asks for it renders this summary above the
-	# question, and a fallback would have it claiming a host while still
-	# asking which one.
-	if (state.get("host") and not host_registry.is_single_host()
-			and state.get("action") in HOST_SCOPED_SCHEDULE_ACTIONS):
-		lines.append(f"<b>{get_text('schedule_label_host')}:</b> {host_alias(state['host'])}")
-	# Only show show_output if action is exec or prune and show_output is not None
-	if state.get("action") in ("exec", "prune") and state.get("show_output") is not None:
-		lines.append(f"<b>{get_text('schedule_label_show_output')}:</b> {show_output_text(state.get('show_output'))}")
-	if state.get("command"):
-		lines.append(f"<b>{get_text('schedule_label_command')}:</b> <code>{html.escape(str(state.get('command')))}</code>")
-
-	return "\n".join(lines)
-
-def _get_available_containers() -> list:
-	"""
-	The containers a scheduled task can act on, as (host_entry, container).
-
-	Across every reachable host: a task pinned to one machine would otherwise
-	only ever be offered the local one's containers.
-	"""
-	available = []
-	for entry, _, containers in hosts_with_containers():
-		for container in containers:
-			if not is_own_container(entry["id"], container.id, container.name):
-				available.append((entry, container))
-	return available
-
-def schedule_host_missing(schedule):
-	"""
-	Whether a task acts on a host the bot no longer has.
-
-	Only a removed one: a paused or unreachable host is still registered and
-	comes back. Re-adding the machine from /settings does not help either,
-	since it comes in under a new id, so the task has to be moved to a host
-	that exists. Only a host declared by hand in settings.json with the same id
-	would match again.
-
-	Never while settings.json cannot be read: the host list is then only the
-	defaults, every task's host looks gone, and answering yes switched off
-	every task, which stayed off once the file was fixed.
-	"""
-	if (schedule.get("action") or "").lower() not in HOST_SCOPED_SCHEDULE_ACTIONS:
-		return False
-	if store.settings_unreadable():
-		return False
-	return host_registry.host(schedule.get("host") or host_registry.local_host_id()) is None
-
-
-def schedule_host_value(schedule):
-	"""
-	What a task's details say for its host, or None to leave the line out.
-
-	A missing host is said even with a single host left, which is exactly when
-	the line would otherwise be hidden and the task would look runnable.
-	"""
-	if schedule_host_missing(schedule):
-		return get_text("schedule_host_missing")
-	if host_registry.is_single_host() or schedule.get("action") not in HOST_SCOPED_SCHEDULE_ACTIONS:
-		return None
-	return host_alias(schedule.get("host") or host_registry.local_host_id())
-
-
-def show_schedule_menu(user_id: int, chat_id: int):
-	"""Show the main schedule menu - Optimized with caching and efficient string building"""
-	schedules = schedule_manager.get_all_schedules()
-
-	# Pre-cache all needed translations
-	title = get_text("schedule_menu_title")
-	current_schedules_label = get_text("schedule_current_schedules")
-	no_schedules_msg = get_text("schedule_no_schedules")
-	status_enabled = get_text('schedule_status_enabled')
-	status_disabled = get_text('schedule_status_disabled')
-	label_status = get_text('schedule_label_status')
-	label_cron = get_text('schedule_label_cron')
-	label_action = get_text('schedule_label_action')
-	label_minutes = get_text('schedule_label_minutes')
-	label_container = get_text('schedule_label_container')
-	label_command = get_text('schedule_label_command')
-	label_show_output = get_text('schedule_label_show_output')
-	label_prune_type = get_text('schedule_label_prune_type')
-
-	# Build message efficiently with list
-	lines = [title]
-
-	if schedules:
-		lines.append(f"\n\n<b>{current_schedules_label}</b>")
-
-		for idx, sched in enumerate(schedules, 1):
-			# Unpack all values at once
-			# Typed by hand, so escaped: a command with `<` in it —`mysql < dump.sql`—
-			# made the whole listing fail to send, every time /schedule was opened.
-			name = html.escape(str(sched['name']))
-			action = sched.get('action', '')
-			cron = sched.get('cron', '* * * * *')
-			container = html.escape(str(sched.get('container') or ''))
-			minutes = sched.get('minutes', '')
-			command = html.escape(str(sched.get('command') or ''))
-			show_output = show_output_text(sched.get('show_output'))
-			prune_type = sched.get('prune_type', '')
-			enabled = sched.get('enabled', True)
-
-			# Build schedule entry
-			status_icon = "🟢" if enabled else "🔴"
-			status_text = status_enabled if enabled else status_disabled
-
-			lines.append(f"\n<b>{idx}. {name}</b>")
-			lines.append(f"  {label_status}: <b>{status_icon} {status_text}</b>")
-			lines.append(f"  {label_cron}: <code>{cron}</code>")
-			lines.append(f"  {label_action}: <b>{action}</b>")
-
-			# Which machine the task runs on. A task names a container, and a
-			# name is only unique within one daemon, so with several hosts the
-			# listing is ambiguous without this. Placed where the creation
-			# summary puts it — after what it acts on, before show_output — so
-			# both read the same way round.
-			host_line = None
-			host_value = schedule_host_value(sched)
-			if host_value:
-				host_line = f"  {get_text('schedule_label_host')}: <b>{host_value}</b>"
-
-			# Add action-specific details
-			if action == 'mute':
-				lines.append(f"  {label_minutes}: <b>{minutes}</b>")
-			elif action == 'exec':
-				lines.append(f"  {label_container}: <b>{container}</b>")
-				lines.append(f"  {label_command}: <code>{command}</code>")
-				if host_line:
-					lines.append(host_line)
-				lines.append(f"  {label_show_output}: <b>{show_output}</b>")
-			elif action == 'prune':
-				lines.append(f"  {label_prune_type}: <b>{prune_type}</b>")
-				if host_line:
-					lines.append(host_line)
-				lines.append(f"  {label_show_output}: <b>{show_output}</b>")
-			elif action in ('run', 'stop', 'restart'):
-				lines.append(f"  {label_container}: <b>{container}</b>")
-				if host_line:
-					lines.append(host_line)
-
-			lines.append("")
-	else:
-		lines.append(f"\n\n{no_schedules_msg}")
-
-	message_text = "\n".join(lines)
-
-	# Build keyboard
-	markup = InlineKeyboardMarkup(row_width=1)
-	markup.add(
-		InlineKeyboardButton(get_text("schedule_button_add"), callback_data="scheduleAdd"),
-		InlineKeyboardButton(get_text("schedule_button_edit"), callback_data="scheduleEdit"),
-		InlineKeyboardButton(get_text("schedule_button_delete"), callback_data="scheduleDelete"),
-		InlineKeyboardButton(get_text("button_close"), callback_data="cerrar")
-	)
-
-	# Split like any long listing: past 4096 characters, about twenty tasks,
-	# Telegram refused the menu and, with it, the only way to manage them.
-	send_split_message(message_text, reply_markup=markup)
-
-def show_schedule_delete_list(user_id: int, chat_id: int):
-	"""Show list of schedules to delete - Optimized"""
-	schedules = schedule_manager.get_all_schedules()
-
-	if not schedules:
-		send_message(message=get_text("schedule_no_schedules"))
-		return
-
-	# Build message efficiently
-	header = get_text("schedule_select_to_delete")
-	schedule_lines = [f"{idx}. <code>{html.escape(str(sched['name']))}</code>" for idx, sched in enumerate(schedules, 1)]
-	message_text = f"{header}\n\n" + "\n".join(schedule_lines)
-
-	markup = InlineKeyboardMarkup(row_width=5)
-	buttons = [InlineKeyboardButton(str(idx), callback_data=f"scheduleSelectDelete|{schedule_button_value(sched)}")
-	           for idx, sched in enumerate(schedules, 1)]
-	markup.add(*buttons)
-	markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
-
-	send_split_message(message_text, reply_markup=markup)
-
-def show_schedule_edit_list(user_id: int, chat_id: int):
-	"""Show list of schedules to edit - Optimized"""
-	schedules = schedule_manager.get_all_schedules()
-
-	if not schedules:
-		send_message(message=get_text("schedule_no_schedules"))
-		return
-
-	# Build message efficiently
-	header = get_text("schedule_select_to_edit")
-	schedule_lines = [f"{idx}. <code>{html.escape(str(sched['name']))}</code>" for idx, sched in enumerate(schedules, 1)]
-	message_text = f"{header}\n\n" + "\n".join(schedule_lines)
-
-	markup = InlineKeyboardMarkup(row_width=5)
-	buttons = [InlineKeyboardButton(str(idx), callback_data=f"scheduleSelectEdit|{schedule_button_value(sched)}")
-	           for idx, sched in enumerate(schedules, 1)]
-	markup.add(*buttons)
-	markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
-
-	send_split_message(message_text, reply_markup=markup)
-
-def show_schedule_edit_options(user_id: int, schedule_name: str):
-	"""Show options to edit a schedule"""
-	schedule = schedule_manager.get_schedule(schedule_name)
-	if not schedule:
-		send_message(message=get_text("error_invalid_selection"))
-		return
-
-	action = schedule.get('action')
-	enabled = schedule.get('enabled', True)
-	cron = schedule.get('cron', '* * * * *')
-	container = schedule.get('container', '')
-	minutes = schedule.get('minutes', '')
-	command = schedule.get('command', '')
-	show_output = show_output_text(schedule.get('show_output'))
-	prune_type = schedule.get('prune_type', '')
-	status_text = get_text('schedule_status_enabled') if enabled else get_text('schedule_status_disabled')
-	status_icon = "🟢" if enabled else "🔴"
-
-	# Build message with schedule details
-	message_text = f"<b>{html.escape(schedule_name)}</b>\n\n"
-	message_text += f"<b>{get_text('schedule_label_status')}:</b> {status_icon} {status_text}\n"
-	message_text += f"<b>{get_text('schedule_label_cron')}:</b> <code>{cron}</code>\n"
-	message_text += f"<b>{get_text('schedule_label_action')}:</b> <b>{action}</b>\n"
-	# Which machine the task runs on, in the same position as the listing and
-	# the creation summary: after what the task acts on. Same rule as the
-	# listing, from schedule_host_value: only for actions that act on Docker,
-	# with more than one host or when the task's host no longer exists.
-	host_line = ""
-	host_value = schedule_host_value(schedule)
-	if host_value:
-		host_line = f"<b>{get_text('schedule_label_host')}:</b> <b>{host_value}</b>\n"
-
-	if action == 'mute':
-		message_text += f"<b>{get_text('schedule_label_minutes')}:</b> <b>{minutes}</b>\n"
-	elif action == 'exec':
-		message_text += f"<b>{get_text('schedule_label_container')}:</b> <b>{html.escape(str(container or ''))}</b>\n"
-		message_text += f"<b>{get_text('schedule_label_command')}:</b> <code>{html.escape(str(command or ''))}</code>\n"
-		message_text += host_line
-		message_text += f"<b>{get_text('schedule_label_show_output')}:</b> <b>{show_output}</b>\n"
-	elif action == 'prune':
-		message_text += f"<b>{get_text('schedule_label_prune_type')}:</b> <b>{prune_type}</b>\n"
-		message_text += host_line
-		message_text += f"<b>{get_text('schedule_label_show_output')}:</b> <b>{show_output}</b>\n"
-	elif action in ('run', 'stop', 'restart'):
-		message_text += f"<b>{get_text('schedule_label_container')}:</b> <b>{html.escape(str(container or ''))}</b>\n"
-		message_text += host_line
-
-	message_text += "\n" + get_text("schedule_edit_what") + "\n\n"
-
-	schedule_id = schedule.get('id', 0)
-
-	markup = InlineKeyboardMarkup(row_width=1)
-	markup.add(InlineKeyboardButton(get_text("schedule_edit_name"), callback_data=f"scheduleEditField|name|{schedule_id}"))
-	markup.add(InlineKeyboardButton(get_text("schedule_edit_cron"), callback_data=f"scheduleEditField|cron|{schedule_id}"))
-
-	if action in ('run', 'stop', 'restart', 'exec'):
-		markup.add(InlineKeyboardButton(get_text("schedule_edit_container"), callback_data=f"scheduleEditField|container|{schedule_id}"))
-
-	if action == 'mute':
-		markup.add(InlineKeyboardButton(get_text("schedule_edit_minutes"), callback_data=f"scheduleEditField|minutes|{schedule_id}"))
-
-	if action == 'exec':
-		markup.add(InlineKeyboardButton(get_text("schedule_edit_command"), callback_data=f"scheduleEditField|command|{schedule_id}"))
-
-	if action == 'prune':
-		markup.add(InlineKeyboardButton(get_text("schedule_edit_prune_type"), callback_data=f"scheduleEditField|prune_type|{schedule_id}"))
-		# A container task moves host with "Container", since the name only
-		# means something on one machine. A prune names none, so its host is
-		# its own field: with one host left there is nowhere to move it,
-		# unless the one it points at is gone.
-		if not host_registry.is_single_host() or schedule_host_missing(schedule):
-			markup.add(InlineKeyboardButton(get_text("schedule_edit_host"), callback_data=f"scheduleEditField|host|{schedule_id}"))
-
-	if action in ('exec', 'prune'):
-		markup.add(InlineKeyboardButton(get_text("schedule_edit_show_output"), callback_data=f"scheduleEditField|show_output|{schedule_id}"))
-
-	# Add status toggle button
-	status_button_text = get_text("schedule_button_disable") if enabled else get_text("schedule_button_enable")
-	markup.add(InlineKeyboardButton(status_button_text, callback_data=f"scheduleEditStatus|{schedule_id}"))
-
-	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
-
-	send_message(message=message_text, reply_markup=markup)
-
-def ask_schedule_name(user_id: int):
-	"""Ask user for schedule name"""
-	state = init_add_schedule_state()
-	message_text = typed_prompt("schedule_ask_name")
-	msg = send_message(message=message_text, reply_markup=create_simple_keyboard("button_cancel", "scheduleCancel"))
-	state["last_message_id"] = msg.message_id if msg else None
-	save_schedule_state(user_id, state)
-
-def note_schedule_containers(state, available_containers, choose):
-	"""
-	Notes in a schedule's state the containers it can be pointed at.
-
-	The choice travels as an index, with the name and the host kept in the
-	state: a reference plus a name would not fit in 64 bytes of callback_data
-	for every container someone might have. `choose` is what the buttons
-	carry before that index.
-	"""
-	for idx, (entry, container) in enumerate(available_containers):
-		state[f"container_{idx}"] = container.name
-		state[f"container_host_{idx}"] = entry["id"]
-	state["container_count"] = len(available_containers)
-	state["container_choice"] = choose
-	state["container_page"] = 0
-
-
-def schedule_container_markup(state):
-	"""
-	The keyboard to pick a schedule's container from those noted in `state`.
-
-	A page at a time, like the other pickers: a button for every container
-	on every host went past the hundred Telegram accepts on a big enough
-	fleet, and the question never arrived, leaving the schedule half made.
-	"""
-	indexes = list(range(state.get("container_count") or 0))
-	page, pages = update_keyboard_page(indexes, state.get("container_page"))
-	single = host_registry.is_single_host()
-	markup = InlineKeyboardMarkup(row_width=2)
-	for idx in indexes[page * UPDATE_KEYBOARD_PAGE_SIZE:(page + 1) * UPDATE_KEYBOARD_PAGE_SIZE]:
-		name = state.get(f"container_{idx}")
-		label = name if single else f'{name} · {host_registry.alias(state.get(f"container_host_{idx}"))}'
-		markup.add(InlineKeyboardButton(label, callback_data=f'{state.get("container_choice")}|{idx}'))
-	if pages > 1:
-		navigation = []
-		if page > 0:
-			navigation.append(InlineKeyboardButton("◀️", callback_data=f"scheduleContainerPage|{page - 1}"))
-		navigation.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data=f"scheduleContainerPage|{page}"))
-		if page < pages - 1:
-			navigation.append(InlineKeyboardButton("▶️", callback_data=f"scheduleContainerPage|{page + 1}"))
-		markup.row(*navigation)
-	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
-	return markup
-
-
-def show_schedule_container_selection(user_id: int, action: str):
-	"""Show container selection for schedule"""
-	schedule_state = load_schedule_state(user_id)
-	if schedule_state:
-		# Check if there are available containers
-		available_containers = _get_available_containers()
-		if not available_containers:
-			send_message(message=get_text("error_no_containers_available"))
-			clear_schedule_state(user_id)
-			return
-
-		schedule_state["step"] = "ask_container"
-
-		# Delete previous message if exists
-		if schedule_state.get("last_message_id"):
-			try:
-				delete_message(schedule_state.get("last_message_id"))
-			except:
-				pass
-
-		# Build message with summary
-		message_text = _build_schedule_summary(schedule_state)
-		message_text += f"\n\n{get_text('schedule_ask_container')}"
-
-		note_schedule_containers(schedule_state, available_containers, "scheduleSelectContainer")
-		markup = schedule_container_markup(schedule_state)
-		msg = send_message(message=message_text, reply_markup=markup)
-		schedule_state["last_message_id"] = msg.message_id if msg else None
-		save_schedule_state(user_id, schedule_state)
-
-def ask_schedule_prune_show_output(user_id: int, state: dict):
-	"""Asks whether a scheduled prune should report what it removed."""
-	state["step"] = "ask_show_output_prune"
-	if state.get("last_message_id"):
-		try:
-			delete_message(state.get("last_message_id"))
-		except:
-			pass
-
-	message_text = _build_schedule_summary(state)
-	message_text += f"\n\n{show_output_question('prune')}"
-
-	markup = InlineKeyboardMarkup(row_width=2)
-	add_show_output_buttons(markup, "scheduleSelectPruneShowOutput")
-	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
-
-	msg = send_message(message=message_text, reply_markup=markup)
-	state["last_message_id"] = msg.message_id if msg else None
-	save_schedule_state(user_id, state)
-
-
-def ask_schedule_prune_host(user_id: int, state: dict):
-	"""
-	Asks which host a scheduled prune will clean.
-
-	A prune task picks no container, so nothing else in the flow would say
-	where it runs.
-
-	Asked after the object type, which is where the summary lists it. Matching
-	the order means the summary only ever grows downwards as the answers come
-	in, so the last thing answered is the last line. Interactive /prune asks
-	the machine first instead, because that one deletes on the spot; defining a
-	task deletes nothing until it runs, and the confirmation shows everything.
-	"""
-	state["step"] = "ask_prune_host"
-	if state.get("last_message_id"):
-		try:
-			delete_message(state.get("last_message_id"))
-		except:
-			pass
-
-	message_text = _build_schedule_summary(state)
-	message_text += f'\n\n{get_text("pick_a_host")}'
-
-	markup = InlineKeyboardMarkup(row_width=1)
-	for entry in host_registry.hosts():
-		markup.add(InlineKeyboardButton(
-			f'🖥️ {entry.get("alias", entry["id"])}',
-			callback_data=f'scheduleSelectHost|{entry["id"]}'))
-	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
-
-	msg = send_message(message=message_text, reply_markup=markup)
-	state["last_message_id"] = msg.message_id if msg else None
-	save_schedule_state(user_id, state)
-
-
-def ask_schedule_prune_type(user_id: int, state: dict):
-	"""Asks which kind of unused object a scheduled prune will remove."""
-	state["step"] = "ask_prune_type"
-	if state.get("last_message_id"):
-		try:
-			delete_message(state.get("last_message_id"))
-		except:
-			pass
-
-	message_text = _build_schedule_summary(state)
-	message_text += f"\n\n{get_text('schedule_ask_prune_type')}"
-
-	markup = InlineKeyboardMarkup(row_width=2)
-	markup.add(*[
-		InlineKeyboardButton(get_text(f"schedule_prune_{kind}"),
-							callback_data=f"scheduleSelectPruneType|{kind}")
-		for kind in ("containers", "images", "networks", "volumes")
-	])
-	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
-
-	msg = send_message(message=message_text, reply_markup=markup)
-	state["last_message_id"] = msg.message_id if msg else None
-	save_schedule_state(user_id, state)
-
-
-def confirm_schedule_creation(user_id: int, state: dict):
-	"""Show confirmation of schedule creation"""
-	# A task that acts on Docker always ends up with a host, so the executor
-	# never has to guess: a prune on a single-host setup never got asked. A
-	# mute is the bot's own notifications and gets none.
-	if state.get("action") in HOST_SCOPED_SCHEDULE_ACTIONS and not state.get("host"):
-		state["host"] = host_registry.local_host_id()
-		save_schedule_state(user_id, state)
-	elif state.get("action") not in HOST_SCOPED_SCHEDULE_ACTIONS:
-		state["host"] = None
-		save_schedule_state(user_id, state)
-	# Delete previous message if exists
-	if state.get("last_message_id"):
-		try:
-			delete_message(state.get("last_message_id"))
-		except:
-			pass
-
-	# Use the centralized summary builder
-	message_text = get_text("schedule_confirm_title") + "\n\n"
-	message_text += _build_schedule_summary(state)
-
-	markup = InlineKeyboardMarkup(row_width=2)
-	markup.add(
-		InlineKeyboardButton(get_text("button_confirm"), callback_data="scheduleConfirm"),
-		InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel")
-	)
-
-	send_message(message=message_text, reply_markup=markup)
-
-# What a schedule question accepts as a written answer. The container is not
-# here: it is picked from a list, since its host goes with it.
-SCHEDULE_TEXT_FIELDS = frozenset({"name", "cron", "command", "minutes"})
-SCHEDULE_TEXT_STEPS = frozenset({"ask_name", "ask_cron", "ask_minutes", "ask_command"})
-
-def handle_schedule_flow(user_id: int, user_input: str, state: dict, chat_id: int = None, user_message_id: int = None):
-	"""Handle the schedule creation flow and editing"""
-	step = state.get("step")
-	chatId = chat_id  # Make chatId available in the function
-
-	# Only some questions are answered by writing; the rest are buttons. Text
-	# that arrives while one of those is open was not meant for the bot, so it
-	# is left alone: deleting it, as before, swallowed every message the admin
-	# wrote until the question was answered.
-	if state.get("field"):
-		if state.get("field") not in SCHEDULE_TEXT_FIELDS:
-			return
-	elif step not in SCHEDULE_TEXT_STEPS:
-		return
-
-	# Delete user message after processing
-	if user_message_id and chat_id:
-		try:
-			delete_message(user_message_id, chat_id)
-		except:
-			pass
-
-	# Check if this is an edit operation
-	if state.get("field"):
-		field = state.get("field")
-		schedule_name = state.get("schedule_name")
-		schedule = schedule_manager.get_schedule(schedule_name)
-
-		if not schedule:
-			send_message(message=get_text("error_invalid_selection"))
-			clear_schedule_state(user_id)
-			return
-
-		# Delete previous message if exists
-		if state.get("last_message_id"):
-			try:
-				delete_message(state.get("last_message_id"))
-			except:
-				pass
-
-		# Handle field editing
-		if field == "name":
-			# Validate new name doesn't already exist
-			if user_input != schedule_name and schedule_manager.get_schedule(user_input):
-				send_message(message=get_text("schedule_name_exists"))
-				# Re-ask for name
-				message_text = f"<b>{get_text('schedule_edit_name')}</b>\n\n"
-				message_text += f"{typed_prompt('schedule_ask_name')}\n"
-				message_text += f"<i>{get_text('current_value')}: {html.escape(schedule_name)}</i>"
-				markup = InlineKeyboardMarkup(row_width=1)
-				markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
-				msg = send_message(message=message_text, reply_markup=markup)
-				state["last_message_id"] = msg.message_id if msg else None
-				save_schedule_state(user_id, state)
-				return
-			schedule_manager.update_schedule(schedule_name, name=user_input)
-			send_message(message=get_text("schedule_updated_success", html.escape(user_input)))
-			clear_schedule_state(user_id)
-			show_schedule_menu(user_id, chatId)
-			return
-		elif field == "cron":
-			# Validate cron expression
-			if not is_valid_cron(user_input):
-				# Delete previous message if exists
-				if state.get("last_message_id"):
-					try:
-						delete_message(state.get("last_message_id"))
-					except:
-						pass
-
-				# Re-ask for cron with error message
-				schedule = schedule_manager.get_schedule(schedule_name)
-				current_cron = schedule.get('cron', '* * * * *')
-				message_text = f"❌ <b>{get_text('schedule_invalid_cron')}</b>\n\n"
-				message_text += f"<b>{get_text('schedule_edit_cron')}</b>\n\n"
-				message_text += f"{typed_prompt('schedule_ask_cron')}\n"
-				message_text += f"<i>{get_text('current_value')}: {current_cron}</i>"
-				markup = InlineKeyboardMarkup(row_width=1)
-				markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
-				msg = send_message(message=message_text, reply_markup=markup)
-				state["last_message_id"] = msg.message_id if msg else None
-				save_schedule_state(user_id, state)
-				return
-			schedule_manager.update_schedule(schedule_name, cron=user_input)
-			send_message(message=get_text("schedule_updated_success", html.escape(schedule_name)))
-			clear_schedule_state(user_id)
-			show_schedule_menu(user_id, chatId)
-			return
-		elif field == "command":
-			schedule_manager.update_schedule(schedule_name, command=user_input)
-			send_message(message=get_text("schedule_updated_success", html.escape(schedule_name)))
-			clear_schedule_state(user_id)
-			show_schedule_menu(user_id, chatId)
-			return
-		elif field == "minutes":
-			# Validate minutes is a number
-			try:
-				minutes = int(user_input)
-				if minutes <= 0:
-					# Delete previous message if exists
-					if state.get("last_message_id"):
-						try:
-							delete_message(state.get("last_message_id"))
-						except:
-							pass
-
-					# Re-ask for minutes with error message
-					schedule = schedule_manager.get_schedule(schedule_name)
-					current_minutes = schedule.get('minutes', '')
-					message_text = f"❌ <b>{get_text('schedule_invalid_minutes')}</b>\n\n"
-					message_text += f"<b>{get_text('schedule_edit_minutes')}</b>\n\n"
-					message_text += f"{typed_prompt('schedule_ask_minutes')}\n"
-					message_text += f"<i>{get_text('current_value')}: {current_minutes}</i>"
-					markup = InlineKeyboardMarkup(row_width=1)
-					markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
-					msg = send_message(message=message_text, reply_markup=markup)
-					state["last_message_id"] = msg.message_id if msg else None
-					save_schedule_state(user_id, state)
-					return
-			except:
-				# Delete previous message if exists
-				if state.get("last_message_id"):
-					try:
-						delete_message(state.get("last_message_id"))
-					except:
-						pass
-
-				# Re-ask for minutes with error message
-				schedule = schedule_manager.get_schedule(schedule_name)
-				current_minutes = schedule.get('minutes', '')
-				message_text = f"❌ <b>{get_text('schedule_invalid_minutes')}</b>\n\n"
-				message_text += f"<b>{get_text('schedule_edit_minutes')}</b>\n\n"
-				message_text += f"{typed_prompt('schedule_ask_minutes')}\n"
-				message_text += f"<i>{get_text('current_value')}: {current_minutes}</i>"
-				markup = InlineKeyboardMarkup(row_width=1)
-				markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
-				msg = send_message(message=message_text, reply_markup=markup)
-				state["last_message_id"] = msg.message_id if msg else None
-				save_schedule_state(user_id, state)
-				return
-			schedule_manager.update_schedule(schedule_name, minutes=minutes)
-			send_message(message=get_text("schedule_updated_success", html.escape(schedule_name)))
-			clear_schedule_state(user_id)
-			show_schedule_menu(user_id, chatId)
-			return
-
-	if step == "ask_name":
-		# Validate name doesn't already exist
-		if schedule_manager.get_schedule(user_input):
-			# Delete previous message if exists
-			if state.get("last_message_id"):
-				try:
-					delete_message(state.get("last_message_id"))
-				except:
-					pass
-
-			# Show error message with re-ask for name in the same message
-			message_text = f"❌ <b>{get_text('schedule_name_exists')}</b>\n\n"
-			message_text += typed_prompt("schedule_ask_name")
-
-			markup = InlineKeyboardMarkup(row_width=1)
-			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
-			msg = send_message(message=message_text, reply_markup=markup)
-			state["last_message_id"] = msg.message_id if msg else None
-			save_schedule_state(user_id, state)
-			return
-
-		state["name"] = user_input
-		state["step"] = "ask_cron"
-
-		# Delete previous message if exists
-		if state.get("last_message_id"):
-			try:
-				delete_message(state.get("last_message_id"))
-			except:
-				pass
-
-		# Build message with summary
-		message_text = f"<b>{get_text('schedule_label_name')}:</b> {html.escape(user_input)}\n\n"
-		message_text += typed_prompt("schedule_ask_cron")
-
-		markup = InlineKeyboardMarkup(row_width=1)
-		markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
-		msg = send_message(message=message_text, reply_markup=markup)
-		state["last_message_id"] = msg.message_id if msg else None
-		save_schedule_state(user_id, state)
-
-	elif step == "ask_cron":
-		# Validate cron expression
-		if not is_valid_cron(user_input):
-			# Delete previous message if exists
-			if state.get("last_message_id"):
-				try:
-					delete_message(state.get("last_message_id"))
-				except:
-					pass
-
-			# Show error message with re-ask for cron in the same message
-			message_text = f"❌ <b>{get_text('schedule_invalid_cron')}</b>\n\n"
-			# Add current progress
-			if state.get("name"):
-				message_text += f"<b>{get_text('schedule_label_name')}:</b> {html.escape(str(state.get('name')))}\n\n"
-			message_text += typed_prompt("schedule_ask_cron")
-
-			markup = InlineKeyboardMarkup(row_width=1)
-			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
-			msg = send_message(message=message_text, reply_markup=markup)
-			state["last_message_id"] = msg.message_id if msg else None
-			save_schedule_state(user_id, state)
-			return
-
-		state["cron"] = user_input
-		state["step"] = "ask_action"
-
-		# Delete previous message if exists
-		if state.get("last_message_id"):
-			try:
-				delete_message(state.get("last_message_id"))
-			except:
-				pass
-
-		# Build message with summary
-		message_text = _build_schedule_summary(state)
-		message_text += f"\n\n{get_text('schedule_ask_action')}"
-		# What each action does, in the user's language. These strings were
-		# translated into all eight locales and rendered nowhere: the screen
-		# offered six buttons reading `run`, `stop`... in English and left the
-		# user to guess. The token stays on the button because it is the
-		# vocabulary of the feature — the summary, the listing and /schedule's
-		# own usage text all show it — and the line explains it.
-		message_text += "\n\n" + "\n".join(
-			f'<code>{action}</code> · {get_text(f"schedule_action_{action}")}'
-			for action in SCHEDULE_ACTIONS)
-
-		markup = InlineKeyboardMarkup(row_width=2)
-		markup.add(*[
-			InlineKeyboardButton(action, callback_data=f"scheduleSelectAction|{action}")
-			for action in SCHEDULE_ACTIONS
-		])
-		markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
-		msg = send_message(message=message_text, reply_markup=markup)
-		state["last_message_id"] = msg.message_id if msg else None
-		save_schedule_state(user_id, state)
-
-	elif step == "ask_minutes":
-		# Validate minutes is a number
-		try:
-			minutes = int(user_input)
-			if minutes <= 0:
-				# Delete previous message if exists
-				if state.get("last_message_id"):
-					try:
-						delete_message(state.get("last_message_id"))
-					except:
-						pass
-
-				# Show error message with re-ask for minutes in the same message
-				message_text = f"❌ <b>{get_text('schedule_invalid_minutes')}</b>\n\n"
-				# Add current progress
-				message_text += _build_schedule_summary(state)
-				message_text += f"\n\n{typed_prompt('schedule_ask_minutes')}"
-
-				markup = InlineKeyboardMarkup(row_width=1)
-				markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
-				msg = send_message(message=message_text, reply_markup=markup)
-				state["last_message_id"] = msg.message_id if msg else None
-				save_schedule_state(user_id, state)
-				return
-		except:
-			# Delete previous message if exists
-			if state.get("last_message_id"):
-				try:
-					delete_message(state.get("last_message_id"))
-				except:
-					pass
-
-			# Show error message with re-ask for minutes in the same message
-			message_text = f"❌ <b>{get_text('schedule_invalid_minutes')}</b>\n\n"
-			# Add current progress
-			message_text += _build_schedule_summary(state)
-			message_text += f"\n\n{typed_prompt('schedule_ask_minutes')}"
-
-			markup = InlineKeyboardMarkup(row_width=1)
-			markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
-			msg = send_message(message=message_text, reply_markup=markup)
-			state["last_message_id"] = msg.message_id if msg else None
-			save_schedule_state(user_id, state)
-			return
-
-		state["minutes"] = minutes
-		state["step"] = "confirm"
-
-		# Delete previous message if exists
-		if state.get("last_message_id"):
-			try:
-				delete_message(state.get("last_message_id"))
-			except:
-				pass
-
-		save_schedule_state(user_id, state)
-		# For mute action, go directly to confirmation (step 4/5)
-		confirm_schedule_creation(user_id, state)
-
-	elif step == "ask_command":
-		state["command"] = user_input
-		state["step"] = "confirm"
-
-		# Delete previous message if exists
-		if state.get("last_message_id"):
-			try:
-				delete_message(state.get("last_message_id"))
-			except:
-				pass
-
-		save_schedule_state(user_id, state)
-		# For exec action, go to confirmation
-		confirm_schedule_creation(user_id, state)
-
 # --- AJUSTES (/settings) -----------------------------------------------------
 #
 # Booleans the menu can flip directly. Whitelisted rather than taken from the
@@ -3687,7 +2426,7 @@ def collect_telemetry_metrics():
 		"hosts_paused": sum(1 for entry in configured if entry.get("paused")),
 		"hosts_ssh": schemes.count("ssh"),
 		"hosts_tcp": schemes.count("tcp"),
-		"schedules": sum(1 for schedule in schedule_manager.get_all_schedules() if schedule.get("enabled", True)),
+		"schedules": sum(1 for task in schedule_manager.all() if task["enabled"]),
 		"admins": len(ADMIN_IDS),
 		# The environment and not the global: that one falls back to the admin
 		# when there is no group, which would make everyone look like a group.
@@ -4373,52 +3112,6 @@ def cancel_host_url(call_id, user_id, chat_id, message_id, host_id):
 	text, markup = built
 	edit_message_text(text, chat_id, message_id, reply_markup=markup)
 
-def schedules_on_host(host_id):
-	"""
-	The enabled schedules that would stop working without `host_id`.
-
-	Only the host-scoped actions: a mute schedule is about the bot's own
-	notifications and belongs to no machine. A task created before hosts
-	existed carries none and means the local one, which cannot be removed
-	anyway.
-	"""
-	local = host_registry.local_host_id()
-	affected = []
-	for schedule in schedule_manager.get_all_schedules():
-		if not schedule.get("enabled", True):
-			continue
-		# Igual que en el ejecutor: get() con default no protege de un None
-		# guardado, y una sola tarea así rompía la pantalla de quitar host.
-		if (schedule.get("action") or "").lower() not in HOST_SCOPED_SCHEDULE_ACTIONS:
-			continue
-		if (schedule.get("host") or local) != host_id:
-			continue
-		affected.append(schedule)
-	return affected
-
-
-def disable_schedules(schedules):
-	"""
-	Turns off the given schedules, and returns the names it turned off.
-
-	Disabled rather than deleted, which is what the executor already does with
-	a task it cannot run: moving it to another host and switching it back on is
-	a couple of taps, while a deleted cron expression is gone for good. Re-adding
-	the machine from /settings is not enough, since it comes in under a new id.
-	Left enabled, each would be switched off by its next firing anyway, with a
-	notice per task at whatever hour its cron comes round.
-
-	Takes the tasks already read rather than a host id, so the caller can look
-	them up while the host still exists.
-	"""
-	names = []
-	for schedule in schedules:
-		name = schedule.get("name", "")
-		if name and schedule_manager.update_schedule(name, enabled=False):
-			names.append(name)
-	return names
-
-
 def build_settings_host_remove(host_id):
 	"""Confirmation before dropping a host, since it takes its state with it."""
 	entry = host_registry.host(host_id)
@@ -4431,9 +3124,9 @@ def build_settings_host_remove(host_id):
 	question = get_text("settings_host_remove_confirm", host_alias(host_id))
 	# Whatever this takes down with it gets said before the tap, not after.
 	# A schedule naming a host that no longer exists raises on every firing.
-	affected = schedules_on_host(host_id)
+	affected = schedule_manager.on_host(host_id)
 	if affected:
-		listed = "\n".join(f"· <b>{html.escape(s.get('name', ''))}</b>" for s in affected)
+		listed = "\n".join(f"· <b>{html.escape(task['name'])}</b>" for task in affected)
 		question += get_text("settings_host_remove_schedules", listed)
 	settings = len(store.container_settings().get(host_id) or {})
 	if settings:
@@ -4787,6 +3480,9 @@ def build_starting_message():
 		lines.append("")
 	if schedule_manager.set_aside:
 		lines.append(get_text("starting_schedules_unreadable", schedule_manager.set_aside))
+		lines.append("")
+	if schedule_manager.ignored:
+		lines.append(get_text("starting_schedules_ignored", len(schedule_manager.ignored), schedule_manager.full_path))
 		lines.append("")
 
 	# The one setting that belongs here: it is the only one that changes what
@@ -5236,7 +3932,6 @@ def handle_text(message):
 	pending = answerable(load_command_request_state(userId), chat_id)
 	pending_port_check = answerable(load_port_check_request_state(userId), chat_id)
 	pending_input = answerable(load_text_input_state(userId), chat_id)
-	schedule_state = answerable(load_schedule_state(userId), chat_id)
 
 	if pending:
 		command_text = message.text.strip()
@@ -5282,10 +3977,10 @@ def handle_text(message):
 		else:
 			confirmation = apply_settings_text_value(field, raw_value)
 			send_settings_menu(prefix=confirmation, screen=pending_input.get("back_to") or "main")
-	elif schedule_state:
-		handle_schedule_flow(userId, message.text.strip(), schedule_state, message.chat.id, message.message_id)
 	else:
-		pass
+		# Imported here and not at the top: schedules builds on this module.
+		import schedules
+		schedules.handle_text(userId, message)
 
 def _execute_container_action(action, containerId, containerName, from_schedule=False):
 	"""
@@ -6315,9 +5010,162 @@ def delete_compose_project(project_name, host_id=None):
 	_tell_bot_skipped(host_id, own)
 
 def logs(containerId, containerName):
+	"""Sends the end of a container's log, and follows it for a while, as `tail -f` does."""
 	debug(f"Running command: logs for container {containerName}")
-	result = manager_for(containerId).show_logs(container_id=ref_id(containerId), container_name=containerName)
-	send_message(message=result, reply_markup=create_simple_keyboard("button_close"))
+	body = read_logs(containerId, containerName)
+	if body is None:
+		send_message(message=get_text("error_showing_logs_container", containerName),
+					reply_markup=create_simple_keyboard("button_close"))
+		return
+	following, read_at = LOGS_FOLLOW_FOR > 0, datetime.now()
+	sent = send_message(message=logs_message(body, following, read_at), reply_markup=logs_markup(containerId, following))
+	if sent:
+		# Its buttons name the container by reference: this is where its name
+		# is found again when they are pressed.
+		save_container_refs(sent.chat.id, sent.message_id, [(containerId, containerName)])
+		if following:
+			log_followers.follow(containerId, containerName, sent.chat.id, sent.message_id, shown=(body, read_at))
+
+
+def read_logs(containerId, containerName):
+	"""The /logs body for a container, or None when its log cannot be read."""
+	try:
+		return manager_for(containerId).show_logs(container_id=ref_id(containerId), container_name=containerName)
+	except host_registry.HostUnavailable as e:
+		debug(f"Cannot read the logs of {containerName}: {e}")
+		return None
+
+
+def logs_message(body, following, read_at):
+	"""A /logs message: the log, and under it whether it is being followed or when it was read."""
+	if following:
+		footer = get_text("logs_following", LOGS_FOLLOW_EVERY)
+	else:
+		footer = get_text("logs_paused", read_at.strftime("%H:%M"))
+	return f"{body}\n\n<i>{footer}</i>"
+
+
+def logs_markup(containerId, following):
+	"""Pause or Resume, beside Close."""
+	if following:
+		toggle = InlineKeyboardButton(get_text("button_logs_pause"), callback_data=f"logsPause|{containerId}")
+	else:
+		toggle = InlineKeyboardButton(get_text("button_logs_resume"), callback_data=f"logsFollow|{containerId}")
+	markup = InlineKeyboardMarkup(row_width=2)
+	markup.add(toggle, InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
+	return markup
+
+
+class LogFollowers:
+	"""
+	The /logs being followed: at most one per chat.
+
+	Each is repainted by a thread of its own, every LOGS_FOLLOW_EVERY seconds
+	and only when the log has changed, until LOGS_FOLLOW_FOR has gone by or
+	it is paused; then it is left at rest, saying when it was read. A second
+	/logs in the same chat rests the first: two followed at once would be
+	twenty-four edits a minute, past the twenty a group takes.
+	"""
+
+	def __init__(self):
+		self._lock = threading.Lock()
+		# {chat_id: the one followed there, as {"message", "stop", "quiet"}}.
+		self._following = {}
+
+	def follow(self, containerId, containerName, chat_id, message_id, shown=None):
+		"""
+		Follows the log in a message, from now. `shown` is the log it already
+		shows and when it was read, so the first read changes nothing when the
+		log has not moved; without it the message is repainted at once.
+		"""
+		if LOGS_FOLLOW_FOR <= 0:
+			self.rest(containerId, containerName, chat_id, message_id)
+			return
+		current = {"message": message_id, "stop": threading.Event(), "quiet": False}
+		with self._lock:
+			previous = self._following.get(chat_id)
+			self._following[chat_id] = current
+		if previous:
+			# The same message pressed twice is followed by the newest thread
+			# alone; the older one goes without painting it at rest.
+			previous["quiet"] = previous["message"] == message_id
+			previous["stop"].set()
+		threading.Thread(target=self._run, name=f"logs-{containerName}", daemon=True,
+						args=(containerId, containerName, chat_id, current, shown)).start()
+
+	def pause(self, containerId, containerName, chat_id, message_id):
+		"""Leaves a message at rest. Its thread does it; without one —the bot restarted since— it is done here."""
+		with self._lock:
+			current = self._following.get(chat_id)
+		if current and current["message"] == message_id:
+			current["stop"].set()
+		else:
+			self.rest(containerId, containerName, chat_id, message_id)
+
+	def rest(self, containerId, containerName, chat_id, message_id, body=None, read_at=None):
+		"""Paints a message at rest: the log as last read, when, and Resume."""
+		if body is None:
+			body, read_at = read_logs(containerId, containerName), datetime.now()
+		if body is None:
+			edit_message_text_sync(get_text("error_showing_logs_container", containerName), chat_id, message_id,
+									reply_markup=create_simple_keyboard("button_close"))
+			return
+		edit_message_text_sync(logs_message(body, False, read_at), chat_id, message_id,
+								reply_markup=logs_markup(containerId, following=False))
+
+	def _forget(self, chat_id, current):
+		with self._lock:
+			if self._following.get(chat_id) is current:
+				del self._following[chat_id]
+
+	def _run(self, containerId, containerName, chat_id, current, shown):
+		message_id = current["message"]
+		deadline = time.monotonic() + LOGS_FOLLOW_FOR
+		try:
+			if shown:
+				body, read_at = shown
+				painted = logs_message(body, True, read_at)
+			else:
+				# Resumed: the footer and the button change at once.
+				body, read_at = read_logs(containerId, containerName), datetime.now()
+				if body is None:
+					self.rest(containerId, containerName, chat_id, message_id)
+					return
+				painted = logs_message(body, True, read_at)
+				if not edit_message_text_sync(painted, chat_id, message_id,
+												reply_markup=logs_markup(containerId, following=True)):
+					return
+			unreadable = False
+			while not current["stop"].wait(LOGS_FOLLOW_EVERY) and time.monotonic() < deadline:
+				fresh = read_logs(containerId, containerName)
+				if fresh is None:
+					# Gone, or its host stopped answering: left at rest as last read.
+					unreadable = True
+					break
+				body, read_at = fresh, datetime.now()
+				text = logs_message(body, True, read_at)
+				if text == painted:
+					continue
+				if not edit_message_text_sync(text, chat_id, message_id,
+												reply_markup=logs_markup(containerId, following=True)):
+					# Closed, or no longer editable: nothing left to follow.
+					return
+				painted = text
+			if current["quiet"]:
+				return
+			if unreadable:
+				self.rest(containerId, containerName, chat_id, message_id, body, read_at)
+			else:
+				# Read once more: at rest it says when, and that should be now.
+				self.rest(containerId, containerName, chat_id, message_id)
+		except Exception as e:
+			error(f"Error following the logs of {containerName}: [{e}]")
+		finally:
+			self._forget(chat_id, current)
+
+
+log_followers = LogFollowers()
+
 
 def log_file(containerId, containerName):
 	debug(f"Running command: log_file for container {containerName}")
@@ -6602,10 +5450,8 @@ def gather_container_info(owner, container):
 		except ValueError:
 			pass
 	info["schedules"] = [
-		(task.get("name", ""), task.get("cron", ""))
-		for task in schedule_manager.get_all_schedules()
-		if task.get("enabled", True) and task.get("container") == container.name
-		and (task.get("host") or host_registry.local_host_id()) == host_id]
+		(task["name"], task["cron"]) for task in schedule_manager.all()
+		if task["enabled"] and task["container"] == container.name and task["host"] == host_id]
 
 	# What it uses, and what it is allowed to.
 	if status == "running":
@@ -6897,14 +5743,21 @@ EXEC_OUTPUT_INLINE = 3500
 # The command is shown too, and shares the message's 4096 characters with the
 # output: a long one pushed the first message over and it was lost.
 EXEC_COMMAND_SHOWN = 300
-# The end of a log /logs shows: the message only has room for its last 3500
-# characters anyway.
+# The end of a log /logs asks Docker for, and how much of it the message
+# shows: with its heading and its footer it has to stay under Telegram's 4096.
 LOGS_TAIL_LINES = 200
+LOGS_SHOWN = 3500
+# /logs follows the log for a while, as `tail -f` does. Telegram documents no
+# limit for edits, but they count as messages: one a second in a chat, twenty
+# a minute in a group, and a bot that edited every 0.8 s was shut out for
+# minutes. Every 5 s is at most twelve a minute, with one followed per chat.
+LOGS_FOLLOW_EVERY = 5
+LOGS_FOLLOW_FOR = 30
 # The most of a log /logfile sends, under the 50 MB Telegram accepts.
 LOGFILE_MAX_BYTES = 45 * 1024 * 1024
 
 
-def execute_command(containerId, containerName, command, show_output=True, wait=True):
+def execute_command(containerId, containerName, command, show_output=True, wait=True, on_result=None):
 	"""
 	Runs a command in a container, on a thread of its own.
 
@@ -6916,7 +5769,8 @@ def execute_command(containerId, containerName, command, show_output=True, wait=
 
 	`show_output` is a scheduled task's setting: True sends the result,
 	False nothing, and SHOW_OUTPUT_FAILURES only a failure or a command that
-	printed something.
+	printed something. `on_result` is told how it ended: (output, exit code),
+	or None when it could not be run.
 	"""
 	debug(f"Running command: exec for container {containerName} with command [{command}]")
 	# The thread answers where the command was asked from, not in the group.
@@ -6940,6 +5794,11 @@ def execute_command(containerId, containerName, command, show_output=True, wait=
 				if show_output:
 					_send_exec_result(containerId, containerName, command, result,
 						only_failures=show_output == SHOW_OUTPUT_FAILURES)
+			if on_result:
+				try:
+					on_result(result)
+				except Exception as e:
+					error(f"Error noting how the command in {containerName} ended: [{e}]")
 		finally:
 			clear_reply_context()
 
@@ -6979,12 +5838,15 @@ def _send_exec_result(containerId, containerName, command, result, only_failures
 		# Without output, the "ran correctly" text was also shown for a
 		# command that had failed.
 		output = get_text("exec_no_output") if failed else get_text("command_executed_without_output")
-	shown = command if len(command) <= EXEC_COMMAND_SHOWN else f"{command[:EXEC_COMMAND_SHOWN]}…"
-	message = f'{label}{get_text("executed_command", containerName, html.escape(shown), html.escape(output[:EXEC_OUTPUT_INLINE]))}'
+	shown = telegram_head(command, EXEC_COMMAND_SHOWN)
+	if shown != command:
+		shown += "…"
+	inline = telegram_head(output, EXEC_OUTPUT_INLINE)
+	message = f'{label}{get_text("executed_command", containerName, html.escape(shown), html.escape(inline))}'
 	if failed:
 		message += f'\n\n{get_text("exec_exit_code", str(exit_code))}'
 	send_message(message=message)
-	if len(output) > EXEC_OUTPUT_INLINE:
+	if inline != output:
 		send_document(document=get_temporal_file(output, f"exec_{containerName}"),
 					caption=f'{label}{get_text("exec_output_attached", containerName)}')
 
@@ -10045,46 +8907,6 @@ def expire_update_list(call_id, chat_id, message_id):
 	edit_message_reply_markup(chat_id, message_id, reply_markup=None)
 
 # Generic cache helpers
-def save_schedule_state(user_id, state):
-	"""
-	Remembers where a user is in the /schedule flow.
-
-	On the session cache like every other half-finished interaction, rather
-	than the separate `./cache/` directory this used to use: that path was
-	relative to the working directory, so it landed inside the image instead
-	of the mapped volume, nothing ever swept it, and its errors went to stdout
-	with print() instead of the log.
-	"""
-	_save_cache("schedule_state", user_id, asked_here(state))
-
-def load_schedule_state(user_id):
-	"""The user's in-progress schedule, or None once it has expired."""
-	return _load_cache("schedule_state", user_id)
-
-def clear_schedule_state(user_id):
-	"""Forgets an in-progress schedule, finished or abandoned."""
-	_clear_cache("schedule_state", user_id)
-
-def init_add_schedule_state():
-	"""
-	A blank schedule, at the first question.
-
-	Every field starts as None on purpose, so the flow can tell "not asked
-	yet" from "answered". Which is also why nothing may persist one of these
-	without checking it is finished: add_schedule refuses a task with no name,
-	cron or action for exactly that reason.
-	"""
-	return {
-		"step": "ask_name",
-		"name": None,
-		"cron": None,
-		"action": None,
-		"container": None,
-		"minutes": None,
-		"show_output": None,
-		"command": None,
-	}
-
 def _save_cache(prefix, identifier, value):
 	"""Generic save to cache with prefix and identifier"""
 	key = f"{prefix}_{identifier}"
@@ -10635,6 +9457,14 @@ def edit_message_text(text, chat_id, message_id, parse_mode="html", reply_markup
 	"""Edits the text of a message using the queue (async, does not block on failure)"""
 	message_queue.add_message(_edit_message_text_direct, chat_id, message_id, text, parse_mode, reply_markup, wait_for_result=False)
 
+def edit_message_text_sync(text, chat_id, message_id, parse_mode="html", reply_markup=None):
+	"""
+	Edits the text of a message using the queue, and waits for it: the edited
+	message, or None when it could not be edited —gone, or nothing changed.
+	"""
+	return message_queue.add_message(_edit_message_text_direct, chat_id, message_id, text, parse_mode,
+									reply_markup, wait_for_result=True)
+
 def edit_message_reply_markup(chat_id, message_id, reply_markup):
 	"""Edits the markup of a message using the queue (async)"""
 	message_queue.add_message(_edit_message_reply_markup_direct, chat_id, message_id, reply_markup, wait_for_result=False)
@@ -10694,43 +9524,6 @@ def check_own_container():
 		return
 	warning("Could not identify my own container, and CONTAINER_NAME is not set: "
 			"I will not stop myself from being stopped or deleted from my own menus")
-
-def is_valid_cron(cron_expression):
-	"""
-	Validate a cron expression.
-
-	Supports:
-	- Special expressions: @reboot, @daily, @hourly, etc.
-	- Normal cron: 0 0 * * *, etc.
-	"""
-	# @reboot is not a valid croniter expression, but we support it
-	if cron_expression == "@reboot":
-		return True
-
-	# Check other special cron expressions (supported by croniter)
-	if cron_expression in SPECIAL_CRON_EXPRESSIONS:
-		try:
-			croniter(cron_expression)
-			return True
-		except Exception:
-			return False
-
-	# Try to validate as normal cron expression
-	try:
-		# Split and check that we have exactly 5 fields (minute, hour, day, month, weekday)
-		# croniter accepts 6 fields (with seconds), but we only want standard 5-field cron
-		fields = cron_expression.split()
-		if len(fields) != 5:
-			return False
-
-		# Parsing is not enough: `0 0 30 2 *` parses, and fires on the 30th of
-		# February. It was saved, and never ran, and nothing said so. Asking
-		# for the next run is what tells a date that exists from one that
-		# does not.
-		croniter(cron_expression).get_next(datetime)
-		return True
-	except Exception:
-		return False
 
 def get_my_architecture(host_id=None):
 	"""
@@ -10983,9 +9776,6 @@ def get_docker_tags_from_registry(registry, repo_name):
 	error(f"Could not reach the registry {registry} to list the tags of {repo_name}")
 	return []
 
-# Global schedule monitor instance (used by /schedule command)
-schedule_monitor = None
-
 def register_bot_commands():
 	"""
 	Publishes the command menu to Telegram.
@@ -11109,8 +9899,9 @@ def main():
 	updateMonitor.demonio_update()
 	debug(f"Update daemon started (checks {'enabled' if store.get('bot.check_updates') else 'disabled'})")
 
-	schedule_monitor = DockerScheduleMonitor()
-	schedule_monitor.demonio_schedule()
+	# Imported here and not at the top: schedules builds on this module.
+	import schedules
+	schedules.scheduler.start()
 	debug("Schedule daemon started")
 
 	# The session cache is interface state in the storage volume: without a

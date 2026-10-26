@@ -94,7 +94,7 @@ def temp_storage(env=None, legacy=False, seed_files=None):
 
 # Modules that register commands or inline-button callbacks by being imported.
 # The entry point imports them in this order for the same reason.
-REGISTRARS = ("commands", "callbacks")
+REGISTRARS = ("commands", "callbacks", "schedules")
 
 
 _loaded = None
@@ -133,8 +133,14 @@ def load_bot(env=None, real_docker=False):
 	host_registry.reset()
 
 	core = _import("core")
+	# No /logs is followed unless a test asks: its thread repaints the message
+	# for half a minute, well past the test that sent it.
+	core.LOGS_FOLLOW_FOR = 0
 	for name in REGISTRARS:
-		_import(name)
+		# Once each, like the entry point: commands imports schedules itself,
+		# and running a registrar twice registers its callbacks twice.
+		if name not in sys.modules or sys.modules[name].__dict__.get("core") is not core:
+			_import(name)
 	_loaded = (core, store, root)
 	return _loaded
 

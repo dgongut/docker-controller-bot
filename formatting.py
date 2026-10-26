@@ -12,6 +12,7 @@ that shows the same thing, instead of each writing its own.
 import html
 import re
 import signal
+from datetime import datetime
 
 import requests
 
@@ -45,6 +46,55 @@ def log_excerpt(text):
 	if len(excerpt) > EVENT_LOG_MAX_CHARS:
 		excerpt = "…" + excerpt[-EVENT_LOG_MAX_CHARS:]
 	return f"<pre>{html.escape(excerpt)}</pre>"
+
+
+def day_and_time(moment, now=None):
+	"""
+	When something happens or happened, as people say it: today, tomorrow or
+	yesterday with the time, and otherwise the date as /info writes them.
+	"""
+	days = (moment.date() - (now or datetime.now()).date()).days
+	key = {0: "day_today", 1: "day_tomorrow", -1: "day_yesterday"}.get(days)
+	return get_text(key, moment.strftime("%H:%M")) if key else moment.strftime("%Y-%m-%d %H:%M")
+
+
+def _telegram_width(char):
+	"""How many of Telegram's characters `char` is: it counts in UTF-16, where an emoji is two."""
+	return 2 if ord(char) > 0xFFFF else 1
+
+
+def telegram_head(text, limit):
+	"""
+	The start of `text` that fits in `limit` of Telegram's characters.
+
+	Cut at Python's, a text full of emoji went past the 4096 a message takes
+	and Telegram refused all of it.
+	"""
+	units = 0
+	for end, char in enumerate(text):
+		units += _telegram_width(char)
+		if units > limit:
+			return text[:end]
+	return text
+
+
+def telegram_tail(text, limit):
+	"""
+	The end of `text` that fits in `limit` of Telegram's characters, from the
+	start of a line, so the top of a log window is not half of one —unless
+	there is only the one.
+	"""
+	units = 0
+	start = len(text)
+	while start > 0:
+		units += _telegram_width(text[start - 1])
+		if units > limit:
+			break
+		start -= 1
+	tail = text[start:]
+	if start > 0 and text[start - 1] != "\n" and "\n" in tail:
+		tail = tail[tail.index("\n") + 1:]
+	return tail
 
 
 def describe_exit_code(code):

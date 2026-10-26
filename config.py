@@ -130,58 +130,34 @@ docker_architectures = {
     "unknown": "unknown",
 }
 
-# Scheduled actions that act on Docker, and so belong to one host. Muting is
-# the bot's own notifications: it belongs to no machine, and showing it a host
-# would be claiming something that means nothing.
-# Everything a schedule can do, in the order the picker offers it. One list
-# rather than a hardcoded row of buttons: the screen also prints what each one
-# does, and the two drifting apart is how `prune` ended up with a button and no
-# explanation.
 # Techo del silencio, en minutos: treinta días. No es una preferencia sino un
 # límite técnico — el temporizador que devuelve la voz al bot se programa con
 # ese número, y uno absurdo lo mata con OverflowError dentro de su hilo, con lo
 # que el bot se queda callado para siempre y sin nada que lo despierte.
 MUTE_MAX_MINUTES = 60 * 24 * 30
 
-SCHEDULE_ACTIONS = ("run", "stop", "restart", "mute", "exec", "prune")
-
-HOST_SCOPED_SCHEDULE_ACTIONS = frozenset({"run", "stop", "restart", "exec", "prune"})
-
-# SCHEDULE COMMAND PATTERNS - Define required parameters for each schedule action
-# Format: "action": {
-#     "params": ["param1", "param2", ...],  # Required parameters
-#     "validators": {"param_name": validation_function}  # Optional validators
-# }
-SCHEDULE_PATTERNS = {
-    "run": {
-        "params": ["container"],
-    },
-    "stop": {
-        "params": ["container"],
-    },
-    "restart": {
-        "params": ["container"],
-    },
-    "mute": {
-        "params": ["minutes"],
-        "validators": {
-            "minutes": lambda x: x.isdigit() and int(x) > 0,
-        },
-    },
-    "exec": {
-        "params": ["container", "show_output", "command"],
-        "validators": {
-            "show_output": lambda x: x in ("0", "1"),
-        },
-    },
-    "prune": {
-        "params": ["prune_type", "show_output"],
-        "validators": {
-            "prune_type": lambda x: x in ("containers", "images", "networks", "volumes"),
-            "show_output": lambda x: x in ("0", "1"),
-        },
-    },
+# What each scheduled action carries besides its name and cron, in the order
+# the wizard asks for it. A container brings the host it is on, which is why
+# only a prune, that names none, asks for its host. Everything else about
+# schedules —which actions exist, which act on a host, what the wizard asks,
+# what a valid task holds— comes from this one table.
+SCHEDULE_ACTION_FIELDS = {
+    "run": ("container",),
+    "stop": ("container",),
+    "restart": ("container",),
+    "mute": ("minutes",),
+    "exec": ("container", "command", "show_output"),
+    "prune": ("prune_type", "host", "show_output"),
 }
+
+SCHEDULE_ACTIONS = tuple(SCHEDULE_ACTION_FIELDS)
+
+# The actions that act on a Docker host. A mute is the bot's own notifications.
+HOST_SCOPED_SCHEDULE_ACTIONS = frozenset(
+    action for action, fields in SCHEDULE_ACTION_FIELDS.items()
+    if "container" in fields or "host" in fields)
+
+SCHEDULE_PRUNE_TYPES = ("containers", "images", "networks", "volumes")
 
 # The third value of a scheduled task's show_output, besides true and false:
 # only say something when the exec fails or prints, or the prune fails or

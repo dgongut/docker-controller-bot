@@ -12,6 +12,7 @@ Importing this module is what registers the commands, so the entry point has
 to import it before polling starts.
 """
 
+import schedules
 from config import MUTE_MAX_MINUTES
 from i18n import get_text
 from core import (
@@ -26,7 +27,7 @@ from core import (
 	mute, print_donors, restart,
 	run, save_container_refs, save_update_data,
 	send_message, send_settings_menu,
-	send_ports_menu, show_schedule_menu,
+	send_ports_menu,
 	stop, pending_updates, available_updates_text,
 )
 
@@ -82,7 +83,7 @@ def cmd_compose(user_id=None, chat_id=None, container_id=None, container_name=No
 	send_picker("Compose")
 
 def cmd_schedule(user_id=None, chat_id=None, container_id=None, container_name=None, argument=None):
-	show_schedule_menu(user_id, chat_id)
+	schedules.send_menu()
 
 def cmd_settings(user_id=None, chat_id=None, container_id=None, container_name=None, argument=None):
 	send_settings_menu()

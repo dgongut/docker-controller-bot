@@ -265,7 +265,7 @@ def test_a_schedules_file_that_is_not_a_document_does_not_stop_the_start():
 
 		manager = ScheduleManager(store_.root(), store_.SCHEDULES_FILE)
 		assert manager.set_aside, f"{content!r} no se ha apartado"
-		assert manager.get_all_schedules() == []
+		assert manager.all() == []
 		shutil.rmtree(root, ignore_errors=True)
 
 
@@ -282,6 +282,7 @@ def test_a_task_whose_action_is_not_text_does_not_stop_the_start():
 			{"name": "nada", "action": None},
 			"no es una tarea",
 			{"name": "reinicio", "action": "restart", "container": "plex"},
+			{"name": "mayúsculas", "action": "Restart", "container": "plex"},
 		]}),
 	})
 	result = migration.run()
@@ -294,5 +295,6 @@ def test_a_task_whose_action_is_not_text_does_not_stop_the_start():
 	assert not by_name["objeto"].get("host"), by_name["objeto"]
 	assert not by_name["nada"].get("host"), by_name["nada"]
 	assert by_name["reinicio"]["host"] == result.host_id, by_name["reinicio"]
+	assert by_name["mayúsculas"]["host"] == result.host_id, "sin host no podría ejecutarse"
 	assert "no es una tarea" in schedules, "lo que no es una tarea se deja como está"
 	shutil.rmtree(root, ignore_errors=True)

@@ -1416,8 +1416,10 @@ def test_the_event_monitor_says_why_a_container_stopped_and_when_it_is_unhealthy
 		if client.api.inspect_container(name("oom"))["State"]["OOMKilled"]:
 			assert (core.get_text("container_oom", name("oom")), None) in said["oom"], said["oom"]
 		else:
+			# Its start is announced too: what is checked is how it ended.
 			killed = core.get_text("container_failed", name("oom"), "137 (SIGKILL)")
-			assert [m for m, _ in said["oom"]] == [killed], said["oom"]
+			started = core.get_text("started_container", name("oom"))
+			assert [m for m, _ in said["oom"] if m != started] == [killed], said["oom"]
 		assert (core.get_text("stopped_container", name("stopped")), None) in said["stopped"], said["stopped"]
 		health = [m for m, _ in said["sick"] if "sick" in m and "🟢" not in m]
 		assert health == [core.get_text("container_unhealthy", name("sick")),

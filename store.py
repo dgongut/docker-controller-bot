@@ -68,6 +68,8 @@ STATE_DEFAULTS = {
 	# Since when each container with a setting has been missing from its host,
 	# as {"<host_id>:<name>": epoch seconds}. See reconcile_containers.
 	"containers_absent": {},
+	# How each scheduled task's last run went, by task id. See schedules.record_run.
+	"schedule_runs": {},
 }
 
 _lock = threading.RLock()
@@ -266,6 +268,10 @@ def write_document(path, document):
 	The flush and fsync are what make the rename atomic in practice: without
 	them the metadata operation can reach the disk before the contents, and a
 	power cut in between leaves a settings file that exists and is empty.
+
+	Raises when it cannot write, leaving the file as it was: a caller told
+	nothing would go on as if it had been saved —a scheduled task reported as
+	added that was gone at the next start.
 	"""
 	temporary = f"{path}.tmp"
 	try:
@@ -275,12 +281,12 @@ def write_document(path, document):
 			handle.flush()
 			os.fsync(handle.fileno())
 		os.replace(temporary, path)
-	except Exception as e:
-		error(f"Cannot write {path}: {e}")
+	except Exception:
 		try:
 			os.remove(temporary)
 		except OSError:
 			pass
+		raise
 
 
 def _flush(name):
@@ -296,11 +302,19 @@ def _flush(name):
 		if _settings_unreadable is not None:
 			debug(f"Not writing {SETTINGS_FILE}: it could not be read, and writing would replace it")
 			return
-		write_document(os.path.join(root(), SETTINGS_FILE), _settings)
+		path, document = os.path.join(root(), SETTINGS_FILE), _settings
 	elif name == "state":
-		write_document(os.path.join(state_dir(), STATE_FILE), _state)
+		path, document = os.path.join(state_dir(), STATE_FILE), _state
 	elif name == "updates":
-		write_document(os.path.join(state_dir(), UPDATES_FILE), _updates)
+		path, document = os.path.join(state_dir(), UPDATES_FILE), _updates
+	else:
+		return
+	# Kept in memory either way, and written again with the next change: a
+	# setting that cannot be saved still applies until the bot restarts.
+	try:
+		write_document(path, document)
+	except Exception as e:
+		error(f"Cannot write {path}: {e}")
 
 
 @contextmanager

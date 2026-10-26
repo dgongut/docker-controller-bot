@@ -155,12 +155,12 @@ def test_an_unreadable_schedules_file_is_set_aside_not_emptied():
 		handle.write('{"schedules": [{"id": 1, "name": "copia",}]}')
 
 	manager = ScheduleManager(store.CONFIG_ROOT, "schedules.json")
-	assert manager.get_all_schedules() == []
+	assert manager.all() == []
 	assert manager.set_aside and os.path.exists(manager.set_aside), manager.set_aside
 	with open(manager.set_aside, encoding="utf-8") as handle:
 		assert '"copia"' in handle.read()
-	assert manager.add_schedule(name="nueva", cron="@daily", action="restart", container="nginx")
-	assert [s["name"] for s in ScheduleManager(store.CONFIG_ROOT, "schedules.json").get_all_schedules()] == ["nueva"]
+	assert manager.add({"name": "nueva", "cron": "@daily", "action": "restart", "container": "nginx", "host": "h_local"})
+	assert [s["name"] for s in ScheduleManager(store.CONFIG_ROOT, "schedules.json").all()] == ["nueva"]
 	shutil.rmtree(root, ignore_errors=True)
 
 
