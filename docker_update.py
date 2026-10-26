@@ -1091,21 +1091,44 @@ def _mounts_for_create(config):
 	return mounts
 
 
-def _name_if_still_there(client, container, fallback_name):
+# How long a delete the daemon is still carrying out is waited for once the
+# client has given up on it, and how often it is looked at meanwhile.
+REMOVAL_WAIT_SECONDS = 600
+REMOVAL_POLL_SECONDS = 2
+
+
+def _name_if_still_there(client, container, fallback_name, debug_func):
 	"""
 	The name a container goes by now, or None once Docker has deleted it.
 
-	A delete that timed out on the client may still finish on the daemon. One
-	whose fate cannot be checked counts as still there: being told to remove
-	something already gone costs a look, while a leftover nobody mentions
-	stops the next update.
+	A delete that timed out on the client goes on in the daemon, which shows
+	the container as "removing" until it is done. On a slow disk that takes
+	longer than the client waits: the original was reported left behind, and
+	was gone by the time the user looked. So a container being removed is
+	waited for, up to REMOVAL_WAIT_SECONDS, and only one still there after
+	that, or that the daemon gave up on and left Dead, counts as left behind.
+
+	One whose fate cannot be checked counts as still there: being told to
+	remove something already gone costs a look, while a leftover nobody
+	mentions stops the next update.
 	"""
-	try:
-		return client.containers.get(container.id).name or fallback_name
-	except docker.errors.NotFound:
-		return None
-	except Exception:
-		return fallback_name
+	started = time.monotonic()
+	waiting = False
+	while True:
+		try:
+			current = client.containers.get(container.id)
+		except docker.errors.NotFound:
+			if waiting:
+				debug_func(f"[DELETE_OLD] Docker finished removing {fallback_name} after {time.monotonic() - started:.0f}s")
+			return None
+		except Exception:
+			return fallback_name
+		if current.status != 'removing' or time.monotonic() - started >= REMOVAL_WAIT_SECONDS:
+			return current.name or fallback_name
+		if not waiting:
+			debug_func(f"[DELETE_OLD] Docker is still removing {fallback_name}; waiting up to {REMOVAL_WAIT_SECONDS // 60} min")
+			waiting = True
+		time.sleep(REMOVAL_POLL_SECONDS)
 
 
 def _report_updated(config, container_name, left_behind, get_text_func, save_status_func, notify_func,
@@ -1486,10 +1509,10 @@ def _perform_update_locked(client, container, config, container_name, message, e
 
 		# Delete old container. Whatever goes wrong here leaves the new one in
 		# place, and not only an APIError: a DELETE that outlasts the client's
-		# timeout is a requests ReadTimeout. If the original is still there —
-		# the daemon may yet finish deleting it, or leave it Dead because
-		# something else holds its files — it stays under its _old name for
-		# the user to remove.
+		# timeout is a requests ReadTimeout, and the daemon goes on deleting.
+		# If the original is still there once that is over — or the daemon
+		# leaves it Dead because something else holds its files — it stays
+		# under its _old name for the user to remove.
 		try:
 			if message:
 				edit_message_func(get_text_func("updating_deleting_old", container_name), telegram_group, message.message_id)
@@ -1497,8 +1520,12 @@ def _perform_update_locked(client, container, config, container_name, message, e
 			container.remove()
 			debug_func(f"[DELETE_OLD] ✅ Old container {old_container_name} deleted successfully")
 		except Exception as e:
-			error_func(get_text_func("error_deleting_container_with_error", old_container_name, e))
-			left_behind = _name_if_still_there(client, container, old_container_name)
+			debug_func(f"[DELETE_OLD] The request to remove {old_container_name} failed: {e}")
+			left_behind = _name_if_still_there(client, container, old_container_name, debug_func)
+			if left_behind:
+				error_func(get_text_func("error_deleting_container_with_error", old_container_name, e))
+			else:
+				debug_func(f"[DELETE_OLD] ✅ Old container {old_container_name} deleted successfully")
 
 		# Delete old image (using saved ID, not container.image.id which is now invalid).
 		# In skip_pull mode the "old" image is the same image the new container
@@ -1521,7 +1548,7 @@ def _perform_update_locked(client, container, config, container_name, message, e
 			# Nothing to roll back to: the new container is the good one. Only
 			# the original is in question, which may or may not have gone.
 			error_func(f"[UPDATE_SUCCESS] ⚠️ {container_name} was updated, but what came after failed: {e}")
-			return _report_updated(config, container_name, _name_if_still_there(client, container, old_container_name),
+			return _report_updated(config, container_name, _name_if_still_there(client, container, old_container_name, debug_func),
 								   get_text_func, save_status_func, notify_func, debug_func, error_func)
 
 		# Rollback with validation - CRITICAL: Must restore old container

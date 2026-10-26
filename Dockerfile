@@ -3,7 +3,7 @@ ARG BASE_IMAGE=alpine:3.24.3
 FROM ${BASE_IMAGE}
 ARG BASE_IMAGE
 
-ARG VERSION=5.3.0
+ARG VERSION=5.3.1
 # The sha256 of the release's source zip, to build only what was released:
 #   --build-arg APP_SHA256=$(curl -fsSL https://github.com/dgongut/docker-controller-bot/archive/refs/tags/v<version>.zip | sha256sum | cut -d' ' -f1)
 # A tag can be moved; with this a moved one fails the build instead of

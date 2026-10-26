@@ -25,6 +25,7 @@ import docker_update
 # The in-memory Docker never crashes on its own, so there is nothing to wait
 # for; test_real_docker exercises the wait itself.
 docker_update.VERIFY_STABLE_SECONDS = 0
+docker_update.REMOVAL_POLL_SECONDS = 0
 
 
 class FakeContainer:
@@ -61,6 +62,8 @@ class FakeContainer:
 			error, deleted = self.engine.fail_remove
 			if deleted:
 				self.engine.containers.pop(self.id, None)
+			elif self.engine.removal:
+				self.status = "removing"
 			raise error
 		self.engine.containers.pop(self.id, None)
 
@@ -79,6 +82,14 @@ class FakeContainers:
 	def get(self, key):
 		for container in self.engine.containers.values():
 			if container.id == key or container.name == key:
+				if container.status == "removing":
+					# What the daemon shows at each look, the last one for good.
+					removal = self.engine.removal
+					status = removal.pop(0) if len(removal) > 1 else removal[0]
+					if status is None:
+						self.engine.containers.pop(container.id)
+						break
+					container.status = status
 				return container
 		raise docker.errors.NotFound(key)
 
@@ -116,6 +127,9 @@ class FakeDocker:
 		self.fail_create = False
 		self.fail_start = False
 		self.fail_remove = None
+		# The states a delete the client gave up on goes through in the
+		# daemon, look by look; None is deleted.
+		self.removal = []
 		self.on_create = None
 		# The low-level client: the pull, and the API version it negotiated.
 		self.api = self
@@ -278,6 +292,49 @@ def test_a_delete_that_times_out_but_happens_is_a_plain_update():
 	assert [c.role for c in engine.containers.values()] == ["new"]
 	assert engine.named("nginx")[0].status == "running"
 	assert notes == [], notes
+
+
+def test_a_delete_docker_finishes_after_the_client_gave_up_is_a_plain_update():
+	"""
+	What a user saw: on a slow disk the daemon was still deleting the original
+	when the client gave up, the bot looked at once, found it there and said it
+	was left as _old, and it was gone by the time the user went to remove it.
+	Docker shows it as "removing" meanwhile, so that is waited for; its image
+	goes too, as in any update.
+	"""
+	import requests
+	engine = FakeDocker()
+	original = engine.add("nginx", role="original")
+	engine.fail_remove = (requests.exceptions.ReadTimeout("Read timed out. (read timeout=30)"), False)
+	engine.removal = ["removing", "removing", None]
+	notes, errors = [], []
+
+	assert _update(engine, original, notify_func=notes.append, error_func=errors.append) == "updated_container"
+	assert [c.role for c in engine.containers.values()] == ["new"]
+	assert notes == [] and errors == [], (notes, errors)
+	assert engine.removed_images == ["sha256:old"], engine.removed_images
+
+
+def test_a_delete_docker_gives_up_on_or_does_not_finish_in_time_is_left_behind():
+	import requests
+	waited = docker_update.REMOVAL_WAIT_SECONDS
+	try:
+		for removal, wait in ((["removing", "dead"], waited), (["removing"], 0)):
+			engine = FakeDocker()
+			original = engine.add("nginx", role="original")
+			engine.fail_remove = (requests.exceptions.ReadTimeout("Read timed out. (read timeout=30)"), False)
+			engine.removal = list(removal)
+			docker_update.REMOVAL_WAIT_SECONDS = wait
+			notes = []
+
+			result = _update(engine, original, get_text_func=_with_values, notify_func=notes.append)
+
+			assert result == "updated_container nginx", (removal, result)
+			assert engine.named("nginx")[0].role == "new"
+			assert notes == ["update_old_left_behind nginx nginx_old"], (removal, notes)
+			assert engine.removed_images == [], removal
+	finally:
+		docker_update.REMOVAL_WAIT_SECONDS = waited
 
 
 def test_nothing_after_the_verification_rolls_the_update_back():
