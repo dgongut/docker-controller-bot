@@ -190,6 +190,23 @@ Desde `/schedule` puedes crear tareas que se ejecuten en cron.
 </details>
 
 <details>
+<summary>🔕 Silenciar el bot desde un script</summary>
+
+Como en la 4.x, un script puede silenciar el bot sin pasar por Telegram escribiendo en `/app/config/.muted_until` el segundo epoch en que termina el silencio:
+
+```sh
+docker exec docker-controller-bot sh -c 'echo $(( $(date +%s) + 3600 )) > /app/config/.muted_until'   # silencia 1 hora
+docker exec docker-controller-bot sh -c 'echo 0 > /app/config/.muted_until'                           # quita el silencio
+```
+
+- El bot lo aplica en un par de segundos y borra el fichero. Se redondea al minuto, hacia arriba.
+- Manda el último cambio, venga del script o de `/mute`, sea más largo o más corto.
+- Tiene el mismo límite que `/mute`.
+- Si tu instalación aún usa el volumen `/app/schedule` de la 4.x, el fichero va ahí.
+
+</details>
+
+<details>
 <summary>⚙️ Configuración avanzada y <code>/settings</code></summary>
 
 Aquí solo quedan las variables que el bot necesita **antes** de poder leer sus propios ajustes: cómo llegar a Telegram y quién puede hablarle. La regla es sencilla: si ponerla mal te puede dejar sin acceso al bot, va en el docker-compose, porque lo que impide que el chat funcione no se puede arreglar desde el chat.

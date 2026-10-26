@@ -6,6 +6,7 @@ import html
 import ipaddress
 import io
 import json
+import math
 import os
 import re
 import requests
@@ -5318,6 +5319,61 @@ def check_mute():
 		_unmute_timer.daemon = True
 		_unmute_timer.start()
 
+# Muting from the command line, as 4.x allowed: a script writes the epoch
+# second the mute ends at into the data volume, without going through Telegram.
+#   docker exec docker-controller-bot sh -c 'echo $(( $(date +%s) + 3600 )) > /app/config/.muted_until'
+# 0, or any second already past, unmutes. It is the same file the migration
+# reads once at startup; this picks it up while the bot runs, applies it
+# through mute() like a /mute would, and deletes it. Whichever comes last,
+# the file or a /mute, is the one in force.
+EXTERNAL_MUTE_FILE = ".muted_until"
+# One stat() per pass, so checking often costs nothing and a mute lands fast.
+EXTERNAL_MUTE_POLL_SECONDS = 2
+# A file younger than this may still be half written by the shell redirection.
+EXTERNAL_MUTE_SETTLE_SECONDS = 1
+
+def check_external_mute():
+	"""Applies and deletes the .muted_until a script has written. One pass."""
+	path = os.path.join(store.root(), EXTERNAL_MUTE_FILE)
+	try:
+		if time.time() - os.path.getmtime(path) < EXTERNAL_MUTE_SETTLE_SECONDS:
+			return
+		with open(path, "r", encoding="utf-8") as handle:
+			content = handle.readline().strip()
+		os.remove(path)
+	except FileNotFoundError:
+		return
+	except OSError as e:
+		# Not applied: a file that cannot be deleted would otherwise be applied
+		# again, and announced again, on every pass.
+		warning(f"Could not read or delete the external mute file {path}: {e}")
+		return
+
+	try:
+		until = float(content or 0)
+	except ValueError:
+		until = math.nan
+	if not math.isfinite(until):
+		warning(f"Ignoring the external mute file {path}: {content!r} is not an epoch second")
+		return
+
+	remaining = until - time.time()
+	if remaining <= 0:
+		if is_muted():
+			unmute()
+	else:
+		# Rounded up to whole minutes, which is what mute() takes: the mute
+		# starts at once and may end up to a minute after the second written.
+		mute(int((remaining + 59) // 60))
+
+def _external_mute_loop():
+	while True:
+		try:
+			check_external_mute()
+		except Exception as e:
+			error(f"External mute watcher: {e}")
+		time.sleep(EXTERNAL_MUTE_POLL_SECONDS)
+
 def compose(containerId, containerName):
 	debug(f"Running command: compose for container {containerName}")
 	markup = create_simple_keyboard("button_delete")
@@ -9951,6 +10007,7 @@ def main():
 		warning(f"Could not look for a leftover updater container: {e}")
 	check_own_container()
 	check_mute()
+	threading.Thread(target=_external_mute_loop, name="external-mute", daemon=True).start()
 	send_message(message=build_starting_message())
 	if _migration.ask_for_language:
 		ask_initial_language()

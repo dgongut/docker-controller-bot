@@ -190,6 +190,23 @@ From `/schedule` you can create tasks that run on a cron schedule.
 </details>
 
 <details>
+<summary>🔕 Mute the bot from a script</summary>
+
+As in 4.x, a script can mute the bot without going through Telegram by writing the epoch second the mute ends at into `/app/config/.muted_until`:
+
+```sh
+docker exec docker-controller-bot sh -c 'echo $(( $(date +%s) + 3600 )) > /app/config/.muted_until'   # mute for 1 hour
+docker exec docker-controller-bot sh -c 'echo 0 > /app/config/.muted_until'                           # unmute
+```
+
+- The bot applies it within a couple of seconds and deletes the file. It is rounded up to the minute.
+- The latest change wins, from the script or from `/mute`, longer or shorter.
+- Same limit as `/mute`.
+- If your install still uses the 4.x `/app/schedule` volume, the file goes there.
+
+</details>
+
+<details>
 <summary>⚙️ Advanced configuration and <code>/settings</code></summary>
 
 Only what the bot needs **before** it can read its own settings is left here: how to reach Telegram and who is allowed to talk to it. The rule is simple: if getting it wrong can lock you out of the bot, it belongs in the docker-compose, because you cannot fix from the chat what stops the chat from working.
