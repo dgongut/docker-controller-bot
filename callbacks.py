@@ -608,7 +608,7 @@ def cb_prune(ctx):
 	# Docker answered, and running /prune again only got "already running".
 	working = core.send_message(message=f'{core.host_label(host_id)}'
 								f'{get_text("prune_working", get_text(labels[kind]))}')
-	result, data = getattr(owner, f"prune_{kind.lower()}")()
+	result, data, _ = getattr(owner, f"prune_{kind.lower()}")()
 	if working:
 		core.delete_message(working.message_id)
 	markup = core.create_simple_keyboard("button_delete")
@@ -1039,13 +1039,10 @@ def cb_scheduleSelectContainer(ctx):
 			message_text += f"<b>{get_text('schedule_label_cron')}:</b> {html.escape(str(schedule_state.get('cron')))}\n"
 			message_text += f"<b>{get_text('schedule_label_action')}:</b> {schedule_state.get('action')}\n"
 			message_text += f"<b>{get_text('schedule_label_container')}:</b> {html.escape(str(container_name))}\n\n"
-			message_text += get_text("schedule_ask_show_output")
+			message_text += core.show_output_question("exec")
 
 			markup = InlineKeyboardMarkup(row_width=2)
-			markup.add(
-				InlineKeyboardButton(get_text("button_yes"), callback_data="scheduleSelectShowOutput|yes"),
-				InlineKeyboardButton(get_text("button_no"), callback_data="scheduleSelectShowOutput|no")
-			)
+			core.add_show_output_buttons(markup, "scheduleSelectShowOutput")
 			msg = core.send_message(message=message_text, reply_markup=markup)
 			schedule_state["last_message_id"] = msg.message_id if msg else None
 			core.save_schedule_state(ctx.userId, schedule_state)
@@ -1061,7 +1058,10 @@ def cb_scheduleSelectContainer(ctx):
 def cb_scheduleSelectShowOutput(ctx):
 	schedule_state = core.load_schedule_state(ctx.userId)
 	if schedule_state:
-		schedule_state["show_output"] = (ctx.action == "yes")
+		if ctx.action not in core.SHOW_OUTPUT_CHOICES:
+			core.send_message(message=get_text("error_invalid_selection"))
+			return
+		schedule_state["show_output"] = core.SHOW_OUTPUT_CHOICES[ctx.action]
 		schedule_state["step"] = "ask_command"
 
 		# Delete previous message if exists
@@ -1115,7 +1115,10 @@ def cb_scheduleSelectPruneType(ctx):
 def cb_scheduleSelectPruneShowOutput(ctx):
 	schedule_state = core.load_schedule_state(ctx.userId)
 	if schedule_state:
-		schedule_state["show_output"] = (ctx.action == "yes")
+		if ctx.action not in core.SHOW_OUTPUT_CHOICES:
+			core.send_message(message=get_text("error_invalid_selection"))
+			return
+		schedule_state["show_output"] = core.SHOW_OUTPUT_CHOICES[ctx.action]
 		schedule_state["step"] = "confirm"
 
 		# Delete previous message if exists
@@ -1276,16 +1279,12 @@ def cb_scheduleEditField(ctx):
 			core.save_schedule_state(ctx.userId, edit_state)
 
 		elif ctx.field == "show_output":
-			current_output = schedule.get('show_output', False)
 			message_text = f"<b>{get_text('schedule_edit_show_output')}</b>\n\n"
-			message_text += f"{get_text('schedule_ask_show_output')}\n"
-			message_text += f"<i>{get_text('current_value')}: {get_text('schedule_yes') if current_output else get_text('schedule_no')}</i>"
+			message_text += f"{core.show_output_question(schedule.get('action'))}\n\n"
+			message_text += f"<i>{get_text('current_value')}: {core.show_output_text(schedule.get('show_output'))}</i>"
 
 			markup = InlineKeyboardMarkup(row_width=2)
-			markup.add(
-				InlineKeyboardButton(get_text("button_yes"), callback_data=f"scheduleEditValue|show_output|{ctx.scheduleId}|yes"),
-				InlineKeyboardButton(get_text("button_no"), callback_data=f"scheduleEditValue|show_output|{ctx.scheduleId}|no")
-			)
+			core.add_show_output_buttons(markup, f"scheduleEditValue|show_output|{ctx.scheduleId}")
 			msg = core.send_message(message=message_text, reply_markup=markup)
 			edit_state["last_message_id"] = msg.message_id if msg else None
 			core.save_schedule_state(ctx.userId, edit_state)
@@ -1329,7 +1328,10 @@ def cb_scheduleEditValue(ctx):
 
 		# Update the schedule based on field type
 		if ctx.field == "show_output":
-			core.schedule_manager.update_schedule(schedule_name, show_output=(ctx.value == "yes"))
+			if ctx.value not in core.SHOW_OUTPUT_CHOICES:
+				core.send_message(message=get_text("error_invalid_selection"))
+				return
+			core.schedule_manager.update_schedule(schedule_name, show_output=core.SHOW_OUTPUT_CHOICES[ctx.value])
 			core.send_message(message=get_text("schedule_updated_success", html.escape(schedule_name)))
 		elif ctx.field == "prune_type":
 			core.schedule_manager.update_schedule(schedule_name, prune_type=ctx.value)

@@ -183,6 +183,12 @@ SCHEDULE_PATTERNS = {
     },
 }
 
+# The third value of a scheduled task's show_output, besides true and false:
+# only say something when the exec fails or prints, or the prune fails or
+# frees something. A string, so the tasks saved as true/false keep meaning
+# what they did.
+SHOW_OUTPUT_FAILURES = "failures"
+
 # SPECIAL CRON EXPRESSIONS - Supported by croniter and custom
 # These are aliases that can be used instead of full cron expressions
 SPECIAL_CRON_EXPRESSIONS = [

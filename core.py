@@ -247,6 +247,21 @@ def with_reply_context(handler):
 			clear_reply_context()
 	return wrapper
 
+
+def _pruned_anything(pruned):
+	"""
+	Whether a prune removed something: any of what Docker lists as deleted,
+	or bytes freed.
+
+	Not the bytes alone: networks free none, and a stopped container that
+	never wrote anything is removed without freeing any either.
+	"""
+	pruned = pruned or {}
+	if pruned.get('SpaceReclaimed'):
+		return True
+	return any(value for key, value in pruned.items() if key.endswith('Deleted'))
+
+
 class DockerManager:
 	"""
 	Every Docker operation, against one host.
@@ -783,11 +798,13 @@ class DockerManager:
 			error(f"Could not delete container {container_name}. Error: [{e}]")
 			return get_text("error_deleting_container", container_name)
 
-	# Each prune returns (message, details): the details go out as a file, and
-	# are None when it failed, so there is no file to send. A failure used to
-	# return the message alone, which the callers' unpacking turned into a
-	# ValueError: the /prune button answered nothing, and a scheduled one only
-	# left a line in the log.
+	# Each prune returns (message, details, cleaned): the details go out as a
+	# file, and are None when it failed, so there is no file to send. A
+	# failure used to return the message alone, which the callers' unpacking
+	# turned into a ValueError: the /prune button answered nothing, and a
+	# scheduled one only left a line in the log. `cleaned` says whether it
+	# removed anything, which a scheduled prune set to report only failures or
+	# output needs, and the details, already text, no longer tell.
 	def prune_containers(self):
 		return self._prune("containers", "prune_containers", "error_prune_containers", "docker container prune -f", reclaims=True)
 
@@ -817,33 +834,37 @@ class DockerManager:
 			connection = self.client
 		try:
 			pruned = getattr(connection, collection).prune(**kwargs)
+			cleaned = _pruned_anything(pruned)
 			if not reclaims:
 				debug(f"Deleted: [{str(pruned)}]")
-				return get_text(done_key), str(pruned)
+				return get_text(done_key), str(pruned), cleaned
 			file_size_bytes = sizeof_fmt((pruned or {}).get('SpaceReclaimed') or 0)
 			debug(f"Deleted: [{str(pruned)}] - Space reclaimed: {str(file_size_bytes)}")
-			return get_text(done_key, str(file_size_bytes)), str(pruned)
+			return get_text(done_key, str(file_size_bytes)), str(pruned), cleaned
 		except requests.exceptions.Timeout as e:
 			error(f"Docker did not finish pruning {collection} in time, so it cancelled it. Error: [{e}]")
-			return get_text("error_prune_timeout", str(host_registry.SLOW_TIMEOUT_SECONDS // 60), command), None
+			return get_text("error_prune_timeout", str(host_registry.SLOW_TIMEOUT_SECONDS // 60), command), None, False
 		except docker.errors.APIError as e:
 			# The daemon runs one prune at a time. A scheduled one and a /prune
 			# can meet, and that is not an error worth reading the logs for.
 			if e.status_code == 409 and "already running" in str(e):
 				warning(f"Not pruning {collection}: Docker is already running a prune. [{e}]")
-				return get_text("error_prune_busy"), None
+				return get_text("error_prune_busy"), None, False
 			error(f"An error occurred deleting unused {collection}. Error: [{e}]")
-			return get_text(error_key), None
+			return get_text(error_key), None, False
 		except Exception as e:
 			error(f"An error occurred deleting unused {collection}. Error: [{e}]")
-			return get_text(error_key), None
+			return get_text(error_key), None, False
 
 	def execute_command(self, container_id, container_name, command):
 		"""
-		The command's output, or None when it could not be run.
+		The command's output and exit code, or None when it could not be run.
 
 		None rather than an error text: returned the same way as the output,
-		the error was shown as if it were what the command had printed.
+		the error was shown as if it were what the command had printed. The
+		output comes as printed, empty when the command printed nothing, so
+		the caller can tell that apart from a command that had something to
+		say.
 		"""
 		try:
 			container = self.client.containers.get(container_id)
@@ -872,9 +893,7 @@ class DockerManager:
 		# in Latin-1, a binary— made a command that had run read as one that
 		# could not be.
 		output = result.output.decode('utf-8', errors='replace') if result.output else ''
-		if not output:
-			output = get_text("command_executed_without_output")
-		return output
+		return output, result.exit_code
 
 	def _is_executable_missing(self, result, executable):
 		"""
@@ -1419,10 +1438,16 @@ class DockerEventMonitor:
 		# Names whose healthcheck is failing, announced once each: the next
 		# news about them is that they are healthy again. And when each was
 		# last killed for running out of memory, which arrives as an event of
-		# its own just before the stop it causes. Both forgotten when the
-		# container is removed.
+		# its own, usually just before the stop it causes. Both forgotten when
+		# the container is removed.
 		self._unhealthy = set()
 		self._oom = {}
+		# Stops that read as a kill nobody asked for, held in case the "oom"
+		# that explains them comes just after: name -> (the timer that sends
+		# them anyway, their message, its detail).
+		self._held_deaths = {}
+		self._held_lock = threading.Lock()
+		self._schedule = RestartLoopTracker._start_timer
 
 	@property
 	def alias(self):
@@ -1546,7 +1571,8 @@ class DockerEventMonitor:
 			self.restart_loops.should_announce(action, container_name)
 			return
 		if action == "oom":
-			self._oom[container_name] = time.time()
+			if not self._release_death(container_name, oom=True):
+				self._oom[container_name] = time.time()
 			return
 		if action == "destroy":
 			self._unhealthy.discard(container_name)
@@ -1555,10 +1581,11 @@ class DockerEventMonitor:
 
 		message = None
 		detail = None
+		may_be_oom = False
 		if action == "start":
 			message = get_text("started_container", container_name)
 		elif action == "die":
-			message, detail = self._death_message(container_name, attributes, container_id)
+			message, detail, may_be_oom = self._death_message(container_name, attributes, container_id)
 		elif action == "create" and store.get("bot.extended_messages"):
 			message = get_text("created_container", container_name)
 		elif action.startswith("health_status"):
@@ -1576,6 +1603,12 @@ class DockerEventMonitor:
 			debug(f"Message [{message}] omitted because {container_name} is in a restart loop")
 			return
 
+		# A stop still held goes before whatever came after it.
+		self._release_death(container_name)
+		if may_be_oom:
+			self._hold_death(container_name, message, detail)
+			return
+
 		if detail:
 			self._announce(message, detail)
 		else:
@@ -1584,24 +1617,73 @@ class DockerEventMonitor:
 	# How long after an "oom" event the stop that follows is put down to it.
 	OOM_SECONDS = 30
 
+	# How long a kill nobody asked for waits for an "oom" that would explain
+	# it. Docker sends the two as separate events, and on a loaded machine
+	# the "oom" can come after the stop: in Docker 29.4.3, 15 times in 365, up
+	# to 55 ms after. State.OOMKilled is set by that same event, so reading it
+	# when the stop arrives is a race, not an answer.
+	OOM_WAIT_SECONDS = 2
+
 	def _death_message(self, name, attributes, container_id):
 		"""
-		What to say about a container that stopped, and the log lines to show.
+		What to say about a container that stopped, the log lines to show, and
+		whether it may still turn out to have run out of memory.
 
 		"Stopped" said nothing about why. Asked for —`docker stop`, the bot, a
 		task— is still that. Otherwise the exit code says it: 0 is a process
 		that finished, anything else one that failed, shown with what it last
-		wrote. Out of memory is told apart, because the fix is a different one.
+		wrote. Out of memory is told apart, because the fix is a different one:
+		known when its "oom" came first, still possible on a 137 (SIGKILL).
 		"""
 		oom = self._oom.pop(name, None)
 		if oom is not None and time.time() - oom <= self.OOM_SECONDS:
-			return get_text("container_oom", name), None
+			return get_text("container_oom", name), None, False
 		if self.restart_loops.stopped_on_purpose(name):
-			return get_text("stopped_container", name), None
+			return get_text("stopped_container", name), None, False
 		code = str(attributes.get('exitCode', '')).strip()
 		if code in ("", "0"):
-			return get_text("container_finished" if code == "0" else "stopped_container", name), None
-		return get_text("container_failed", name, describe_exit_code(code)), self._last_logs(container_id)
+			return get_text("container_finished" if code == "0" else "stopped_container", name), None, False
+		return (get_text("container_failed", name, describe_exit_code(code)), self._last_logs(container_id),
+				code == "137")
+
+	def _hold_death(self, name, message, detail):
+		"""
+		Holds the stop of a container killed for no reason given yet, for
+		OOM_WAIT_SECONDS: an "oom" in that time sends it as running out of
+		memory, anything else about the container sends it as it is, and so
+		does the end of the wait. Only this one waits; the monitor goes on.
+		"""
+		timer = None
+
+		def fire():
+			with self._held_lock:
+				# Sent, or replaced, before it fired.
+				if self._held_deaths.get(name, (None,))[0] is not timer:
+					return
+				del self._held_deaths[name]
+			self._announce(message, detail)
+
+		with self._held_lock:
+			timer = self._schedule(self.OOM_WAIT_SECONDS, fire)
+			self._held_deaths[name] = (timer, message, detail)
+
+	def _release_death(self, name, oom=False):
+		"""
+		Sends the stop held for this container now, if there is one: as running
+		out of memory when that is what came, as it read otherwise. Whether
+		there was one.
+		"""
+		with self._held_lock:
+			held = self._held_deaths.pop(name, None)
+		if held is None:
+			return False
+		timer, message, detail = held
+		timer.cancel()
+		if oom:
+			self._announce(get_text("container_oom", name))
+		else:
+			self._announce(message, detail)
+		return True
 
 	def _health_message(self, name, status, container_id):
 		"""
@@ -2346,7 +2428,7 @@ class DockerScheduleMonitor:
 			schedule_host = schedule.get("host") or host_registry.local_host_id()
 			minutes = schedule.get("minutes")
 			command = schedule.get("command", "")
-			show_output = bool(schedule.get("show_output", False))
+			show_output = show_output_mode(schedule.get("show_output"))
 			prune_type = schedule.get("prune_type", "")
 			schedule_name = schedule.get("name", "")
 
@@ -2475,7 +2557,12 @@ class DockerScheduleMonitor:
 				error(f"Error executing schedule action [prune]: [{str(e)}]")
 
 	def _run_prune(self, owner, prune_type, show_output):
-		result_message, data = getattr(owner, f"prune_{prune_type}")()
+		result_message, data, cleaned = getattr(owner, f"prune_{prune_type}")()
+		# A failure always says so in that mode; a prune that worked only
+		# when it removed something.
+		if show_output == SHOW_OUTPUT_FAILURES and data is not None and not cleaned:
+			debug(f"Scheduled prune removed nothing: {result_message}")
+			return
 		# Show output if requested, otherwise just log
 		if show_output and result_message and data is None:
 			send_message(message=result_message)
@@ -2652,6 +2739,46 @@ def _validate_schedule_index(index_str: str, schedules: list) -> int:
 			return idx
 	return -1
 
+# The buttons that answer "show output?", by the value each one stores.
+SHOW_OUTPUT_CHOICES = {"yes": True, "no": False, "failures": SHOW_OUTPUT_FAILURES}
+
+
+def show_output_mode(value):
+	"""
+	A task's show_output as the bot acts on it: True, False or
+	SHOW_OUTPUT_FAILURES.
+
+	The one reader of the stored value. Each screen used to turn it into
+	yes or no on its own, which a third value would have shown as "Yes"
+	wherever one was missed.
+	"""
+	if value == SHOW_OUTPUT_FAILURES:
+		return SHOW_OUTPUT_FAILURES
+	return bool(value)
+
+
+def show_output_text(value):
+	"""How a task's show_output reads on screen."""
+	mode = show_output_mode(value)
+	if mode == SHOW_OUTPUT_FAILURES:
+		return get_text("schedule_show_output_failures")
+	return get_text("schedule_yes") if mode else get_text("schedule_no")
+
+
+def show_output_question(action):
+	"""The question that asks for show_output, with what the third answer means for this action."""
+	hint = "schedule_show_output_failures_prune" if action == "prune" else "schedule_show_output_failures_exec"
+	return f"{get_text('schedule_ask_show_output')}\n<i>{get_text(hint)}</i>"
+
+
+def add_show_output_buttons(markup, callback_prefix):
+	"""The three answers to show_output, each sending `<callback_prefix>|<choice>`."""
+	markup.add(
+		InlineKeyboardButton(get_text("button_yes"), callback_data=f"{callback_prefix}|yes"),
+		InlineKeyboardButton(get_text("button_no"), callback_data=f"{callback_prefix}|no"))
+	markup.add(InlineKeyboardButton(get_text("button_show_output_failures"), callback_data=f"{callback_prefix}|failures"))
+
+
 def _build_schedule_summary(state: dict) -> str:
 	"""Build a consistent schedule summary message from state dict"""
 	lines = []
@@ -2680,7 +2807,7 @@ def _build_schedule_summary(state: dict) -> str:
 		lines.append(f"<b>{get_text('schedule_label_host')}:</b> {host_alias(state['host'])}")
 	# Only show show_output if action is exec or prune and show_output is not None
 	if state.get("action") in ("exec", "prune") and state.get("show_output") is not None:
-		lines.append(f"<b>{get_text('schedule_label_show_output')}:</b> {get_text('schedule_yes') if state.get('show_output') else get_text('schedule_no')}")
+		lines.append(f"<b>{get_text('schedule_label_show_output')}:</b> {show_output_text(state.get('show_output'))}")
 	if state.get("command"):
 		lines.append(f"<b>{get_text('schedule_label_command')}:</b> <code>{html.escape(str(state.get('command')))}</code>")
 
@@ -2753,8 +2880,6 @@ def show_schedule_menu(user_id: int, chat_id: int):
 	label_command = get_text('schedule_label_command')
 	label_show_output = get_text('schedule_label_show_output')
 	label_prune_type = get_text('schedule_label_prune_type')
-	yes_text = get_text('schedule_yes')
-	no_text = get_text('schedule_no')
 
 	# Build message efficiently with list
 	lines = [title]
@@ -2772,7 +2897,7 @@ def show_schedule_menu(user_id: int, chat_id: int):
 			container = html.escape(str(sched.get('container') or ''))
 			minutes = sched.get('minutes', '')
 			command = html.escape(str(sched.get('command') or ''))
-			show_output = sched.get('show_output', False)
+			show_output = show_output_text(sched.get('show_output'))
 			prune_type = sched.get('prune_type', '')
 			enabled = sched.get('enabled', True)
 
@@ -2803,14 +2928,12 @@ def show_schedule_menu(user_id: int, chat_id: int):
 				lines.append(f"  {label_command}: <code>{command}</code>")
 				if host_line:
 					lines.append(host_line)
-				output_text = yes_text if show_output else no_text
-				lines.append(f"  {label_show_output}: <b>{output_text}</b>")
+				lines.append(f"  {label_show_output}: <b>{show_output}</b>")
 			elif action == 'prune':
 				lines.append(f"  {label_prune_type}: <b>{prune_type}</b>")
 				if host_line:
 					lines.append(host_line)
-				output_text = yes_text if show_output else no_text
-				lines.append(f"  {label_show_output}: <b>{output_text}</b>")
+				lines.append(f"  {label_show_output}: <b>{show_output}</b>")
 			elif action in ('run', 'stop', 'restart'):
 				lines.append(f"  {label_container}: <b>{container}</b>")
 				if host_line:
@@ -2890,7 +3013,7 @@ def show_schedule_edit_options(user_id: int, schedule_name: str):
 	container = schedule.get('container', '')
 	minutes = schedule.get('minutes', '')
 	command = schedule.get('command', '')
-	show_output = schedule.get('show_output', False)
+	show_output = show_output_text(schedule.get('show_output'))
 	prune_type = schedule.get('prune_type', '')
 	status_text = get_text('schedule_status_enabled') if enabled else get_text('schedule_status_disabled')
 	status_icon = "🟢" if enabled else "🔴"
@@ -2915,11 +3038,11 @@ def show_schedule_edit_options(user_id: int, schedule_name: str):
 		message_text += f"<b>{get_text('schedule_label_container')}:</b> <b>{html.escape(str(container or ''))}</b>\n"
 		message_text += f"<b>{get_text('schedule_label_command')}:</b> <code>{html.escape(str(command or ''))}</code>\n"
 		message_text += host_line
-		message_text += f"<b>{get_text('schedule_label_show_output')}:</b> <b>{get_text('schedule_yes') if show_output else get_text('schedule_no')}</b>\n"
+		message_text += f"<b>{get_text('schedule_label_show_output')}:</b> <b>{show_output}</b>\n"
 	elif action == 'prune':
 		message_text += f"<b>{get_text('schedule_label_prune_type')}:</b> <b>{prune_type}</b>\n"
 		message_text += host_line
-		message_text += f"<b>{get_text('schedule_label_show_output')}:</b> <b>{get_text('schedule_yes') if show_output else get_text('schedule_no')}</b>\n"
+		message_text += f"<b>{get_text('schedule_label_show_output')}:</b> <b>{show_output}</b>\n"
 	elif action in ('run', 'stop', 'restart'):
 		message_text += f"<b>{get_text('schedule_label_container')}:</b> <b>{html.escape(str(container or ''))}</b>\n"
 		message_text += host_line
@@ -3054,13 +3177,10 @@ def ask_schedule_prune_show_output(user_id: int, state: dict):
 			pass
 
 	message_text = _build_schedule_summary(state)
-	message_text += f"\n\n{get_text('schedule_ask_show_output')}"
+	message_text += f"\n\n{show_output_question('prune')}"
 
 	markup = InlineKeyboardMarkup(row_width=2)
-	markup.add(
-		InlineKeyboardButton(get_text("button_yes"), callback_data="scheduleSelectPruneShowOutput|yes"),
-		InlineKeyboardButton(get_text("button_no"), callback_data="scheduleSelectPruneShowOutput|no")
-	)
+	add_show_output_buttons(markup, "scheduleSelectPruneShowOutput")
 	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="scheduleCancel"))
 
 	msg = send_message(message=message_text, reply_markup=markup)
@@ -5008,7 +5128,8 @@ def button_controller(call):
 				# a week after they were written: the list still says them.
 				ctx.containerName = listed_update_name(chatId, messageId, ctx.containerId)
 			if not ctx.containerName:
-				ctx.containerName, silent = name_by_reference(ctx.containerId)
+				ctx.containerName, silent = name_by_reference(
+					ctx.containerId, call.message.edit_date or call.message.date)
 				if silent is not None:
 					# The host did not answer, which says nothing about the
 					# container: said so, and the message kept to try again.
@@ -6783,7 +6904,7 @@ LOGS_TAIL_LINES = 200
 LOGFILE_MAX_BYTES = 45 * 1024 * 1024
 
 
-def execute_command(containerId, containerName, command, sendMessage=True, wait=True):
+def execute_command(containerId, containerName, command, show_output=True, wait=True):
 	"""
 	Runs a command in a container, on a thread of its own.
 
@@ -6792,6 +6913,10 @@ def execute_command(containerId, containerName, command, sendMessage=True, wait=
 	follows whenever it finishes. A scheduled exec does not wait at all: run in
 	line, a long one made the scheduler skip the minutes after it, and one that
 	never ended stopped every other task for good.
+
+	`show_output` is a scheduled task's setting: True sends the result,
+	False nothing, and SHOW_OUTPUT_FAILURES only a failure or a command that
+	printed something.
 	"""
 	debug(f"Running command: exec for container {containerName} with command [{command}]")
 	# The thread answers where the command was asked from, not in the group.
@@ -6805,20 +6930,21 @@ def execute_command(containerId, containerName, command, sendMessage=True, wait=
 			set_reply_context(context_chat, context_thread)
 		try:
 			try:
-				output = manager_for(containerId).execute_command(
+				result = manager_for(containerId).execute_command(
 					container_id=ref_id(containerId), container_name=containerName, command=command)
 			except Exception as e:
 				error(f"Error executing command [{command}] in container {containerName}. Error: [{e}]")
-				output = None
+				result = None
 			with lock:
 				answered.set()
-				if sendMessage:
-					_send_exec_result(containerId, containerName, command, output)
+				if show_output:
+					_send_exec_result(containerId, containerName, command, result,
+						only_failures=show_output == SHOW_OUTPUT_FAILURES)
 		finally:
 			clear_reply_context()
 
 	threading.Thread(target=run, name=f"exec-{containerName}", daemon=True).start()
-	if not wait or not sendMessage:
+	if not wait or not show_output:
 		return
 	if answered.wait(EXEC_WAIT_SECONDS):
 		return
@@ -6829,13 +6955,35 @@ def execute_command(containerId, containerName, command, sendMessage=True, wait=
 			send_message(message=f'{host_label(ref_host(containerId))}{get_text("exec_still_running", containerName)}')
 
 
-def _send_exec_result(containerId, containerName, command, output):
+def _send_exec_result(containerId, containerName, command, result, only_failures=False):
+	"""
+	Reports how an exec went: `result` is the (output, exit code) the manager
+	returned, or None when the command could not be run at all.
+
+	`only_failures` keeps quiet about a command that ended well without
+	printing anything: a check run every few minutes that only speaks when
+	something is wrong sent a "ran correctly" each time.
+	"""
 	label = host_label(ref_host(containerId))
-	if output is None:
+	if result is None:
 		send_message(message=f'{label}{get_text("error_executing_command_container", html.escape(command), containerName)}')
 		return
+	output, exit_code = result
+	# None is what the SDK leaves when it could not read the code: not a
+	# failure the user should be told about.
+	failed = exit_code not in (0, None)
+	if only_failures and not failed and not output.strip():
+		debug(f"Command [{command}] in container {containerName} ended well without output: not reported")
+		return
+	if not output:
+		# Without output, the "ran correctly" text was also shown for a
+		# command that had failed.
+		output = get_text("exec_no_output") if failed else get_text("command_executed_without_output")
 	shown = command if len(command) <= EXEC_COMMAND_SHOWN else f"{command[:EXEC_COMMAND_SHOWN]}…"
-	send_message(message=f'{label}{get_text("executed_command", containerName, html.escape(shown), html.escape(output[:EXEC_OUTPUT_INLINE]))}')
+	message = f'{label}{get_text("executed_command", containerName, html.escape(shown), html.escape(output[:EXEC_OUTPUT_INLINE]))}'
+	if failed:
+		message += f'\n\n{get_text("exec_exit_code", str(exit_code))}'
+	send_message(message=message)
 	if len(output) > EXEC_OUTPUT_INLINE:
 		send_document(document=get_temporal_file(output, f"exec_{containerName}"),
 					caption=f'{label}{get_text("exec_output_attached", containerName)}')
@@ -9221,14 +9369,20 @@ def find_live_container(ref, name):
 
 	Updated from outside the bot, a container comes back with another ID and
 	the same name. A list of updates can be days old, so what it holds is
-	looked up by name when the ID is gone — on its own host only, as the
-	buttons are.
+	looked up by name — on its own host only, as the buttons are.
+
+	What the reference finds counts only if it still has that name. It
+	carries five characters of the ID, which a container created since can
+	share: with the listed one recreated, that one was the only match, and
+	confirming the list updated it instead. Two containers on a host cannot
+	share a name, so one that has it is the one the name finds anyway.
 	"""
 	owner, container = find_container(ref)
-	if container is None:
+	if container is None or container.name != name:
 		current_id = find_container_id_on_host(ref_host(ref), name)
-		if current_id:
-			owner, container = find_container(make_ref(ref_host(ref), current_id))
+		owner, container = find_container(make_ref(ref_host(ref), current_id)) if current_id else (None, None)
+	if container is None or container.name != name:
+		return None, None
 	return owner, container
 
 
@@ -10191,11 +10345,18 @@ def locate_container_on_host(host_id, container_name):
 		return None, str(e)
 	return (container.id[:CONTAINER_ID_LENGTH] if container is not None else None), None
 
-def name_by_reference(ref):
+def name_by_reference(ref, drawn_at):
 	"""
 	The name of the container a reference points at, telling apart a host
 	that did not answer: (name or None, why the host could not be asked or
 	None). As locate_container_on_host does going the other way.
+
+	`drawn_at` is when the message with the button was last drawn, as
+	Telegram dates it. With no name to go by, the five characters of the ID
+	are all there is, and a container created since can share them: the
+	press —a stop, a delete— landed on that one. One created after the
+	button cannot be the one it meant, so it is taken for the button's
+	container being gone.
 	"""
 	try:
 		owner = manager_for(ref)
@@ -10203,7 +10364,12 @@ def name_by_reference(ref):
 		debug(f"Cannot reach the host for {ref}: {e.reason}")
 		return None, str(e.reason)
 	try:
-		return owner.client.containers.get(ref_id(ref)).name, None
+		container = owner.client.containers.get(ref_id(ref))
+		created = _parse_docker_time((container.attrs or {}).get("Created"))
+		if created is None or int(created.timestamp()) > drawn_at:
+			debug(f"{ref} now finds {container.name}, not created before the button: not the one it meant")
+			return None, None
+		return container.name, None
 	except docker.errors.NotFound:
 		return None, None
 	except docker.errors.APIError as e:

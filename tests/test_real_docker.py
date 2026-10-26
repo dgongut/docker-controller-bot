@@ -1389,7 +1389,9 @@ def test_the_event_monitor_says_why_a_container_stopped_and_when_it_is_unhealthy
 			return client.containers.run(BASE, command, name=PREFIX + name, detach=True, labels=LABEL, **kwargs)
 		go("finishes", ["sh", "-c", "sleep 1; exit 0"])
 		go("fails", ["sh", "-c", "echo 'ERROR: <sin base de datos>' >&2; sleep 1; exit 3"])
-		go("oom", ["sh", "-c", "sleep 1; tail /dev/zero"], mem_limit="8m", memswap_limit="8m")
+		# 8m was too little for runc itself on a loaded machine, and the
+		# container never started.
+		go("oom", ["sh", "-c", "sleep 1; tail /dev/zero"], mem_limit="32m", memswap_limit="32m")
 		stopped = go("stopped", ["sleep", "300"])
 		sick = go("sick", ["sh", "-c", "touch /ok; sleep 300"],
 					healthcheck={"test": ["CMD", "test", "-f", "/ok"], "interval": 1_000_000_000, "retries": 2})
@@ -1409,7 +1411,13 @@ def test_the_event_monitor_says_why_a_container_stopped_and_when_it_is_unhealthy
 		assert (core.get_text("container_finished", name("finishes")), None) in said["finishes"], said
 		failed = [m for m in said["fails"] if m[0] == core.get_text("container_failed", name("fails"), "3")]
 		assert failed and "ERROR: &lt;sin base de datos&gt;" in failed[0][1], said["fails"]
-		assert (core.get_text("container_oom", name("oom")), None) in said["oom"], said["oom"]
+		# On a loaded machine Docker can lose the "oom" altogether, and then
+		# it does not know either: State.OOMKilled comes from that event.
+		if client.api.inspect_container(name("oom"))["State"]["OOMKilled"]:
+			assert (core.get_text("container_oom", name("oom")), None) in said["oom"], said["oom"]
+		else:
+			killed = core.get_text("container_failed", name("oom"), "137 (SIGKILL)")
+			assert [m for m, _ in said["oom"]] == [killed], said["oom"]
 		assert (core.get_text("stopped_container", name("stopped")), None) in said["stopped"], said["stopped"]
 		health = [m for m, _ in said["sick"] if "sick" in m and "🟢" not in m]
 		assert health == [core.get_text("container_unhealthy", name("sick")),

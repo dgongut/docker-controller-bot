@@ -1686,7 +1686,13 @@ def _press_every_button_through_the_dispatcher():
 			press.data, press.id = data, "q1"
 			# In the admin's private chat: buttons are only taken where commands are.
 			press.message.id, press.message.chat.id, press.message.chat.type = 2, admin, "private"
+			press.message.date, press.message.edit_date = int(time.time()), None
 			press.from_user.id, press.from_user.username = admin, "test"
+			# The names saved as the menus save them, again for every press: a
+			# press that closes its message forgets them. Without them only the
+			# five characters of the ID are left, and a stub container has no
+			# creation date to tell it from one created after the message.
+			dcb.save_container_refs(admin, 2, [(f"{local}:abc12", "nginx")])
 			try:
 				dcb.button_controller(press)
 			except Exception as e:
@@ -1694,6 +1700,7 @@ def _press_every_button_through_the_dispatcher():
 	finally:
 		for name, handler in original.items():
 			specs[name].handler = handler
+		dcb.clear_container_cache(admin, 2)
 	return ran, broken
 
 
@@ -3977,7 +3984,7 @@ def test_a_scheduled_prune_does_not_hold_up_the_scheduler():
 		def prune():
 			release.wait(5)
 			ran.append(kind)
-			return (f"ok {kind}", None)
+			return (f"ok {kind}", None, False)
 		return prune
 
 	owner.prune_containers.side_effect = pruning("containers")
@@ -4760,12 +4767,13 @@ def test_a_prune_that_fails_says_so_instead_of_raising():
 		getattr(owner.client, collection).prune.side_effect = busy
 	try:
 		for kind in ("containers", "images", "networks", "volumes"):
-			message, details = getattr(owner, f"prune_{kind}")()
+			message, details, cleaned = getattr(owner, f"prune_{kind}")()
 			assert details is None and message == i18n.get_text(f"error_prune_{kind}"), kind
 		owner.client.images.prune.side_effect = None
 		owner.client.images.prune.return_value = {"ImagesDeleted": None}
-		message, details = owner.prune_images()
+		message, details, cleaned = owner.prune_images()
 		assert details is not None and "0.0B" in message, message
+		assert cleaned is False, "no ha borrado nada"
 	finally:
 		host_registry.slow_client = original_slow
 		_restore_hosts()
@@ -4776,7 +4784,7 @@ def test_a_prune_that_fails_says_so_instead_of_raising():
 	sent, documents, steps = [], [], []
 	original = (dcb.manager, dcb.send_message, dcb.send_document, dcb.delete_message)
 	failing = MagicMock()
-	failing.prune_images.side_effect = lambda: steps.append("prune") or ("falló", None)
+	failing.prune_images.side_effect = lambda: steps.append("prune") or ("falló", None, False)
 	dcb.manager = lambda host_id=None: failing
 
 	def sending(**kw):
@@ -4826,14 +4834,14 @@ def test_a_prune_runs_with_the_slow_client_and_says_when_it_ran_out_of_time():
 	host_registry.slow_client = lambda host_id: slow
 	try:
 		slow.images.prune.return_value = {"SpaceReclaimed": 1024}
-		message, details = owner.prune_images()
-		assert details is not None, message
+		message, details, cleaned = owner.prune_images()
+		assert details is not None and cleaned, message
 		slow.images.prune.assert_called_once_with(filters={'dangling': False})
 		owner.client.images.prune.assert_not_called()
 
 		slow.images.prune.side_effect = requests.exceptions.ReadTimeout(
 			"UnixHTTPConnectionPool(host='localhost', port=None): Read timed out. (read timeout=600)")
-		message, details = owner.prune_images()
+		message, details, cleaned = owner.prune_images()
 		minutes = str(host_registry.SLOW_TIMEOUT_SECONDS // 60)
 		assert details is None, message
 		assert message == i18n.get_text("error_prune_timeout", minutes, "docker image prune -a -f"), message
@@ -4845,7 +4853,7 @@ def test_a_prune_runs_with_the_slow_client_and_says_when_it_ran_out_of_time():
 		slow.images.prune.side_effect = docker.errors.APIError(
 			"409 Client Error: Conflict", response=response,
 			explanation="a prune operation is already running")
-		message, details = owner.prune_images()
+		message, details, cleaned = owner.prune_images()
 		assert details is None and message == i18n.get_text("error_prune_busy"), message
 	finally:
 		host_registry.slow_client = original_slow
@@ -5591,20 +5599,13 @@ def test_a_translation_keeps_the_markup_of_the_original():
 
 def test_the_cron_examples_survive_in_every_language():
 	"""
-	The specific thing the markup check found, pinned on its own: this string
-	is the only help the user gets on cron syntax, and an example without its
-	asterisks teaches the wrong format.
+	The specific thing the markup check found, pinned on its own: the
+	question that asks for the cron is the help the user gets on its syntax,
+	and an example without its asterisks teaches the wrong format.
 	"""
-	base = i18n.load_locale("es")["error_adding_schedule"]
-	expected = base.count("*")
-	assert expected >= 9, "el original ya no lleva ejemplos de cron"
 	for locale in _locale_names():
-		text = i18n.load_locale(locale)["error_adding_schedule"]
-		assert text.count("*") == expected, (
-			f"{locale}: el ejemplo de cron lleva {text.count('*')} asteriscos "
-			f"en vez de {expected}")
-		assert "<b>" not in text, (
-			f"{locale}: los asteriscos del cron se han vuelto <b> otra vez")
+		text = i18n.load_locale(locale)["schedule_ask_cron"]
+		assert "'0 0 * * *'" in text, f"{locale}: el ejemplo de cron ha perdido sus asteriscos"
 
 
 def _batch_stubs(results, extended=False, own=(), current=()):
@@ -5964,6 +5965,36 @@ def test_confirming_finds_a_container_recreated_since_the_list_was_sent():
 	finally:
 		(dcb.update_containers, dcb.find_container, dcb.find_container_id_on_host, dcb.update_available) = original
 		dcb.clear_update_data(7, 70)
+
+
+def test_confirming_does_not_update_another_container_that_shares_the_id_prefix():
+	"""
+	The list keeps five characters of each ID. With the listed container
+	recreated since —Watchtower, compose up—, another whose ID starts the
+	same was all the reference found, and confirming updated that one. It
+	counts only with the listed name: the listed one is looked for by it,
+	updated if it came back with another ID, and reported missing if not.
+	"""
+	ref = dcb.make_ref("h_local", "ff2e3")
+	other, plex = _container("c1015", "running"), _container("plex", "running")
+	other.id, plex.id = "ff2e3" + "1" * 59, "beef0" + "0" * 59
+	live = {ref: other, dcb.make_ref("h_local", "beef0"): plex}
+	batches = []
+	original = (dcb.update_containers, dcb.find_container, dcb.find_container_id_on_host, dcb.update_available)
+	dcb.update_containers = lambda targets, **kw: batches.append((targets, kw))
+	dcb.find_container = lambda r: (MagicMock(host_id="h_local"), live[r]) if r in live else (None, None)
+	dcb.update_available = lambda container, host_id: True
+	try:
+		for recreated, expected in ((False, ([], {"up_to_date": [], "missing": [("h_local", "plex")]})),
+									(True, ([(dcb.make_ref("h_local", "beef0"), "plex")], {"up_to_date": [], "missing": []}))):
+			batches.clear()
+			dcb.find_container_id_on_host = lambda host_id, name: "beef0" if recreated and name == "plex" else None
+			dcb.save_update_data(8, 80, [[ref, "plex"]], {ref})
+			callbacks.cb_updateSelected(_update_ctx("updateSelected", 8, 81, originalMessageId="80"))
+			assert batches == [expected], (recreated, batches)
+	finally:
+		(dcb.update_containers, dcb.find_container, dcb.find_container_id_on_host, dcb.update_available) = original
+		dcb.clear_update_data(8, 80)
 
 
 def test_an_update_list_that_expired_says_so():
@@ -6739,7 +6770,7 @@ def test_a_typed_exec_says_it_is_still_running_instead_of_holding_the_worker():
 	release = threading.Event()
 	sent = []
 	owner = MagicMock()
-	owner.execute_command = lambda **kw: release.wait(5) and "pong"
+	owner.execute_command = lambda **kw: release.wait(5) and ("pong", 0)
 	original = (dcb.manager_for, dcb.send_message, dcb.EXEC_WAIT_SECONDS)
 	dcb.manager_for = lambda ref: owner
 	dcb.send_message = lambda **kw: sent.append(kw.get("message", "")) or MagicMock()
@@ -6764,7 +6795,7 @@ def test_a_scheduled_exec_does_not_wait_for_the_command():
 	"""Run in the scheduler's thread, a long one made it skip the minutes after it."""
 	release = threading.Event()
 	owner = MagicMock()
-	owner.execute_command = lambda **kw: release.wait(5) and "ok"
+	owner.execute_command = lambda **kw: release.wait(5) and ("ok", 0)
 	original = (dcb.manager_for, dcb.send_message)
 	dcb.manager_for = lambda ref: owner
 	dcb.send_message = lambda **kw: MagicMock()
@@ -6784,12 +6815,171 @@ def test_long_exec_output_goes_as_a_file():
 	dcb.send_message = lambda **kw: sent.append(kw.get("message", "")) or MagicMock()
 	dcb.send_document = lambda **kw: documents.append(kw) or MagicMock()
 	try:
-		dcb._send_exec_result("h_local:abc12", "web", "cat big.log", "x" * 20000)
+		dcb._send_exec_result("h_local:abc12", "web", "cat big.log", ("x" * 20000, 0))
 		assert len(sent) == 1 and len(documents) == 1, (len(sent), len(documents))
 		dcb._send_exec_result("h_local:abc12", "web", "false", None)
 		assert i18n.get_text("error_executing_command_container", "false", "web") in sent[-1]
 	finally:
 		dcb.send_message, dcb.send_document = original
+
+
+def test_an_exec_set_to_failures_only_speaks_when_there_is_something_to_say():
+	"""
+	A check run every few minutes that prints nothing when all is well sent a
+	"ran correctly" each time. In that mode a clean, silent run says nothing;
+	a failure or any output still does, and a failure without output no
+	longer reads as "ran correctly".
+	"""
+	sent, documents = [], []
+	original = (dcb.send_message, dcb.send_document)
+	dcb.send_message = lambda **kw: sent.append(kw.get("message", "")) or MagicMock()
+	dcb.send_document = lambda **kw: documents.append(kw) or MagicMock()
+	ok = i18n.get_text("command_executed_without_output")
+	try:
+		for quiet in (("", 0), ("  \n", 0), ("", None)):
+			dcb._send_exec_result("h_local:abc12", "web", "check.sh", quiet, only_failures=True)
+		assert sent == [], sent
+
+		dcb._send_exec_result("h_local:abc12", "web", "check.sh", ("", 1), only_failures=True)
+		assert ok not in sent[-1] and i18n.get_text("exec_no_output") in sent[-1], sent[-1]
+		assert i18n.get_text("exec_exit_code", "1") in sent[-1], sent[-1]
+
+		dcb._send_exec_result("h_local:abc12", "web", "check.sh", ("disco al 95%", 0), only_failures=True)
+		assert "disco al 95%" in sent[-1] and i18n.get_text("exec_exit_code", "0") not in sent[-1], sent[-1]
+
+		dcb._send_exec_result("h_local:abc12", "web", "check.sh", None, only_failures=True)
+		assert i18n.get_text("error_executing_command_container", "check.sh", "web") in sent[-1]
+
+		# A typed /exec says how it ended, and a failure with its code.
+		sent.clear()
+		dcb._send_exec_result("h_local:abc12", "web", "true", ("", 0))
+		dcb._send_exec_result("h_local:abc12", "web", "grep x f", ("grep: f: No such file", 2))
+		assert ok in sent[0] and i18n.get_text("exec_exit_code", "0") not in sent[0], sent[0]
+		assert i18n.get_text("exec_exit_code", "2") in sent[1], sent[1]
+		assert documents == []
+	finally:
+		dcb.send_message, dcb.send_document = original
+
+
+def test_the_manager_hands_back_what_the_command_printed_and_how_it_ended():
+	"""The exit code was read only to spot a missing shell, then thrown away."""
+	manager = dcb.DockerManager("h_local")
+	manager.client = MagicMock()
+	container = manager.client.containers.get.return_value
+	container.exec_run.return_value = MagicMock(exit_code=3, output=b"")
+	assert manager.execute_command("abc", "web", "exit 3") == ("", 3)
+	container.exec_run.return_value = MagicMock(exit_code=0, output=b"caf\xe9")
+	assert manager.execute_command("abc", "web", "cat f") == ("caf\ufffd", 0)
+
+
+def test_a_scheduled_exec_hands_its_setting_to_the_result():
+	"""The scheduler passes the stored value; the result decides from it."""
+	results = []
+	owner = MagicMock()
+	owner.execute_command = lambda **kw: ("", 0)
+	original = (dcb.manager_for, dcb._send_exec_result)
+	dcb.manager_for = lambda ref: owner
+	dcb._send_exec_result = lambda *a, **kw: results.append(kw.get("only_failures"))
+	try:
+		for mode in (True, dcb.SHOW_OUTPUT_FAILURES, False):
+			dcb.execute_command("h_local:abc12", "db", "check.sh", mode, wait=False)
+		deadline = time.time() + 5
+		while len(results) < 2 and time.time() < deadline:
+			time.sleep(0.01)
+		time.sleep(0.1)
+		assert sorted(results) == [False, True], results
+	finally:
+		dcb.manager_for, dcb._send_exec_result = original
+
+
+def test_a_scheduled_prune_set_to_failures_only_speaks_when_it_removed_something():
+	"""A prune with nothing to remove is the usual case, and is not news."""
+	sent, documents = [], []
+	owner = MagicMock()
+	original = (dcb.send_message, dcb.send_document, dcb.delete_message)
+	dcb.send_message = lambda **kw: sent.append(kw.get("message", "")) or MagicMock(message_id=5)
+	dcb.send_document = lambda **kw: documents.append(kw) or MagicMock()
+	dcb.delete_message = lambda *a, **kw: None
+	try:
+		monitor = dcb.DockerScheduleMonitor()
+		owner.prune_images.return_value = ("nada", "{'ImagesDeleted': None}", False)
+		monitor._run_prune(owner, "images", dcb.SHOW_OUTPUT_FAILURES)
+		assert sent == [] and documents == [], (sent, documents)
+
+		owner.prune_images.return_value = ("1 GB", "{'ImagesDeleted': [...]}", True)
+		monitor._run_prune(owner, "images", dcb.SHOW_OUTPUT_FAILURES)
+		assert [d["caption"] for d in documents] == ["1 GB"], documents
+
+		owner.prune_images.return_value = ("falló", None, False)
+		monitor._run_prune(owner, "images", dcb.SHOW_OUTPUT_FAILURES)
+		assert sent[-1] == "falló", sent
+
+		# "Yes" still reports an empty one.
+		documents.clear()
+		owner.prune_images.return_value = ("nada", "{}", False)
+		monitor._run_prune(owner, "images", True)
+		assert len(documents) == 1, documents
+	finally:
+		dcb.send_message, dcb.send_document, dcb.delete_message = original
+
+
+def test_what_counts_as_a_prune_that_removed_something():
+	assert dcb._pruned_anything({"NetworksDeleted": ["old_net"]}) is True
+	assert dcb._pruned_anything({"ContainersDeleted": ["abc"], "SpaceReclaimed": 0}) is True
+	assert dcb._pruned_anything({"SpaceReclaimed": 1024}) is True
+	assert dcb._pruned_anything({"ImagesDeleted": None, "SpaceReclaimed": 0}) is False
+	assert dcb._pruned_anything({"VolumesDeleted": [], "SpaceReclaimed": 0}) is False
+	assert dcb._pruned_anything(None) is False
+
+
+def test_show_output_reads_the_same_everywhere():
+	"""
+	Each screen turned the stored value into yes or no on its own: a third
+	value would have read as "Yes" wherever one was missed. Tasks saved as
+	true or false, or without the field, keep meaning what they did.
+	"""
+	assert dcb.show_output_mode(True) is True
+	assert dcb.show_output_mode(False) is False
+	assert dcb.show_output_mode(None) is False
+	assert dcb.show_output_mode("failures") == dcb.SHOW_OUTPUT_FAILURES
+	failures = i18n.get_text("schedule_show_output_failures")
+	task = {"id": 3, "name": "check", "cron": "*/5 * * * *", "action": "exec", "container": "web",
+			"command": "check.sh", "show_output": "failures", "host": "h_local", "enabled": True}
+	_with_hosts([HOST_FIXTURE[0]], unreachable=())
+	sent = []
+	original = (dcb.send_message, dcb.schedule_manager.get_all_schedules, dcb.schedule_manager.get_schedule)
+	dcb.send_message = lambda **kw: sent.append(kw.get("message", "")) or MagicMock(message_id=1)
+	dcb.schedule_manager.get_all_schedules = lambda: [task]
+	dcb.schedule_manager.get_schedule = lambda _name: task
+	try:
+		assert failures in dcb._build_schedule_summary(task)
+		dcb.show_schedule_menu(1, 1)
+		dcb.show_schedule_edit_options(1, task["name"])
+		assert len(sent) == 2 and all(failures in text for text in sent), sent
+		assert not any(i18n.get_text("schedule_yes") + "</b>" in text for text in sent), sent
+	finally:
+		dcb.send_message, dcb.schedule_manager.get_all_schedules, dcb.schedule_manager.get_schedule = original
+		_restore_hosts()
+
+
+def test_the_three_show_output_answers_are_stored_and_nothing_else():
+	"""A button from an old message, or a forged one, stored nothing at all as `False`."""
+	task = {"id": 7, "name": "check", "cron": "@daily", "action": "exec", "container": "web",
+			"command": "check.sh", "show_output": True, "host": "h_local", "enabled": True}
+	stored, sent = [], []
+	original = (dcb.send_message, dcb.schedule_manager.get_schedule_by_id, dcb.schedule_manager.update_schedule)
+	dcb.send_message = lambda **kw: sent.append(kw.get("message", "")) or MagicMock(message_id=1)
+	dcb.schedule_manager.get_schedule_by_id = lambda _id: task
+	dcb.schedule_manager.update_schedule = lambda name, **kw: stored.append(kw)
+	base = {"call": MagicMock(id="q"), "chatId": 1, "messageId": 2, "userId": 1,
+			"comando": "x", "multiAction": None, "hostId": "h_local", "containerId": None}
+	try:
+		for value in ("yes", "no", "failures", "maybe"):
+			callbacks.cb_scheduleEditValue(callback_registry.Context(**base, field="show_output", scheduleId="7", value=value))
+		assert stored == [{"show_output": True}, {"show_output": False}, {"show_output": "failures"}], stored
+		assert sent[-1] == i18n.get_text("error_invalid_selection"), sent
+	finally:
+		dcb.send_message, dcb.schedule_manager.get_schedule_by_id, dcb.schedule_manager.update_schedule = original
 
 
 def test_only_the_daemons_own_refusal_means_the_shell_is_missing():
@@ -8176,13 +8366,14 @@ def test_a_repainted_info_says_the_versions_and_last_check_there_are_now():
 		_restore_hosts()
 
 
-def _press_with_the_name_not_cached(data, owner_for, named=None, message_id=9876, alerts=None, manager=None):
+def _press_with_the_name_not_cached(data, owner_for, named=None, message_id=9876, alerts=None, manager=None,
+									drawn_at=None):
 	"""
 	Presses `data` through the dispatcher on a message with no names saved,
 	`owner_for(ref)` standing in for manager_for and `named` for what the
 	host finds by name (or `manager` for the whole host). Returns what was
 	sent, what was deleted and which queries were answered; the alerts go
-	to `alerts`.
+	to `alerts`. The message was sent at `drawn_at`, by default just now.
 	"""
 	admin = int(str(dcb.TELEGRAM_ADMIN).split(",")[0])
 	sent, deleted, answers = [], [], []
@@ -8204,6 +8395,7 @@ def _press_with_the_name_not_cached(data, owner_for, named=None, message_id=9876
 	press = MagicMock()
 	press.data, press.id = data, "q1"
 	press.message.id, press.message.chat.id, press.message.chat.type = message_id, admin, "private"
+	press.message.date, press.message.edit_date = drawn_at or int(time.time()), None
 	press.from_user.id, press.from_user.username = admin, "test"
 	try:
 		dcb.button_controller(press)
@@ -8336,12 +8528,44 @@ def test_a_gone_container_is_not_found_again_by_its_id_prefix():
 		before = dcb.manager_for
 		dcb.manager_for = _owner_whose_lookup(ambiguous)
 		try:
-			assert dcb.name_by_reference(ref) == (None, None)
+			assert dcb.name_by_reference(ref, int(time.time())) == (None, None)
 		finally:
 			dcb.manager_for = before
 	finally:
 		dcb.logs = original
 		dcb.clear_update_data(admin, 9879)
+
+
+def test_a_button_with_no_name_does_not_act_on_a_container_created_after_it():
+	"""
+	A confirmation keeps no names: its button says the host and five
+	characters of the ID, and nothing else. With the container it meant
+	recreated since, another whose ID starts the same was what the prefix
+	found, and the delete landed on it. One created after the message cannot
+	be the button's, so the button's is gone; one already there when it was
+	sent still answers.
+	"""
+	from datetime import datetime, timezone
+	local = dcb.host_registry.local_host_id()
+	ref = dcb.make_ref(local, "ff2e3")
+	sent_at = int(time.time()) - 3600
+	for name, created, acts in (("c1015", sent_at + 60, False), ("plex", sent_at - 60, True)):
+		stamp = datetime.fromtimestamp(created, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.123456789Z")
+		found = types.SimpleNamespace(id="ff2e3" + "1" * 59, name=name, attrs={"Created": stamp})
+		removed = []
+
+		def owner_for(r):
+			return types.SimpleNamespace(
+				client=types.SimpleNamespace(containers=types.SimpleNamespace(get=lambda cid: found)),
+				delete=lambda container_id, container_name: removed.append(container_name) or "")
+		sent, deleted, answers = _press_with_the_name_not_cached(
+			f"delete|{ref}", owner_for, named=found, drawn_at=sent_at)
+		if acts:
+			assert removed == ["plex"], (name, removed, sent)
+		else:
+			assert removed == [] and "c1015" not in "".join(sent), (removed, sent)
+			assert sent and "ff2e3" in sent[-1], sent
+		assert answers == ["q1"], (name, answers)
 
 
 def test_a_known_name_on_a_host_that_does_not_answer_is_answered_once():

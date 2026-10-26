@@ -82,7 +82,7 @@ class ScheduleManager:
             store.write_document(self.full_path, {"schedules": self._cache})
     
     def add_schedule(self, name: str, cron: str, action: str, container: str = None,
-                     minutes: int = None, show_output: bool = False, command: str = None,
+                     minutes: int = None, show_output=False, command: str = None,
                      prune_type: str = None, host: str = None) -> bool:
         """Add a new schedule. Returns True if successful, False if rejected"""
         with self._lock:

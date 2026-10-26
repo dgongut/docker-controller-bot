@@ -647,6 +647,54 @@ def test_running_out_of_memory_is_told_apart():
 	assert announced == [(dcb.get_text("container_oom", "app"), None)], announced
 
 
+def test_running_out_of_memory_is_told_apart_when_oom_comes_after_the_stop():
+	"""
+	On a loaded machine Docker 29.4.3 sent the stop first, and the `oom`
+	tens of milliseconds later: it was announced as a 137 like any kill.
+	"""
+	monitor, announced = _monitor_with_logs("nada que ver")
+	clock = _Clock()
+	monitor._schedule = clock.schedule
+	monitor._handle_event(_event("die", exitCode="137"))
+	monitor._handle_event(_event("oom"))
+	assert announced == [(dcb.get_text("container_oom", "app"), None)], announced
+	clock.advance(monitor.OOM_WAIT_SECONDS)
+	assert len(announced) == 1 and monitor._oom == {}, (announced, monitor._oom)
+
+
+def test_a_kill_no_oom_explains_is_announced_as_a_failure_after_the_wait():
+	monitor, announced = _monitor_with_logs("última línea")
+	clock = _Clock()
+	monitor._schedule = clock.schedule
+	monitor._handle_event(_event("die", exitCode="137"))
+	assert announced == [], announced
+	clock.advance(monitor.OOM_WAIT_SECONDS)
+	assert announced == [(dcb.get_text("container_failed", "app", "137 (SIGKILL)"), "<pre>última línea</pre>")], announced
+
+
+def test_a_held_stop_goes_before_what_comes_after_it():
+	"""A restart policy starts it again in a tenth of a second: not before saying it stopped."""
+	monitor, announced = _monitor_with_logs()
+	clock = _Clock()
+	monitor._schedule = clock.schedule
+	monitor._handle_event(_event("die", exitCode="137"))
+	monitor._handle_event(_event("start"))
+	clock.advance(monitor.OOM_WAIT_SECONDS)
+	assert [message for message, _ in announced] == [
+		dcb.get_text("container_failed", "app", "137 (SIGKILL)"),
+		dcb.get_text("started_container", "app"),
+	], announced
+
+
+def test_only_a_kill_waits_for_an_oom():
+	monitor, announced = _monitor_with_logs()
+	clock = _Clock()
+	monitor._schedule = clock.schedule
+	monitor._handle_event(_event("die", exitCode="1"))
+	monitor._handle_event(_event("die", name="other", exitCode="0"))
+	assert len(announced) == 2 and clock.timers == [], (announced, clock.timers)
+
+
 def test_a_stop_that_was_asked_for_is_still_just_a_stop():
 	"""`docker stop`: kill with SIGTERM, kill with SIGKILL, stop, then die 137."""
 	monitor, announced = _monitor_with_logs("nada que ver")
