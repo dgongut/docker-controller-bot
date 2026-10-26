@@ -19,6 +19,7 @@ import uuid
 import migration
 import store
 import telemetry
+import unraid
 from config import *
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -45,7 +46,7 @@ from i18n import get_text, language
 from logger import debug, error, warning
 from message_queue import MessageQueue
 
-VERSION = "5.3.1"
+VERSION = "5.3.2"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -1563,6 +1564,13 @@ class DockerEventMonitor:
 		container_name = attributes.get('name', '')
 
 		container_id = actor.get('ID') or event.get('id')
+
+		# The bot's own doing, and nothing the user asked to hear about: the
+		# updater that recreates the bot, and the helper that tells Unraid
+		# about an update. The updater by name, which every version has given
+		# it; the helper by its label, which comes with each of its events.
+		if container_name == UPDATER_CONTAINER_NAME or unraid.is_helper(container_name, attributes):
+			return
 
 		if action == "kill":
 			# Never announced, but it is what tells a stop that was asked for
@@ -4660,6 +4668,8 @@ def _perform_container_update(plan, send_fn, hold_events):
 		outcome.old_version = plan.old_version
 		outcome.new_version = running_version(host_id, new_parent_container) if new_parent_container is not None else None
 		send_fn(update_result_text(host_id, container_name, outcome.old_version, outcome.new_version))
+		if new_parent_container is not None:
+			tell_unraid_updated(owner, new_parent_container)
 	else:
 		send_fn(f"{label}{result}")
 
@@ -4682,6 +4692,17 @@ def _perform_container_update(plan, send_fn, hold_events):
 	if ok:
 		_recreate_namespace_sharers(owner, plan.old_id, new_parent_container, send_fn, hold_events, plan.running_before)
 	return outcome
+
+
+def tell_unraid_updated(owner, container):
+	"""
+	Tells Unraid, when the host is one, that `container` was just updated:
+	its Docker page went on marking it "update ready" otherwise. See
+	unraid.py. In the background, so that nothing waits on it, and silent
+	whatever happens.
+	"""
+	threading.Thread(target=unraid.sync_after_update, args=(owner.client, owner.host_id, container, debug),
+					 name=f"unraid-{container.name}", daemon=True).start()
 
 
 def _parent_untouched(plan, new_parent_container):
@@ -9488,6 +9509,15 @@ def delete_updater():
 													previous, VERSION if previous else None))
 		except Exception as e:
 			error(f"Could not delete container {UPDATER_CONTAINER_NAME}. Error: [{e}]")
+		# What every other update does once it is through, and the bot that
+		# updated itself went down before it could.
+		try:
+			own_name = own_container_name()
+			if own_name:
+				owner = local_manager()
+				tell_unraid_updated(owner, owner.client.containers.get(own_name))
+		except Exception as e:
+			debug(f"Could not tell Unraid about my own update: {e}")
 
 def check_own_container():
 	"""

@@ -619,6 +619,29 @@ def _event(action, name="app", **attributes):
 			"Actor": {"ID": "f" * 64, "Attributes": dict(attributes, name=name)}}
 
 
+def test_the_bots_own_containers_are_never_announced():
+	"""
+	The updater that recreates the bot and the helper that tells Unraid about
+	an update are the bot's doing: their start, stop and creation say nothing
+	the user asked to hear, extended messages or not. A container of the
+	user's with the helper's label but not its name still is announced.
+	"""
+	import unraid
+
+	monitor, announced = _monitor_with_logs()
+	helper = {unraid.HELPER_LABEL: unraid.HELPER_KIND}
+	store.set("bot.extended_messages", True)
+	try:
+		for action in ("create", "start", "die", "destroy"):
+			monitor._handle_event(_event(action, name=dcb.UPDATER_CONTAINER_NAME, exitCode="0"))
+			monitor._handle_event(_event(action, name="dcb-unraid-0a1b2c3d", exitCode="0", **helper))
+		assert announced == [], announced
+		monitor._handle_event(_event("start", name="postgres", **helper))
+		assert announced == [(dcb.get_text("started_container", "postgres"), None)], announced
+	finally:
+		store.set("bot.extended_messages", False)
+
+
 def test_a_container_that_finishes_on_its_own_says_it_finished():
 	monitor, announced = _monitor_with_logs()
 	monitor._handle_event(_event("die", exitCode="0"))

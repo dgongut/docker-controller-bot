@@ -7599,3 +7599,53 @@ def test_a_known_name_on_a_host_that_does_not_answer_is_answered_once():
 			assert answers == ["q1"], (data, answers)
 	finally:
 		dcb.clear_update_data(admin, 9880)
+
+
+def test_unraid_is_told_about_an_update_once_it_went_through():
+	"""
+	Only a container that was actually updated, and the bot itself when it
+	comes back from updating: it goes down before it could say so.
+	"""
+	told = []
+
+	class Owner:
+		host_id = "h_local"
+
+		def __init__(self, works):
+			self.works = works
+			# Outside any Compose project, so there are no dependents to restart.
+			self.client = MagicMock()
+			self.client.containers.get.return_value.labels = {}
+
+		def update(self, **kw):
+			return i18n.get_text("updated_container" if self.works else "error_updating_container", "nginx")
+
+	original = dcb.manager, dcb.tell_unraid_updated
+	dcb.tell_unraid_updated = lambda owner, container: told.append((owner.host_id, container))
+	try:
+		ref = dcb.make_ref("h_local", "abcde")
+		dcb.manager = lambda host_id=None: Owner(True)
+		dcb.perform_container_update(ref, "nginx", send_fn=lambda msg: None)
+		assert len(told) == 1, told
+		told.clear()
+		dcb.manager = lambda host_id=None: Owner(False)
+		dcb.perform_container_update(ref, "nginx", send_fn=lambda msg: None)
+		assert told == [], told
+	finally:
+		dcb.manager, dcb.tell_unraid_updated = original
+
+	local = MagicMock()
+	local.host_id = "h_local"
+	stubs = {"get_container_id_by_name": lambda name: "f" * 64, "local_manager": lambda: local,
+			 "own_container_name": lambda: "docker-controller-bot", "stop_container": lambda container: None,
+			 "send_message": lambda **kw: None, "tell_unraid_updated": lambda owner, container: told.append((owner, container))}
+	saved = {name: getattr(dcb, name) for name in stubs}
+	for name, stub in stubs.items():
+		setattr(dcb, name, stub)
+	try:
+		dcb.delete_updater()
+		assert told == [(local, local.client.containers.get.return_value)], told
+		assert local.client.containers.get.call_args.args == ("docker-controller-bot",)
+	finally:
+		for name, value in saved.items():
+			setattr(dcb, name, value)
