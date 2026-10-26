@@ -18,6 +18,8 @@ from unittest.mock import MagicMock
 warnings.filterwarnings("ignore")
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# The bot's code, which runs from here: in the image it is all of /app.
+SRC = os.path.join(REPO, "src")
 DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 
 # Variables the bot refuses to start without. The values only have to be
@@ -63,8 +65,8 @@ def temp_storage(env=None, legacy=False, seed_files=None):
 	can be exercised. `seed_files` writes files into it first, which is how a
 	pre-existing 4.x install is simulated.
 	"""
-	if REPO not in sys.path:
-		sys.path.insert(0, REPO)
+	if SRC not in sys.path:
+		sys.path.insert(0, SRC)
 	import store
 
 	root = tempfile.mkdtemp()
@@ -146,7 +148,7 @@ def load_bot(env=None, real_docker=False):
 
 
 def _import(name):
-	spec = importlib.util.spec_from_file_location(name, os.path.join(REPO, f"{name}.py"))
+	spec = importlib.util.spec_from_file_location(name, os.path.join(SRC, f"{name}.py"))
 	module = importlib.util.module_from_spec(spec)
 	sys.modules[name] = module
 	spec.loader.exec_module(module)

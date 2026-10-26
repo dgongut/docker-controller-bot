@@ -740,41 +740,50 @@ docker-controller-bot/
     ├── LICENSE
     ├── requirements.txt
     ├── README.md
-    ├── Dockerfile_local
-    ├── docker-compose.debug.yaml
-    ├── docker-controller-bot.py   # entry point: imports and starts
-    ├── core.py                    # the core: DockerManager, monitors, keyboards, UI
-    ├── commands.py                # one `cmd_*` per command
-    ├── callbacks.py               # one `cb_*` per button
-    ├── callback_registry.py       # the `@callback` decorator and the parsing
-    ├── host_registry.py           # the Docker hosts and their client cache
-    ├── store.py                   # settings.json, state and caches
-    ├── migration.py               # start-up migrations (4.x -> 5.0)
-    ├── config.py                  # start-up variables and constants
-    ├── i18n.py                    # locale loading and `get_text`
-    ├── own_container.py           # works out which container it is, unaided
-    ├── docker_update.py
-    ├── docker_compose_manager.py
-    ├── compose_generator.py
-    ├── port_manager.py
-    ├── schedule_manager.py
-    ├── message_queue.py
-    ├── logger.py
-    ├── tests
-    │   ├── run_all.py
-    │   └── ...
-    └── locale
-        ├── en.json
-        ├── es.json
-        ├── de.json
-        ├── ru.json
-        ├── gl.json
-        ├── nl.json
-        ├── cat.json
-        └── it.json
+    ├── Dockerfile
+    ├── docker-compose.yaml
+    ├── dev
+    │   ├── Dockerfile_local
+    │   ├── Dockerfile_debug
+    │   └── docker-compose.debug.yaml
+    ├── src
+    │   ├── docker-controller-bot.py   # entry point: imports and starts
+    │   ├── core.py                    # the core: DockerManager, monitors, keyboards, UI
+    │   ├── commands.py                # one `cmd_*` per command
+    │   ├── callbacks.py               # one `cb_*` per button
+    │   ├── callback_registry.py       # the `@callback` decorator and the parsing
+    │   ├── host_registry.py           # the Docker hosts and their client cache
+    │   ├── store.py                   # settings.json, state and caches
+    │   ├── migration.py               # start-up migrations (4.x -> 5.0)
+    │   ├── config.py                  # start-up variables and constants
+    │   ├── i18n.py                    # locale loading and `get_text`
+    │   ├── own_container.py           # works out which container it is, unaided
+    │   ├── unraid.py                  # tells Unraid what the bot updated
+    │   ├── docker_update.py
+    │   ├── docker_compose_manager.py
+    │   ├── compose_generator.py
+    │   ├── container_listing.py
+    │   ├── formatting.py
+    │   ├── port_manager.py
+    │   ├── schedule_manager.py
+    │   ├── schedules.py
+    │   ├── message_queue.py
+    │   ├── logger.py
+    │   └── locale
+    │       ├── en.json
+    │       ├── es.json
+    │       ├── de.json
+    │       ├── ru.json
+    │       ├── gl.json
+    │       ├── nl.json
+    │       ├── cat.json
+    │       └── it.json
+    └── tests
+        ├── run_all.py
+        └── ...
 ```
 
-To bring it up, run in that path: `docker compose -f docker-compose.debug.yaml up  -d --build --force-recreate`
+To bring it up, run in that path: `docker compose -f dev/docker-compose.debug.yaml up  -d --build --force-recreate`
 To stop and remove it: `docker compose down --rmi`
 
 To try out new changes, just save. Changes are reloaded on the fly.

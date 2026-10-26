@@ -17,7 +17,7 @@ import sys
 import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.dirname(HERE)
+SRC = os.path.join(os.path.dirname(HERE), "src")
 
 # test_store and test_migration expect a clean import; test_bot loads the bot
 # module, which is global state, so it goes last.
@@ -39,7 +39,7 @@ def load(name):
 
 
 def run(selector=None, modules=MODULES):
-	sys.path.insert(0, REPO)
+	sys.path.insert(0, SRC)
 	sys.path.insert(0, HERE)
 	# The tests chdir into temporary directories; come back afterwards.
 	original_cwd = os.getcwd()

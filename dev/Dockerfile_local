@@ -5,17 +5,16 @@ ENV TZ=UTC \
 
 WORKDIR /app
 
-# Install runtime dependencies and debugger
-RUN apk add --no-cache python3 py3-pip tzdata py3-paramiko openssh-client && \
-    export PIP_BREAK_SYSTEM_PACKAGES=1 && \
-    pip3 install --no-cache-dir debugpy
+# Install runtime dependencies and development tools
+RUN apk add --no-cache python3 py3-pip tzdata py3-paramiko openssh-client
 
-COPY requirements.txt docker-controller-bot.py core.py commands.py callbacks.py config.py store.py migration.py callback_registry.py host_registry.py container_listing.py i18n.py docker_update.py docker_compose_manager.py compose_generator.py formatting.py own_container.py schedule_manager.py schedules.py unraid.py port_manager.py logger.py message_queue.py /app/
-COPY locale /app/locale
+COPY requirements.txt /app/
+COPY src/ /app/
 
-# Install application dependencies
+# Install application and development dependencies
 RUN export PIP_BREAK_SYSTEM_PACKAGES=1 && \
-    pip3 install --no-cache-dir -Ur /app/requirements.txt
+    pip3 install --no-cache-dir -Ur /app/requirements.txt && \
+    pip3 install --no-cache-dir debugpy watchdog[watchmedo]
 
 # A remote ssh:// host whose link dies has to fail, not hang. The bot puts
 # its own timeout on every read from the ssh pipe; these end the connection
@@ -32,4 +31,10 @@ RUN mkdir -p /etc/ssh/ssh_config.d && \
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD python3 -c "import os, sys, time; sys.exit(0 if time.time() - os.path.getmtime('/tmp/dcb-heartbeat') < 120 else 1)" || exit 1
 
-CMD ["python3", "docker-controller-bot.py"]
+# Use watchdog for file monitoring instead of nodemon. The locale directory is
+# watched too because i18n caches each file on first read, so a translation
+# edited while running would otherwise keep falling back to English until the
+# next restart. Neither directory is watched recursively: /app/config and
+# /app/schedule hold the state the bot itself writes, and restarting on those
+# would loop.
+ENTRYPOINT ["watchmedo", "auto-restart", "-d", "/app", "-d", "/app/locale", "-p", "*.py;*.json", "--", "python3", "docker-controller-bot.py"]

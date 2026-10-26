@@ -38,8 +38,8 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import harness
 
-if harness.REPO not in sys.path:
-	sys.path.insert(0, harness.REPO)
+if harness.SRC not in sys.path:
+	sys.path.insert(0, harness.SRC)
 
 import docker
 import docker.errors

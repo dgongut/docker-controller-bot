@@ -28,3 +28,7 @@
 LICENSE
 README.md
 tests
+# Where the debug compose mounts the bot's data, inside the code it mounts
+src/config
+src/schedule
+src/cache

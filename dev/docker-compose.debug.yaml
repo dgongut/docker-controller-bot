@@ -3,8 +3,8 @@ services:
     container_name: dockercontrollerbot-debug
     image: dockercontrollerbot:dev
     build:
-      context: .
-      dockerfile: ./Dockerfile_debug
+      context: ..
+      dockerfile: dev/Dockerfile_debug
     command: ["python", "-m", "debugpy", "--wait-for-client", "--listen", "0.0.0.0:5678", "/app/docker-controller-bot.py"]
     ports:
       # Solo en este equipo: debugpy no pide contraseña y el contenedor tiene el
@@ -12,7 +12,10 @@ services:
       # 0.0.0.0 de arriba es la interfaz dentro del contenedor y tiene que quedarse.
       - "127.0.0.1:5678:5678"
     env_file:
-        - .env
+        - ../.env
     volumes:
         - /var/run/docker.sock:/var/run/docker.sock # NO CAMBIAR
-        - ./:/app # CAMBIAR LA PARTE IZQUIERDA
+        # El código, y aparte los datos del bot, que siguen en la raíz del repositorio
+        - ../src:/app # CAMBIAR LA PARTE IZQUIERDA
+        - ../config:/app/config
+        - ../schedule:/app/schedule

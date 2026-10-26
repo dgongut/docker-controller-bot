@@ -340,7 +340,7 @@ def test_answering_the_mute_prompt_goes_through_the_registry():
 	reached it: the static check did.
 	"""
 	assert "/mute" in dcb.COMMAND_ACTIONS
-	source = io.open(os.path.join(harness.REPO, "core.py"), encoding="utf-8").read()
+	source = io.open(os.path.join(harness.SRC, "core.py"), encoding="utf-8").read()
 	assert "cmd_mute(" not in source, "el núcleo no debe llamar a un comando por su nombre"
 
 
@@ -364,7 +364,7 @@ def test_mute_asks_for_its_argument_when_pressed_as_a_button():
 
 def _registered_commands():
 	"""The command names the Telegram handler is subscribed to."""
-	path = os.path.join(harness.REPO, "core.py")
+	path = os.path.join(harness.SRC, "core.py")
 	line = [l for l in io.open(path, encoding="utf-8")
 			if l.startswith("@bot.message_handler(commands=")][0]
 	return set(re.findall(r'"([a-z]+)"', line))
@@ -1285,7 +1285,7 @@ def test_schedules_are_written_atomically():
 	"""
 	import ast
 
-	source = io.open(os.path.join(harness.REPO, "schedule_manager.py"),
+	source = io.open(os.path.join(harness.SRC, "schedule_manager.py"),
 						encoding="utf-8").read()
 	tree = ast.parse(source)
 	writers = [n for n in ast.walk(tree)
@@ -3165,7 +3165,7 @@ def test_two_listings_at_once_both_see_a_healthy_host():
 
 def test_ssh_hosts_are_bounded_in_every_image():
 	"""docker-py reads the ssh pipe with no timeout; ssh's own keepalive is the only bound."""
-	for name in ("Dockerfile", "Dockerfile_debug", "Dockerfile_local"):
+	for name in ("Dockerfile", "dev/Dockerfile_debug", "dev/Dockerfile_local"):
 		with open(os.path.join(harness.REPO, name), encoding="utf-8") as f:
 			text = f.read()
 		for option in ("BatchMode yes", "ConnectTimeout", "ServerAliveInterval", "ServerAliveCountMax"):
@@ -4325,7 +4325,7 @@ def test_nothing_answers_a_callback_without_the_guard():
 	abort a press the next time the network hiccups.
 	"""
 	for filename in ("core.py", "callbacks.py", "commands.py"):
-		source = io.open(os.path.join(harness.REPO, filename), encoding="utf-8").read()
+		source = io.open(os.path.join(harness.SRC, filename), encoding="utf-8").read()
 		for line_number, line in enumerate(source.split("\n"), start=1):
 			if "answer_callback_query(" in line and "def " not in line:
 				assert "answer_callback_quietly" in line or "bot.answer_callback_query(callback_id" in line, \
@@ -5450,7 +5450,7 @@ def test_every_question_answered_by_typing_goes_through_typed_prompt():
 	typed = ("schedule_ask_name", "schedule_ask_cron", "schedule_ask_minutes",
 			"schedule_ask_command", "prompt_enter_command", "ports_ask_port")
 	for filename in ("core.py", "callbacks.py", "schedules.py"):
-		source = io.open(os.path.join(harness.REPO, filename), encoding="utf-8").read()
+		source = io.open(os.path.join(harness.SRC, filename), encoding="utf-8").read()
 		for key in typed:
 			assert not re.search(r"get_text\(\s*['\"]" + key + r"['\"]", source), (filename, key)
 

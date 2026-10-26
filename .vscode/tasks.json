@@ -7,7 +7,7 @@
 			"platform": "python",
 			"dockerBuild": {
 				"tag": "dockercontrollerbot:dev",
-				"dockerfile": "${workspaceFolder}/Dockerfile_debug",
+				"dockerfile": "${workspaceFolder}/dev/Dockerfile_debug",
 				"context": "${workspaceFolder}"
 			}
 		},
@@ -17,7 +17,7 @@
 			"dependsOn": [
 				"docker-build"
 			],
-			  "command": "docker compose  --env-file .env -f docker-compose.debug.yaml up  -d --remove-orphans --force-recreate"
+			  "command": "docker compose  --env-file .env -f dev/docker-compose.debug.yaml up  -d --remove-orphans --force-recreate"
 		}
 	]
 }

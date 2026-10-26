@@ -16,8 +16,8 @@ from collections import defaultdict
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import harness
 
-if harness.REPO not in sys.path:
-	sys.path.insert(0, harness.REPO)
+if harness.SRC not in sys.path:
+	sys.path.insert(0, harness.SRC)
 
 import docker.errors
 import docker_update
@@ -571,7 +571,7 @@ def test_nothing_stops_a_container_behind_the_helpers_back():
 	import re
 	offenders = []
 	for name in ("core.py", "docker_update.py", "docker_compose_manager.py", "callbacks.py"):
-		with open(os.path.join(harness.REPO, name), encoding="utf-8") as f:
+		with open(os.path.join(harness.SRC, name), encoding="utf-8") as f:
 			for number, line in enumerate(f, 1):
 				if re.search(r"\bcontainer\.stop\(", line) and "def stop_container" not in line:
 					offenders.append(f"{name}:{number}: {line.strip()}")

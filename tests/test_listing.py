@@ -22,8 +22,8 @@ from unittest.mock import MagicMock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import harness
 
-if harness.REPO not in sys.path:
-	sys.path.insert(0, harness.REPO)
+if harness.SRC not in sys.path:
+	sys.path.insert(0, harness.SRC)
 
 import docker.errors
 from docker.models.containers import Container, ContainerCollection
