@@ -6407,7 +6407,7 @@ def test_tapping_in_info_goes_round_the_three_and_shows_it_in_place():
 			tap()
 			seen.append(store.container_update_mode("h_local", "plex"))
 		assert seen == ["auto", "ignore", None], seen
-		assert harness.keyboard_callbacks(repainted[-1]) == [f"infoSetUpdates|a|{ref}", "cerrar"]
+		assert harness.keyboard_callbacks(repainted[-1]) == [f"infoSetUpdates|a|{ref}", f"infoSetNotifications|p|{ref}", "cerrar"]
 		assert answered[-1] == (None, False)
 		# The same button pressed twice before the repaint lands once.
 		callbacks.cb_infoSetUpdates(callback_registry.Context(
@@ -7220,11 +7220,12 @@ def test_a_host_paused_since_the_picker_is_not_asked_for_its_list():
 	_with_hosts(HOST_FIXTURE, unreachable=())
 	shown, listed = [], []
 	original = (dcb.show_settings_containers, dcb.show_settings_containers_list)
-	dcb.show_settings_containers = lambda chat_id, message_id: shown.append("picker")
+	dcb.show_settings_containers = lambda chat_id, message_id, kind="updates": shown.append("picker")
 	dcb.show_settings_containers_list = lambda *a, **kw: listed.append(a)
 	try:
 		dcb.host_registry.set_paused("h_nas", True)
-		callbacks.cb_ctrHost(callback_registry.Context(call=MagicMock(id="q"), chatId=1, messageId=2, value="h_nas"))
+		callbacks.cb_ctrHost(callback_registry.Context(call=MagicMock(id="q"), chatId=1, messageId=2,
+													   field="updates", value="h_nas"))
 		assert shown == ["picker"] and listed == []
 	finally:
 		dcb.show_settings_containers, dcb.show_settings_containers_list = original
@@ -7278,7 +7279,7 @@ def test_an_event_monitor_moved_to_another_url_starts_from_now_there():
 	asked = []
 
 	class Client:
-		def events(self, decode=True, since=None):
+		def events(self, decode=True, since=None, filters=None):
 			asked.append(since)
 			return iter(())
 	original = (dcb.host_registry.client, dcb._keep_alive)

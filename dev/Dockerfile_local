@@ -14,7 +14,8 @@ COPY src/ /app/
 # Install application and development dependencies
 RUN export PIP_BREAK_SYSTEM_PACKAGES=1 && \
     pip3 install --no-cache-dir -Ur /app/requirements.txt && \
-    pip3 install --no-cache-dir debugpy watchdog[watchmedo]
+    pip3 install --no-cache-dir debugpy watchdog[watchmedo] && \
+    chmod +x /app/dcb_mute.py && ln -s /app/dcb_mute.py /usr/local/bin/dcb-mute
 
 # A remote ssh:// host whose link dies has to fail, not hang. The bot puts
 # its own timeout on every read from the ssh pipe; these end the connection

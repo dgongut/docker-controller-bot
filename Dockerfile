@@ -3,7 +3,7 @@ ARG BASE_IMAGE=alpine:3.24.3
 FROM ${BASE_IMAGE}
 ARG BASE_IMAGE
 
-ARG VERSION=5.3.2
+ARG VERSION=5.4.0
 # The sha256 of the release's source zip, to build only what was released:
 #   --build-arg APP_SHA256=$(curl -fsSL https://github.com/dgongut/docker-controller-bot/archive/refs/tags/v<version>.zip | sha256sum | cut -d' ' -f1)
 # A tag can be moved; with this a moved one fails the build instead of
@@ -36,6 +36,7 @@ RUN apk add --no-cache python3 py3-pip tzdata curl unzip py3-paramiko openssh-cl
     unzip -q /tmp/app.zip -d /tmp && \
     mv /tmp/docker-controller-bot-${VERSION}/src/* /app && \
     mv /tmp/docker-controller-bot-${VERSION}/requirements.txt /app && \
+    chmod +x /app/dcb_mute.py && ln -s /app/dcb_mute.py /usr/local/bin/dcb-mute && \
     rm -rf /tmp/app.zip /tmp/docker-controller-bot-${VERSION}/ && \
     apk del --no-cache curl unzip && \
     export PIP_BREAK_SYSTEM_PACKAGES=1 && \

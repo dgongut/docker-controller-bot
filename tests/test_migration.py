@@ -146,36 +146,24 @@ def test_the_4_x_pickle_cache_is_discarded():
 	shutil.rmtree(root, ignore_errors=True)
 
 
-def test_an_active_mute_is_carried_over():
+def test_the_4x_mute_file_is_left_for_the_bot():
 	"""
-	Someone who silences the bot for six hours and updates it meanwhile would
-	otherwise get every notification back at once, with nothing to explain why.
+	The bot applies .muted_until itself, at startup and while it runs, so one
+	written with the bot stopped follows the same rules as any other: the
+	migration does not consume it first with rules of its own.
 	"""
-	expires = time.time() + 3600
+	expires = str(time.time() + 3600)
 	store_, root = harness.temp_storage(legacy=True, seed_files={
 		"schedules.json": '{"schedules": []}',
-		".muted_until": str(expires),
+		".muted_until": expires,
 	})
 	migration.run()
 
 	assert store_.root() == store_.LEGACY_ROOT
-	assert abs(float(store_.state_get("mute_until")) - expires) < 1
-	assert not os.path.exists(os.path.join(store_.LEGACY_ROOT, ".muted_until"))
-
-	migration.run()  # idempotente
-	assert abs(float(store_.state_get("mute_until")) - expires) < 1
+	with open(os.path.join(store_.LEGACY_ROOT, ".muted_until"), encoding="utf-8") as handle:
+		assert handle.read() == expires
+	assert not store_.state_get("mute_until")
 	shutil.rmtree(root, ignore_errors=True)
-
-
-def test_an_expired_or_absent_mute_is_dropped():
-	for value in (str(time.time() - 3600), "0", "not-a-number"):
-		store_, root = harness.temp_storage(legacy=True, seed_files={
-			"schedules.json": '{"schedules": []}',
-			".muted_until": value,
-		})
-		migration.run()
-		assert store_.state_get("mute_until") == 0, f"con .muted_until={value!r}"
-		shutil.rmtree(root, ignore_errors=True)
 
 def test_a_mute_task_is_not_pinned_to_a_host():
 	"""

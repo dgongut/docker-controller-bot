@@ -192,17 +192,18 @@ From `/schedule` you can create tasks that run on a cron schedule.
 <details>
 <summary>🔕 Mute the bot from a script</summary>
 
-As in 4.x, a script can mute the bot without going through Telegram by writing the epoch second the mute ends at into `/app/config/.muted_until`:
+A script can mute the bot without going through Telegram, for instance while it stops containers to back them up:
 
 ```sh
-docker exec docker-controller-bot sh -c 'echo $(( $(date +%s) + 3600 )) > /app/config/.muted_until'   # mute for 1 hour
-docker exec docker-controller-bot sh -c 'echo 0 > /app/config/.muted_until'                           # unmute
+docker exec docker-controller-bot dcb-mute 60   # mute for 60 minutes
+docker exec docker-controller-bot dcb-mute 0    # unmute
 ```
 
-- The bot applies it within a couple of seconds and deletes the file. It is rounded up to the minute.
+- It waits for the bot to apply it, a couple of seconds, and exits non-zero if it has not.
 - The latest change wins, from the script or from `/mute`, longer or shorter.
 - Same limit as `/mute`.
-- If your install still uses the 4.x `/app/schedule` volume, the file goes there.
+- If what you want is for the containers your backup stops to keep quiet, without silencing everything else, set them to "⚠️ Problems only": see *"What each container tells you about"*.
+- As in 4.x, you can also write by hand into `.muted_until`, inside the data volume (`/app/config`, or `/app/schedule` if your install still uses the 4.x one), the epoch second the mute ends at, or `0` to unmute: `sh -c 'echo $(( $(date +%s) + 3600 )) > /app/config/.muted_until'`. The bot applies it rounded up to the minute and deletes it, also when it finds it at startup.
 
 </details>
 
@@ -495,6 +496,20 @@ See the full example in the FAQ: *"I've seen that you can add labels…"*.
 
 </details>
 
+<details>
+<summary>🔔 What each container tells you about</summary>
+
+By default the bot tells you everything that happens to a container: when it starts, when it stops, when it fails. For each one you can choose less:
+
+- **⚠️ Problems only:** leaves out starts, stops that were asked for (a `docker stop`, the bot, a task, a backup script) and processes that finish fine, and still tells you about what goes wrong: a crash with a code other than 0, running out of memory, a failing healthcheck and its recovery, and restart loops.
+- **🔕 None:** nothing about that container.
+
+It is chosen in a container's `/info`, with the **🤖 - Notifications** button, or for many at once in `/settings` → **🔔 Notifications per container**. It is kept like the update setting, and can also go in the compose with the `DCB-Notifications=problems` or `DCB-Notifications=none` label, which wins over what is chosen in the bot.
+
+What you ask for from the bot (start, stop, restart) is still confirmed. And it costs nothing: the bot decides with the label that already comes in every Docker event and the settings it keeps in memory, without asking Docker anything else.
+
+</details>
+
 ## 📊 Anonymous statistics
 
 Since 5.0.0 the bot sends a few anonymous figures once a day, to know how many people use it, on how many hosts and which features are used most. That way I know where to put the effort. The statistics are public: [stats.dgongut.com/docker-controller-bot](https://stats.dgongut.com/docker-controller-bot).
@@ -556,11 +571,12 @@ Nor is anything sent when the configuration is not on a volume, because without 
 <details>
 <summary>🛠️ I've seen that you can add labels to control how the bot interacts with certain containers, how do I do that?</summary>
 
-That's right, there are two labels you can add to containers to control how the bot interacts with them:
+That's right, there are three labels you can add to containers to control how the bot interacts with them:
 - `DCB-Ignore-Check-Updates`
 - `DCB-Auto-Update`
+- `DCB-Notifications=problems` or `DCB-Notifications=none`, to be told only about problems, or nothing
 
-The same can be chosen from the bot itself, without touching the compose: in each container's `/info`, or in `/settings` → Updates → 📦 Per container. If a container has the label, the label wins.
+The same can be chosen from the bot itself, without touching the compose: in each container's `/info`, in `/settings` → Updates → 📦 Per container, and in `/settings` → 🔔 Notifications per container. If a container has the label, the label wins.
 
 To add them to a container, simply edit your `docker-compose.yml` file and include them under the `labels` key.
 Here's an example using **Home Assistant**:
@@ -762,7 +778,8 @@ docker-controller-bot/
     ├── dev
     │   ├── Dockerfile_local
     │   ├── Dockerfile_debug
-    │   └── docker-compose.debug.yaml
+    │   ├── docker-compose.debug.yaml
+    │   └── bench_events.py            # what the event monitor costs, against a real Docker
     ├── src
     │   ├── docker-controller-bot.py   # entry point: imports and starts
     │   ├── core.py                    # the core: DockerManager, monitors, keyboards, UI
@@ -776,6 +793,7 @@ docker-controller-bot/
     │   ├── i18n.py                    # locale loading and `get_text`
     │   ├── own_container.py           # works out which container it is, unaided
     │   ├── unraid.py                  # tells Unraid what the bot updated
+    │   ├── dcb_mute.py                # `dcb-mute`: mute from a script
     │   ├── docker_update.py
     │   ├── docker_compose_manager.py
     │   ├── compose_generator.py

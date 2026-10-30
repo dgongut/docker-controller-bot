@@ -13,7 +13,6 @@ skipped outright, and every other step is idempotent.
 import json
 import os
 import shutil
-import time
 import uuid
 from collections import namedtuple
 
@@ -24,9 +23,6 @@ from logger import debug, error, warning
 # Directory 4.x wrote its pickled update cache into, relative to the working
 # directory. It was never part of a mapped volume.
 LEGACY_CACHE_DIR = "./cache/"
-
-# File 4.x kept the mute expiry in, inside the schedules volume.
-LEGACY_MUTE_FILE = ".muted_until"
 
 LOCAL_SOCKET_URL = "unix:///var/run/docker.sock"
 
@@ -65,7 +61,6 @@ def run():
 	imported = _present_env() if seeded else []
 	ignored = [] if seeded else _overridden_env()
 	_warn_deprecated_env(seeded)
-	_migrate_mute_file()
 	_migrate_schedules(host_id)
 	_discard_legacy_cache()
 	ask_for_language = seeded and not upgrading and not os.environ.get("LANGUAGE")
@@ -181,39 +176,6 @@ def _warn_deprecated_env(seeded):
 		f"These variables are no longer read and can be removed from the compose: {', '.join(present)}. "
 		f"Their values are now managed with /settings."
 	)
-
-
-def _migrate_mute_file():
-	"""
-	Carries an active mute over from the 4.x file into the state document.
-
-	Unlike the update cache this is worth migrating: someone who silences the
-	bot for six hours and updates it in the meantime would otherwise get every
-	notification back immediately, with nothing to explain why. An expired or
-	absent mute just removes the file.
-	"""
-	legacy_path = os.path.join(store.root(), LEGACY_MUTE_FILE)
-	if not os.path.isfile(legacy_path):
-		return
-
-	mute_until = 0
-	try:
-		with open(legacy_path, "r", encoding="utf-8") as handle:
-			mute_until = float(handle.readline().strip() or 0)
-	except (OSError, ValueError) as e:
-		warning(f"Could not read the old mute file {legacy_path}: {e}")
-
-	# Only carry it over when it is still in the future, and never on top of a
-	# mute the new state file already holds.
-	if mute_until > time.time() and not store.state_get("mute_until"):
-		store.state_set("mute_until", mute_until)
-		remaining = int((mute_until - time.time()) / 60)
-		debug(f"Carried the active mute over from {LEGACY_MUTE_FILE} ({remaining} minutes left)")
-
-	try:
-		os.remove(legacy_path)
-	except OSError as e:
-		warning(f"Could not remove the old mute file {legacy_path}: {e}")
 
 
 def _migrate_schedules(local_host_id):

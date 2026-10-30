@@ -5,8 +5,11 @@ A script runs `docker exec <bot> sh -c "echo <epoch> > /app/config/.muted_until"
 while the bot is up; each pass of the watcher applies the file and deletes it.
 """
 
+import contextlib
+import io
 import os
 import sys
+import threading
 import time
 from unittest.mock import MagicMock
 
@@ -14,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import harness
 
 dcb, store, _root = harness.load_bot()
+import dcb_mute  # noqa: E402  (after the harness, which puts src/ on the path)
 
 
 def _write(content, age=5):
@@ -107,3 +111,66 @@ def test_an_absurd_time_is_capped_like_mute():
 		dcb.check_external_mute()
 		assert dcb.is_muted()
 		assert dcb._mute_until() - time.time() <= dcb.MUTE_MAX_MINUTES * 60
+
+
+@contextlib.contextmanager
+def _watched():
+	"""The bot's watcher running, without the settle time, while dcb-mute waits."""
+	settle = dcb.EXTERNAL_MUTE_SETTLE_SECONDS
+	dcb.EXTERNAL_MUTE_SETTLE_SECONDS = 0
+	stop = threading.Event()
+
+	def watch():
+		while not stop.is_set():
+			dcb.check_external_mute()
+			time.sleep(0.05)
+
+	thread = threading.Thread(target=watch, daemon=True)
+	thread.start()
+	try:
+		yield
+	finally:
+		stop.set()
+		thread.join()
+		dcb.EXTERNAL_MUTE_SETTLE_SECONDS = settle
+
+
+def _dcb_mute(*argv):
+	with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+		return dcb_mute.main(list(argv))
+
+
+def test_dcb_mute_mutes_through_the_bot():
+	with _Quiet(), _watched():
+		assert _dcb_mute("30") == 0
+		assert dcb.is_muted()
+		assert 29 * 60 <= dcb._mute_until() - time.time() <= 30 * 60
+		assert not os.path.exists(os.path.join(store.root(), dcb.EXTERNAL_MUTE_FILE))
+
+
+def test_dcb_mute_0_unmutes():
+	with _Quiet(), _watched():
+		dcb.mute(60, asked=True)
+		assert _dcb_mute("0") == 0
+		assert not dcb.is_muted()
+
+
+def test_dcb_mute_rejects_anything_but_minutes_and_writes_nothing():
+	path = os.path.join(store.root(), dcb.EXTERNAL_MUTE_FILE)
+	for argv in ((), ("x",), ("-1",), ("1.5",), (str(dcb.MUTE_MAX_MINUTES + 1),), ("1", "2")):
+		assert _dcb_mute(*argv) == 2, argv
+		assert not os.path.exists(path), argv
+
+
+def test_dcb_mute_fails_when_the_bot_does_not_pick_it_up():
+	"""A script has to know it is not muted, and the file stays for later."""
+	wait = dcb_mute.WAIT_SECONDS
+	dcb_mute.WAIT_SECONDS = 0.2
+	try:
+		assert _dcb_mute("30") == 1
+		path = os.path.join(store.root(), dcb.EXTERNAL_MUTE_FILE)
+		assert os.path.exists(path)
+		os.remove(path)
+	finally:
+		dcb_mute.WAIT_SECONDS = wait
+	assert not [n for n in os.listdir(store.root()) if n.startswith(".dcb-mute-")]

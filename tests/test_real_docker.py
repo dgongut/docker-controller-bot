@@ -1609,6 +1609,64 @@ def test_unraid_is_told_through_a_helper_that_never_starts():
 		cleanup()
 
 
+def test_the_monitor_hears_through_its_filter_what_it_reads():
+	"""
+	The event stream asks the daemon only for MONITORED_EVENTS. A filter that
+	left one out would be silence nothing complains about, so this runs the
+	monitor itself against the daemon: every action it reads has to arrive,
+	healthchecks included, and none of their exec events. And the level comes
+	from the label inside each event: a container that only notifies problems
+	says it is unhealthy but not that it started or was stopped, and one that
+	notifies nothing says nothing, not even that it ran out of memory.
+	"""
+	core, _sent = _load()
+	host_registry = core.host_registry
+	saved_hosts = core.store.get("hosts")
+	core.store.set("hosts", [{"id": "h_local", "alias": "test", "local": True,
+							   "url": os.environ.get("DOCKER_HOST") or host_registry.LOCAL_SOCKET_URL}])
+	host_registry.reset()
+	monitor = core.DockerEventMonitor("h_local")
+	announced, received = [], []
+	monitor._announce = lambda message, detail=None: announced.append(message)
+	handle = monitor._handle_event
+	monitor._handle_event = lambda event: received.append(event.get("Action", "")) or handle(event)
+	thread = threading.Thread(target=monitor.detectar_eventos_contenedores, daemon=True)
+	thread.start()
+	time.sleep(1)
+	try:
+		plain = client.containers.run(BASE, ["sh", "-c", "trap 'exit 0' TERM; sleep 3600 & wait"],
+									  name=f"{PREFIX}ev-plain", detach=True, labels=LABEL)
+		problems = client.containers.run(
+			BASE, ["sh", "-c", "touch /ok; sleep 4; rm /ok; trap 'exit 0' TERM; sleep 3600 & wait"],
+			name=f"{PREFIX}ev-problems", detach=True, labels=dict(LABEL, **{"DCB-Notifications": "problems"}),
+			healthcheck={"test": ["CMD-SHELL", "test -f /ok"], "interval": 1_000_000_000, "retries": 1})
+		quiet = client.containers.run(BASE, ["sh", "-c", "x=a; while true; do x=$x$x; done"],
+									  name=f"{PREFIX}ev-quiet", detach=True, mem_limit="8m", memswap_limit="8m",
+									  labels=dict(LABEL, **{"DCB-Notifications": "none"}))
+		deadline = time.time() + 30
+		while time.time() < deadline and core.get_text("container_unhealthy", problems.name) not in announced:
+			time.sleep(0.5)
+		plain.stop(timeout=5)
+		problems.stop(timeout=5)
+		time.sleep(3)
+	finally:
+		monitor.stop()
+		thread.join(10)
+		cleanup()
+		core.store.set("hosts", saved_hosts)
+		host_registry.reset()
+
+	actions = {action.split(":")[0] for action in received}
+	assert actions <= set(core.MONITORED_EVENTS), actions
+	assert {"create", "start", "kill", "die", "oom", "health_status"} <= actions, actions
+	assert not [a for a in received if a.startswith("exec_")], received
+	assert core.get_text("started_container", plain.name) in announced, announced
+	assert core.get_text("stopped_container", plain.name) in announced, announced
+	assert core.get_text("container_unhealthy", problems.name) in announced, announced
+	assert not [m for m in announced if problems.name in m and m != core.get_text("container_unhealthy", problems.name)], announced
+	assert not [m for m in announced if quiet.name in m], announced
+
+
 def test_zz_the_registry_goes_when_the_tests_are_done():
 	"""Last by name, so the registry is there for all the others."""
 	cleanup()

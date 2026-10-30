@@ -20,7 +20,7 @@ import harness
 
 # Every module of the bot, and what each may legitimately read from elsewhere.
 SOURCES = ("core.py", "commands.py", "callbacks.py", "schedules.py", "schedule_manager.py", "i18n.py",
-			"store.py", "migration.py", "callback_registry.py",
+			"store.py", "migration.py", "callback_registry.py", "dcb_mute.py",
 			"host_registry.py", "container_listing.py", "formatting.py",
 			"docker-controller-bot.py")
 

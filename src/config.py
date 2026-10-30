@@ -102,6 +102,23 @@ ICON_CONTAINER_ACTION_DONE = "✅"
 # LABELS
 LABEL_IGNORE_CHECK_UPDATES = "DCB-Ignore-Check-Updates"
 LABEL_AUTO_UPDATE = "DCB-Auto-Update"
+# Which of a container's start, stop and health notifications are sent:
+# DCB-Notifications=problems or =none. See NOTIFICATION_LEVELS.
+LABEL_NOTIFICATIONS = "DCB-Notifications"
+
+# What the event monitor tells about a container, besides everything, which is
+# the default. "problems" leaves out what was expected —starts, stops asked
+# for, a process that finished with 0— and keeps failures, running out of
+# memory, failing healthchecks, restart loops and their recovery. "none"
+# leaves it all out. The same values for the label and for the setting.
+NOTIFICATION_LEVELS = ("problems", "none")
+
+# The only container events the monitor reads, asked of the daemon as a filter
+# so the rest never reach the bot: every exec of a healthcheck alone is three
+# events, and image, network and volume events are of no use to it. Anything
+# the monitor starts reading has to be in here, or it never arrives. A
+# health_status filter matches every "health_status: <status>".
+MONITORED_EVENTS = ("create", "start", "kill", "die", "oom", "destroy", "health_status")
 
 
 def label_enabled(labels, name):
@@ -135,6 +152,10 @@ docker_architectures = {
 # ese número, y uno absurdo lo mata con OverflowError dentro de su hilo, con lo
 # que el bot se queda callado para siempre y sin nada que lo despierte.
 MUTE_MAX_MINUTES = 60 * 24 * 30
+
+# File in the data volume a script writes the epoch second a mute ends at into,
+# as in 4.x. The bot applies it and deletes it; dcb-mute writes it for you.
+EXTERNAL_MUTE_FILE = ".muted_until"
 
 # What each scheduled action carries besides its name and cron, in the order
 # the wizard asks for it. A container brings the host it is on, which is why

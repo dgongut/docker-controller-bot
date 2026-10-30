@@ -125,6 +125,25 @@ def cb_infoSetUpdates(ctx):
 	core.repaint_info(ctx.call.id, ctx.chatId, ctx.messageId, ctx.containerId, alert=refused, found=(owner, container))
 
 @callback(
+	name='infoSetNotifications',
+	params=('value', 'containerId'),
+	keeps_message=True,
+	answer_immediately=False,
+)
+def cb_infoSetNotifications(ctx):
+	"""Which of a container's events are announced, from its /info, as infoSetUpdates."""
+	if ctx.value not in core.NOTIFICATION_LEVEL_CODES:
+		core.answer_callback_quietly(ctx.call.id)
+		return
+	owner, container = core.find_container(ctx.containerId)
+	if container is None:
+		core.answer_callback_quietly(ctx.call.id)
+		return
+	refused = core.set_notification_level(owner.host_id, container.name, container.labels,
+										  core.NOTIFICATION_LEVEL_CODES[ctx.value])
+	core.repaint_info(ctx.call.id, ctx.chatId, ctx.messageId, ctx.containerId, alert=refused, found=(owner, container))
+
+@callback(
 	name='confirmUpdate',
 	params=('containerId',),
 )
@@ -512,7 +531,7 @@ def cb_confirmDeleteWholeProject(ctx):
 	going = core.without_the_bot(ctx.hostId, project_info.containers)[0]
 	container_count = len(going)
 	settings_note = (get_text("confirm_delete_settings")
-					 if any(store.container_update_mode(ctx.hostId, c.name) for c in going) else "")
+					 if any(store.has_container_settings(ctx.hostId, c.name) for c in going) else "")
 	markup = InlineKeyboardMarkup(row_width=2)
 	markup.add(
 		InlineKeyboardButton(
@@ -695,18 +714,29 @@ def cb_settingsContainers(ctx):
 	core.show_settings_containers(ctx.chatId, ctx.messageId)
 
 @callback(
+	name='settingsNotifications',
+	keeps_message=True,
+)
+def cb_settingsNotifications(ctx):
+	"""Which events each container announces: the hosts, or the only list."""
+	with core.container_list_lock:
+		core.clear_container_list(ctx.chatId, ctx.messageId)
+	core.show_settings_containers(ctx.chatId, ctx.messageId, kind="notifications")
+
+@callback(
 	name='ctrHost',
-	params=('value',),
+	params=('field', 'value'),
 	keeps_message=True,
 )
 def cb_ctrHost(ctx):
-	"""One host's containers in the per-container settings."""
+	"""One host's containers in a per-container list, of the kind the button says."""
+	kind = ctx.field if ctx.field in core.CONTAINER_LIST_KINDS else "updates"
 	# Paused since the picker was drawn: it is not asked anything, as the
 	# pause promises, and the picker names it with what it keeps instead.
 	if host_registry.host(ctx.value) is None or host_registry.is_paused(ctx.value):
-		core.show_settings_containers(ctx.chatId, ctx.messageId)
+		core.show_settings_containers(ctx.chatId, ctx.messageId, kind=kind)
 		return
-	core.show_settings_containers_list(ctx.chatId, ctx.messageId, ctx.value)
+	core.show_settings_containers_list(ctx.chatId, ctx.messageId, ctx.value, kind=kind)
 
 @callback(
 	name='ctrToggle',
@@ -715,16 +745,17 @@ def cb_ctrHost(ctx):
 	answer_immediately=False,
 )
 def cb_ctrToggle(ctx):
-	"""Moves a container of the list on to the mode its button says."""
+	"""Moves a container of the list on to the value its button says."""
 	data = core.load_container_list(ctx.chatId, ctx.messageId, ctx.field)
 	try:
 		index = int(ctx.containerIdx)
 	except (TypeError, ValueError):
 		index = -1
-	if data is None or not 0 <= index < len(data["items"]) or ctx.value not in core.UPDATE_MODE_CODES:
+	codes = core.container_list_codes(data)
+	if data is None or not 0 <= index < len(data["items"]) or ctx.value not in codes:
 		core.expire_container_list(ctx.call.id)
 		return
-	refused = core.toggle_in_container_list(data, index, core.UPDATE_MODE_CODES[ctx.value])
+	refused = core.toggle_in_container_list(data, index, codes[ctx.value])
 	# The tap asked the daemon, which takes a moment. Back, another page or
 	# another host may have been pressed meanwhile: the list as it is now is
 	# what gets the refreshed item and the repaint, or nothing does.

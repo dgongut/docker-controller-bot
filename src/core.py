@@ -47,7 +47,7 @@ from i18n import get_text, language
 from logger import debug, error, warning
 from message_queue import MessageQueue
 
-VERSION = "5.3.2"
+VERSION = "5.4.0"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -394,9 +394,9 @@ class DockerManager:
 				return get_text("error_can_not_do_that")
 			container = self.client.containers.get(container_id)
 			stop_container(container)
-			# Send confirmation only for manual commands when muted: the event
-			# monitor is silent while muted, so the user gets no other feedback
-			if from_schedule is False and is_muted():
+			# Send confirmation only for manual commands when the event monitor
+			# will not: muted, or a container whose notifications leave this out
+			if from_schedule is False and (is_muted() or notification_level(self.host_id, container_name, container.labels)[0]):
 				send_message(message=f'{get_text("stopped_container", container_name)}{host_suffix(self.host_id)}')
 			return None
 		except Exception as e:
@@ -409,9 +409,9 @@ class DockerManager:
 				return get_text("error_can_not_do_that")
 			container = self.client.containers.get(container_id)
 			container.restart()
-			# Send confirmation only for manual commands when muted: the event
-			# monitor is silent while muted, so the user gets no other feedback
-			if from_schedule is False and is_muted():
+			# Send confirmation only for manual commands when the event monitor
+			# will not: muted, or a container whose notifications leave this out
+			if from_schedule is False and (is_muted() or notification_level(self.host_id, container_name, container.labels)[0]):
 				send_message(message=f'{get_text("restarted_container", container_name)}{host_suffix(self.host_id)}')
 			return None
 		except Exception as e:
@@ -424,9 +424,9 @@ class DockerManager:
 				return get_text("error_can_not_do_that")
 			container = self.client.containers.get(container_id)
 			container.start()
-			# Send confirmation only for manual commands when muted: the event
-			# monitor is silent while muted, so the user gets no other feedback
-			if from_schedule is False and is_muted():
+			# Send confirmation only for manual commands when the event monitor
+			# will not: muted, or a container whose notifications leave this out
+			if from_schedule is False and (is_muted() or notification_level(self.host_id, container_name, container.labels)[0]):
 				send_message(message=f'{get_text("started_container", container_name)}{host_suffix(self.host_id)}')
 			return None
 		except Exception as e:
@@ -1521,7 +1521,11 @@ class DockerEventMonitor:
 		since = None
 		if self._last_event_ns is not None:
 			since = max(self._last_event_ns // 1_000_000_000, int(time.time()) - self.MAX_REPLAY_SECONDS)
-		stream = client.events(decode=True, since=since) if since else client.events(decode=True)
+		# Only what _handle_event reads: the daemon drops the rest before it is
+		# sent, instead of the bot receiving and decoding it to throw it away.
+		filters = {"type": ["container"], "event": list(MONITORED_EVENTS)}
+		stream = (client.events(decode=True, since=since, filters=filters) if since
+				  else client.events(decode=True, filters=filters))
 		# Only what is replayed can be a repeat: what the last connection had
 		# already reported. Comparing every live event against the newest one
 		# seen dropped real ones, since Docker does not deliver events strictly
@@ -1573,6 +1577,14 @@ class DockerEventMonitor:
 		if container_name == UPDATER_CONTAINER_NAME or unraid.is_helper(container_name, attributes):
 			return
 
+		# The container's labels come inside the event, so this asks the
+		# daemon nothing. "none" stops here, before anything is worked out or
+		# fetched; "problems" goes on, so the restart loops and the stops held
+		# for an oom still see every event, and drops what is not one below.
+		level, _label = notification_level(self.host_id, container_name, attributes)
+		if level == "none":
+			return
+
 		if action == "kill":
 			# Never announced, but it is what tells a stop that was asked for
 			# from one that was not.
@@ -1590,15 +1602,19 @@ class DockerEventMonitor:
 		message = None
 		detail = None
 		may_be_oom = False
+		# Whether it is news a "problems" container still gets: a failure, or
+		# the end of one. Every health message is one of those.
+		problem = False
 		if action == "start":
 			message = get_text("started_container", container_name)
 		elif action == "die":
-			message, detail, may_be_oom = self._death_message(container_name, attributes, container_id)
+			message, detail, may_be_oom, problem = self._death_message(container_name, attributes, container_id)
 		elif action == "create" and store.get("bot.extended_messages"):
 			message = get_text("created_container", container_name)
 		elif action.startswith("health_status"):
 			status = action.split(":", 1)[1].strip() if ":" in action else attributes.get("health_status", "")
 			message, detail = self._health_message(container_name, status, container_id)
+			problem = True
 
 		if not message:
 			return
@@ -1609,6 +1625,11 @@ class DockerEventMonitor:
 
 		if action in ("start", "die") and not self.restart_loops.should_announce(action, container_name):
 			debug(f"Message [{message}] omitted because {container_name} is in a restart loop")
+			return
+
+		if level == "problems" and not problem:
+			# Without a log line: writing one is most of what an event costs,
+			# and saying nothing is what the user chose for these.
 			return
 
 		# A stop still held goes before whatever came after it.
@@ -1634,8 +1655,9 @@ class DockerEventMonitor:
 
 	def _death_message(self, name, attributes, container_id):
 		"""
-		What to say about a container that stopped, the log lines to show, and
-		whether it may still turn out to have run out of memory.
+		What to say about a container that stopped, the log lines to show,
+		whether it may still turn out to have run out of memory, and whether
+		it is a problem: not when it was asked for or ended with 0.
 
 		"Stopped" said nothing about why. Asked for —`docker stop`, the bot, a
 		task— is still that. Otherwise the exit code says it: 0 is a process
@@ -1645,14 +1667,14 @@ class DockerEventMonitor:
 		"""
 		oom = self._oom.pop(name, None)
 		if oom is not None and time.time() - oom <= self.OOM_SECONDS:
-			return get_text("container_oom", name), None, False
+			return get_text("container_oom", name), None, False, True
 		if self.restart_loops.stopped_on_purpose(name):
-			return get_text("stopped_container", name), None, False
+			return get_text("stopped_container", name), None, False, False
 		code = str(attributes.get('exitCode', '')).strip()
 		if code in ("", "0"):
-			return get_text("container_finished" if code == "0" else "stopped_container", name), None, False
+			return get_text("container_finished" if code == "0" else "stopped_container", name), None, False, False
 		return (get_text("container_failed", name, describe_exit_code(code)), self._last_logs(container_id),
-				code == "137")
+				code == "137", True)
 
 	def _hold_death(self, name, message, detail):
 		"""
@@ -2621,6 +2643,7 @@ def build_settings():
 		get_text("settings_row_updates_on", interval) if store.get("bot.check_updates")
 		else get_text("settings_row_updates_off"),
 		callback_data="settingsUpdates"))
+	markup.add(InlineKeyboardButton(get_text("settings_row_notifications"), callback_data="settingsNotifications"))
 	markup.add(InlineKeyboardButton(
 		get_text("settings_row_channel", channel or get_text("settings_not_set")),
 		callback_data="settingsAskChannel"))
@@ -2678,6 +2701,9 @@ def _checks_off_warning():
 # _auto_update covers: it asks again before updating anything.
 NEXT_UPDATE_MODE = {None: "auto", "auto": "ignore", "ignore": None}
 
+# And for notifications: everything, only problems, nothing, and round again.
+NEXT_NOTIFICATION_LEVEL = {None: "problems", "problems": "none", "none": None}
+
 def next_update_mode(host_id, mode, image):
 	"""
 	The mode a tap moves a container on to: the next one round, past "update
@@ -2693,8 +2719,30 @@ def next_update_mode(host_id, mode, image):
 # as on the /info button.
 UPDATE_MODE_ICONS = {None: "🔔", "auto": "🔄", "ignore": "🚫"}
 
-def _settings_containers_header():
+# A per-container list is about one of two things, and its data says which:
+# what the update check does with each container, or which of its events
+# are announced. Everything else about the list is the same.
+CONTAINER_LIST_KINDS = ("updates", "notifications")
+
+def _list_kind(data):
+	"""The kind of a list's data. One saved before there were two is of updates."""
+	kind = data.get("kind") if isinstance(data, dict) else None
+	return kind if kind in CONTAINER_LIST_KINDS else "updates"
+
+def _settings_containers_header(kind="updates"):
+	if kind == "notifications":
+		return f'{get_text("settings_notifications_title")}\n\n{get_text("settings_notifications_help")}'
 	return f'{get_text("settings_containers_title")}\n\n{get_text("settings_containers_help")}'
+
+def _container_list_back(kind, several_hosts):
+	"""Where Back goes from a list: its hosts when there was a choice, else its screen."""
+	if several_hosts:
+		return "settingsNotifications" if kind == "notifications" else "settingsContainers"
+	return "settings" if kind == "notifications" else "settingsUpdates"
+
+def _list_extra(kind):
+	"""What a list of updates says while the checks are off; nothing for the others."""
+	return _checks_off_warning() if kind == "updates" else ""
 
 def _away_lines(answered):
 	"""
@@ -2707,7 +2755,7 @@ def _away_lines(answered):
 			for entry in host_registry.hosts(include_paused=True)
 			if entry["id"] not in answered and stored.get(entry["id"])]
 
-def build_settings_containers_hosts(sections, answered):
+def build_settings_containers_hosts(sections, answered, kind="updates"):
 	"""
 	Which host's containers to list, when more than one has any.
 
@@ -2719,13 +2767,13 @@ def build_settings_containers_hosts(sections, answered):
 	markup = InlineKeyboardMarkup(row_width=1)
 	for entry, _owner, _containers in sections:
 		markup.add(InlineKeyboardButton(f'🖥️ - {entry.get("alias", entry["id"])}',
-										callback_data=f'ctrHost|{entry["id"]}'))
-	_add_navigation(markup, "settingsUpdates")
+										callback_data=f'ctrHost|{kind}|{entry["id"]}'))
+	_add_navigation(markup, _container_list_back(kind, False))
 
-	lines = [_settings_containers_header(), "",
+	lines = [_settings_containers_header(kind), "",
 			 get_text("settings_containers_pick_host") if sections else get_text("error_no_containers_available")]
 	lines += _away_lines(answered)
-	return "\n".join(lines) + _checks_off_warning(), markup
+	return "\n".join(lines) + _list_extra(kind), markup
 
 def container_list_items(containers):
 	"""
@@ -2736,7 +2784,7 @@ def container_list_items(containers):
 	def dcb_labels(labels):
 		labels = labels if isinstance(labels, dict) else {}
 		return {key: value for key, value in labels.items()
-				if key in (LABEL_AUTO_UPDATE, LABEL_IGNORE_CHECK_UPDATES)}
+				if key in (LABEL_AUTO_UPDATE, LABEL_IGNORE_CHECK_UPDATES, LABEL_NOTIFICATIONS)}
 	return [[container.name, dcb_labels(container.labels), container_image(container)]
 			for container in containers]
 
@@ -2765,11 +2813,28 @@ def clear_container_list(chat_id, message_id):
 # meanwhile, nor they over it.
 container_list_lock = threading.Lock()
 
-def container_list_icon(current, label):
-	"""How a container shows in the list: 🔔, 🔄 or 🚫, and 🏷️ in front when a label decides."""
+# How each notification level shows in front of a container's name.
+NOTIFICATION_LEVEL_ICONS = {None: "🔔", "problems": "⚠️", "none": "🔕"}
+
+def container_list_icon(current, label, icons=UPDATE_MODE_ICONS):
+	"""How a container shows in the list: its value's icon, and 🏷️ in front when a label decides."""
 	if not label:
-		return UPDATE_MODE_ICONS[current]
-	return "🏷️" if current is None else f"🏷️{UPDATE_MODE_ICONS[current]}"
+		return icons[current]
+	return "🏷️" if current is None else f"🏷️{icons[current]}"
+
+def _list_entry(kind, host_id, name, labels, image):
+	"""A container's value in a list, what decided it, the button's text and its code."""
+	if kind == "notifications":
+		current, label = notification_level(host_id, name, labels)
+		return (current, label, container_list_icon(current, label, NOTIFICATION_LEVEL_ICONS),
+				notification_level_code(NEXT_NOTIFICATION_LEVEL[current]))
+	current, label = update_mode(host_id, name, labels)
+	return (current, label, container_list_icon(current, label),
+			update_mode_code(next_update_mode(host_id, current, image)))
+
+def container_list_codes(data):
+	"""What the buttons of a list may carry, by code."""
+	return NOTIFICATION_LEVEL_CODES if _list_kind(data) == "notifications" else UPDATE_MODE_CODES
 
 def build_settings_containers_list(data):
 	"""
@@ -2786,6 +2851,7 @@ def build_settings_containers_list(data):
 	because updating is costly, and choosing is not.
 	"""
 	host_id = data["host"]
+	kind = _list_kind(data)
 	items = data["items"]
 	page, pages = update_keyboard_page(items, data.get("page", 0))
 	start = page * UPDATE_KEYBOARD_PAGE_SIZE
@@ -2794,10 +2860,9 @@ def build_settings_containers_list(data):
 	buttons = []
 	for index in range(start, min(start + UPDATE_KEYBOARD_PAGE_SIZE, len(items))):
 		name, labels, image = items[index]
-		current, label = update_mode(host_id, name, labels)
+		_current, _label, icon, code = _list_entry(kind, host_id, name, labels, image)
 		buttons.append(InlineKeyboardButton(
-			f"{container_list_icon(current, label)} {name}",
-			callback_data=f"ctrToggle|{host_id}|{index}|{update_mode_code(next_update_mode(host_id, current, image))}"))
+			f"{icon} {name}", callback_data=f"ctrToggle|{host_id}|{index}|{code}"))
 	markup.add(*buttons)
 	if pages > 1:
 		navigation = []
@@ -2808,9 +2873,9 @@ def build_settings_containers_list(data):
 			navigation.append(InlineKeyboardButton("▶️", callback_data=f"ctrPage|{host_id}|{page + 1}"))
 		markup.row(*navigation)
 	# Back to the hosts when there was a choice of them.
-	_add_navigation(markup, "settingsContainers" if data.get("several_hosts") else "settingsUpdates")
+	_add_navigation(markup, _container_list_back(kind, data.get("several_hosts")))
 
-	lines = [_settings_containers_header()]
+	lines = [_settings_containers_header(kind)]
 	if not host_registry.is_single_host():
 		lines += ["", get_text("list_host_header", host_alias(host_id))]
 	if not items:
@@ -2819,9 +2884,9 @@ def build_settings_containers_list(data):
 		away = _away_lines(data["answered"])
 		if away:
 			lines += [""] + away
-	return "\n".join(lines) + _checks_off_warning(), markup
+	return "\n".join(lines) + _list_extra(kind), markup
 
-def show_settings_containers(chat_id, message_id):
+def show_settings_containers(chat_id, message_id, kind="updates"):
 	"""
 	The hosts to choose from, or straight to the list when only one has
 	containers to show — as the /info picker does.
@@ -2832,12 +2897,13 @@ def show_settings_containers(chat_id, message_id):
 	if len(sections) == 1:
 		entry, _owner, containers = sections[0]
 		show_settings_containers_list(chat_id, message_id, entry["id"], containers,
-									  several_hosts=False, answered=answered)
+									  several_hosts=False, answered=answered, kind=kind)
 		return
-	text, markup = build_settings_containers_hosts(sections, answered)
+	text, markup = build_settings_containers_hosts(sections, answered, kind)
 	edit_message_text(text, chat_id, message_id, reply_markup=markup)
 
-def show_settings_containers_list(chat_id, message_id, host_id, containers=None, several_hosts=True, answered=None):
+def show_settings_containers_list(chat_id, message_id, host_id, containers=None, several_hosts=True, answered=None,
+								  kind="updates"):
 	"""
 	Lists one host's containers, in place of the menu.
 
@@ -2851,7 +2917,7 @@ def show_settings_containers_list(chat_id, message_id, host_id, containers=None,
 			reason = e.reason if isinstance(e, host_registry.HostUnavailable) else e
 			send_message(message=get_text("host_unreachable", host_alias(host_id), html.escape(str(reason))))
 			return
-	data = {"host": host_id, "page": 0, "several_hosts": several_hosts,
+	data = {"host": host_id, "kind": kind, "page": 0, "several_hosts": several_hosts,
 			"answered": answered, "items": container_list_items(containers)}
 	save_container_list(chat_id, message_id, data)
 	text, markup = build_settings_containers_list(data)
@@ -2882,11 +2948,14 @@ def toggle_in_container_list(data, index, mode):
 		return alert_text(get_text("container_does_not_exist", html.escape(name)))
 	data["items"][index] = container_list_items([live])[0]
 	_name, labels, image = data["items"][index]
-	current, label = update_mode(host_id, name, labels)
+	kind = _list_kind(data)
+	current, label, _icon, _code = _list_entry(kind, host_id, name, labels, image)
 	if label:
 		return get_text("container_updates_by_label", label)
 	if current == mode:
 		return None
+	if kind == "notifications":
+		return set_notification_level(host_id, name, labels, mode)
 	return set_update_mode(host_id, name, labels, image, mode)
 
 def alert_text(text):
@@ -5320,13 +5389,14 @@ def check_mute():
 		_unmute_timer.start()
 
 # Muting from the command line, as 4.x allowed: a script writes the epoch
-# second the mute ends at into the data volume, without going through Telegram.
+# second the mute ends at into EXTERNAL_MUTE_FILE, without going through
+# Telegram, either with dcb-mute or by hand:
+#   docker exec docker-controller-bot dcb-mute 60
 #   docker exec docker-controller-bot sh -c 'echo $(( $(date +%s) + 3600 )) > /app/config/.muted_until'
-# 0, or any second already past, unmutes. It is the same file the migration
-# reads once at startup; this picks it up while the bot runs, applies it
-# through mute() like a /mute would, and deletes it. Whichever comes last,
-# the file or a /mute, is the one in force.
-EXTERNAL_MUTE_FILE = ".muted_until"
+# 0, or any second already past, unmutes. This applies it through mute() like
+# a /mute would and deletes it, once at startup and then while the bot runs,
+# so one written with the bot stopped, a 4.x one included, is no different.
+# Whichever comes last, the file or a /mute, is the one in force.
 # One stat() per pass, so checking often costs nothing and a mute lands fast.
 EXTERNAL_MUTE_POLL_SECONDS = 2
 # A file younger than this may still be half written by the shell redirection.
@@ -5516,6 +5586,7 @@ def gather_container_info(owner, container):
 
 	# Updates, and how the bot treats it.
 	info["update_mode"], info["update_mode_label"] = update_mode(host_id, container.name, labels)
+	info["notification_level"], info["notification_label"] = notification_level(host_id, container.name, labels)
 	# Ignored is never pending, here as in /updateall: see update_available.
 	info["has_update"] = (False if info["update_mode"] == "ignore"
 						  else read_container_update_status(info["image"], container.name, host_id))
@@ -5610,11 +5681,13 @@ def info(containerId, containerName):
 	result, possible_update, can_start, gathered = manager_for(containerId).get_info(container_id=ref_id(containerId), container_name=containerName)
 	if x:
 		delete_message(x.message_id)
-	updates = None
+	updates = notifications = None
 	if gathered is not None:
 		mode, label = gathered["update_mode"], gathered["update_mode_label"]
 		updates = (mode, label, next_update_mode(ref_host(containerId), mode, gathered.get("image") or ""))
-	sent = send_message(message=result, reply_markup=info_markup(containerId, possible_update, can_start, updates))
+		level, label = gathered.get("notification_level"), gathered.get("notification_label")
+		notifications = (level, label, NEXT_NOTIFICATION_LEVEL[level])
+	sent = send_message(message=result, reply_markup=info_markup(containerId, possible_update, can_start, updates, notifications))
 	if sent and gathered is not None:
 		# Its buttons repaint this message, and each press would otherwise
 		# ask the daemon for the name that is already known here.
@@ -5637,7 +5710,18 @@ UPDATE_MODE_CODES = {"n": None, "a": "auto", "i": "ignore"}
 def update_mode_code(mode):
 	return next(code for code, value in UPDATE_MODE_CODES.items() if value == mode)
 
-def info_markup(ref, has_update, can_start, updates):
+# The same for which events are announced: everything, problems, quiet. With
+# letters no update mode uses: a list in /settings is replaced by the other
+# kind in the same message, and a tap meant for the old one then expires
+# instead of setting something else on the new one.
+NOTIFICATION_LEVEL_BUTTONS = {None: "button_notifications_all", "problems": "button_notifications_problems",
+							  "none": "button_notifications_none"}
+NOTIFICATION_LEVEL_CODES = {"e": None, "p": "problems", "q": "none"}
+
+def notification_level_code(level):
+	return next(code for code, value in NOTIFICATION_LEVEL_CODES.items() if value == level)
+
+def info_markup(ref, has_update, can_start, updates, notifications=None):
 	"""
 	The buttons under a container's /info.
 
@@ -5647,7 +5731,7 @@ def info_markup(ref, has_update, can_start, updates):
 	carries the mode it sets rather than "next", so a double tap lands once.
 
 	`updates` is (mode, label, the mode a tap sets), or None for an /info that
-	could not be gathered.
+	could not be gathered, and `notifications` the same for the level.
 	"""
 	markup = InlineKeyboardMarkup(row_width=1)
 	if has_update:
@@ -5659,6 +5743,11 @@ def info_markup(ref, has_update, can_start, updates):
 		markup.add(InlineKeyboardButton(
 			get_text("button_info_updates", "🏷️" if label else "🤖", get_text(UPDATE_MODE_BUTTONS[mode])),
 			callback_data=f"infoSetUpdates|{update_mode_code(following)}|{ref}"))
+	if notifications is not None:
+		level, label, following = notifications
+		markup.add(InlineKeyboardButton(
+			get_text("button_info_notifications", "🏷️" if label else "🤖", get_text(NOTIFICATION_LEVEL_BUTTONS[level])),
+			callback_data=f"infoSetNotifications|{notification_level_code(following)}|{ref}"))
 	markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
 	return markup
 
@@ -5681,8 +5770,10 @@ def live_info(ref, found=None):
 	# Read as gather_container_info reads it, or the button could go while the
 	# text above it still offers the update.
 	pending = mode != "ignore" and read_container_update_status(image, container.name, host_id) is True
+	level, level_label = notification_level(host_id, container.name, container.labels)
 	markup = info_markup(ref, pending, container.status in ("exited", "dead", "created"),
-						 (mode, label, next_update_mode(host_id, mode, image)))
+						 (mode, label, next_update_mode(host_id, mode, image)),
+						 (level, level_label, NEXT_NOTIFICATION_LEVEL[level]))
 	return container, markup, mode, label, pending
 
 def live_info_markup(ref):
@@ -5777,7 +5868,7 @@ def confirm_delete(containerId, containerName):
 	debug(f"Running command: confirm_delete for container {containerName}")
 	markup = create_confirm_cancel_keyboard(f"delete|{containerId}", "button_confirm_delete")
 	question = get_text("confirm_delete", containerName)
-	if store.container_update_mode(ref_host(containerId), containerName):
+	if store.has_container_settings(ref_host(containerId), containerName):
 		question += get_text("confirm_delete_settings")
 	send_message(message=f'{host_label(ref_host(containerId))}{question}', reply_markup=markup)
 
@@ -7592,6 +7683,26 @@ def update_mode(host_id, name, labels):
 		return None, LABEL_IGNORE_CHECK_UPDATES if LABEL_IGNORE_CHECK_UPDATES in labels else LABEL_AUTO_UPDATE
 	return store.container_update_mode(host_id or host_registry.local_host_id(), name), None
 
+def notification_level(host_id, name, labels):
+	"""
+	Which of a container's events the monitor announces, and what decided it.
+
+	Returns (level, label): level is "problems", "none", or None for all of
+	them; label is LABEL_NOTIFICATIONS when the label decided, or None when it
+	was the setting chosen from /info or /settings. The label wins whatever it
+	says, as in update_mode, and a value it does not know means all of them.
+
+	Called on every event the monitor reads, with the labels that come inside
+	the event, so it must never ask the daemon anything: a dictionary lookup
+	and the settings already in memory. 2.3.0 asked for the container list and
+	an inspect on each event to read a label, and on a slow server that cost
+	enough CPU to take the feature away.
+	"""
+	if isinstance(labels, dict) and LABEL_NOTIFICATIONS in labels:
+		value = str(labels[LABEL_NOTIFICATIONS]).strip().lower()
+		return (value if value in NOTIFICATION_LEVELS else None), LABEL_NOTIFICATIONS
+	return store.container_notification_level(host_id or host_registry.local_host_id(), name), None
+
 def container_image(container):
 	"""The image reference a container was created from, as its config says it."""
 	return str(((getattr(container, "attrs", None) or {}).get("Config") or {}).get("Image") or "")
@@ -7643,6 +7754,22 @@ def set_update_mode(host_id, name, labels, image, mode):
 	debug(f"Update mode of {name} on {host_registry.alias(host_id)}: {mode or 'notify'}")
 	return None
 
+def set_notification_level(host_id, name, labels, level):
+	"""
+	Changes which of a container's events are announced, from /info or
+	/settings. None when it was changed, or the text that says why not: the
+	DCB-Notifications label decides it, or settings.json cannot be written.
+	"""
+	if host_registry.host(host_id) is None:
+		return get_text("error_can_not_do_that")
+	_current, label = notification_level(host_id, name, labels)
+	if label:
+		return get_text("container_updates_by_label", label)
+	if not store.set_container_notification_level(host_id, name, level):
+		return get_text("container_updates_not_saved")
+	debug(f"Notifications of {name} on {host_registry.alias(host_id)}: {level or 'all'}")
+	return None
+
 # How long a container's settings are kept after it last showed up on a host
 # that answered. Recreating a container is removing it and creating it again,
 # and a `docker compose down` can last a weekend.
@@ -7674,6 +7801,10 @@ def forget_gone_container_settings(sections, now=None):
 			if label and store.container_update_mode(host_id, container.name):
 				debug(f"{container.name} has the {label} label now: its own setting goes")
 				store.set_container_update_mode(host_id, container.name, None)
+			_level, label = notification_level(host_id, container.name, container.labels)
+			if label and store.container_notification_level(host_id, container.name):
+				debug(f"{container.name} has the {label} label now: its own setting goes")
+				store.set_container_notification_level(host_id, container.name, None)
 	forgotten = store.reconcile_containers(
 		present, time.time() if now is None else now, CONTAINER_SETTINGS_GRACE_DAYS * 24 * 60 * 60)
 	if forgotten:
@@ -10007,6 +10138,9 @@ def main():
 		warning(f"Could not look for a leftover updater container: {e}")
 	check_own_container()
 	check_mute()
+	# Before the start message and before any notification: a mute written
+	# while the bot was stopped is in force from the first moment.
+	check_external_mute()
 	threading.Thread(target=_external_mute_loop, name="external-mute", daemon=True).start()
 	send_message(message=build_starting_message())
 	if _migration.ask_for_language:

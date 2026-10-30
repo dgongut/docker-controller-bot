@@ -23,6 +23,7 @@ import os
 import threading
 from contextlib import contextmanager
 
+from config import NOTIFICATION_LEVELS
 from logger import debug, error, warning
 
 # Documented volume from 5.0.0 on.
@@ -664,7 +665,7 @@ def mark_update_check_done():
 # How the bot treats each container, chosen from /info or /settings, under
 # "containers" in settings.json:
 #
-#	"containers": {"h_a91c": {"jellyfin": {"updates": "auto"}}}
+#	"containers": {"h_a91c": {"jellyfin": {"updates": "auto", "notifications": "problems"}}}
 #
 # Configuration the user chose, so in settings.json and not in state/: it
 # cannot be regenerated, and it takes on the rule that an unreadable settings
@@ -698,12 +699,40 @@ def _stored_containers():
 	return containers if isinstance(containers, dict) else {}
 
 
+def _container_entry(host_id, name):
+	"""A container's stored settings, or {}. Called with the lock held."""
+	on_host = _stored_containers().get(host_id)
+	entry = on_host.get(name) if isinstance(on_host, dict) else None
+	return entry if isinstance(entry, dict) else {}
+
+
+def has_container_settings(host_id, name):
+	"""Whether anything is stored about a container, updates or notifications."""
+	with _lock:
+		return bool(_container_entry(host_id, name))
+
+
 def container_update_mode(host_id, name):
 	"""How the update check treats a container: "auto", "ignore", or None."""
 	with _lock:
-		on_host = _stored_containers().get(host_id)
-		entry = on_host.get(name) if isinstance(on_host, dict) else None
-		return _as_update_mode(entry.get("updates")) if isinstance(entry, dict) else None
+		return _as_update_mode(_container_entry(host_id, name).get("updates"))
+
+
+def _as_notification_level(value):
+	"""A stored level as one of NOTIFICATION_LEVELS, or None for anything else."""
+	if not isinstance(value, str):
+		return None
+	value = value.strip().lower()
+	return value if value in NOTIFICATION_LEVELS else None
+
+
+def container_notification_level(host_id, name):
+	"""
+	Which of a container's events are announced: "problems", "none", or None
+	for all of them. Read on every event the monitor gets, so from memory.
+	"""
+	with _lock:
+		return _as_notification_level(_container_entry(host_id, name).get("notifications"))
 
 
 def set_container_update_mode(host_id, name, mode):
@@ -715,7 +744,19 @@ def set_container_update_mode(host_id, name, mode):
 	the change would only live in memory, and be gone at the next restart
 	without anyone having been told.
 	"""
-	mode = _as_update_mode(mode)
+	return _set_container_field(host_id, name, "updates", _as_update_mode(mode))
+
+
+def set_container_notification_level(host_id, name, level):
+	"""
+	Stores which of a container's events are announced. None goes back to the
+	default, all of them. False when it could not be stored, as for the mode.
+	"""
+	return _set_container_field(host_id, name, "notifications", _as_notification_level(level))
+
+
+def _set_container_field(host_id, name, field, value):
+	"""Stores one per-container setting, None taking it out. See set_container_update_mode."""
 	if not isinstance(host_id, str) or not isinstance(name, str):
 		return False
 	with _lock:
@@ -731,10 +772,10 @@ def set_container_update_mode(host_id, name, mode):
 		entry = on_host.get(name)
 		if not isinstance(entry, dict):
 			entry = on_host[name] = {}
-		if mode is None:
-			entry.pop("updates", None)
+		if value is None:
+			entry.pop(field, None)
 		else:
-			entry["updates"] = mode
+			entry[field] = value
 		# Nothing left to say about it: out of the file, and its host too.
 		if not entry:
 			del on_host[name]

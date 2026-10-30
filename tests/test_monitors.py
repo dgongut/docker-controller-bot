@@ -58,7 +58,7 @@ def test_an_event_notification_names_its_host_at_the_end():
 				"Actor": {"Attributes": {"name": "plex"}}}]
 
 	class Stream:
-		def events(self, decode=True):
+		def events(self, decode=True, filters=None):
 			return iter(events)
 
 	original_client = dcb.host_registry.client
@@ -93,7 +93,7 @@ def test_a_container_in_an_update_batch_is_not_announced():
 				for action, name in (("die", "plex"), ("start", "plex"), ("die", "sonarr"))]
 
 	class Stream:
-		def events(self, decode=True):
+		def events(self, decode=True, filters=None):
 			return iter(events)
 
 	original_client = dcb.host_registry.client
@@ -374,7 +374,7 @@ def test_the_monitor_sends_the_loop_messages_with_its_host():
 				for _ in range(6) for action in ("die", "start")]
 
 	class Stream:
-		def events(self, decode=True):
+		def events(self, decode=True, filters=None):
 			return iter(events)
 
 	original_client = dcb.host_registry.client
