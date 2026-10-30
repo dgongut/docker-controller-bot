@@ -111,7 +111,8 @@ volumes:
 - 🧩 **Compose:** detects your projects and groups them (project → containers).
 - 📊 **Diagnostics:** logs in the chat or as a file, `exec` inside containers, ports and detailed info.
 - 🔄 **Updates:** tells you when a new image is out, updates one or all, changes tags (rollback) and lets you choose, container by container, which ones update on their own and which aren't checked.
-- ⏰ **Automation:** cron-scheduled tasks + temporary mute with `/mute` + cleanup with `/prune`.
+- 🔔 **Notifications:** tells you when a container starts, stops, crashes, runs out of memory or fails its healthcheck, and you choose what each one tells you about: everything, problems only or nothing.
+- ⏰ **Automation:** cron-scheduled tasks + temporary mute with `/mute` or from a script with `dcb-mute` + cleanup with `/prune`.
 - 🖥️ **Multi-host & settings:** several servers from a single bot, everything tweakable with `/settings` without restarting.
 
 <details>
@@ -124,6 +125,7 @@ volumes:
 - ✅ Get logs directly on the chat or on a file
 - ✅ Extract the container's docker-compose
 - ✅ Notifications when a container starts or stops
+- ✅ Notifications per container: all, problems only or none, from `/info`, `/settings` or the `DCB-Notifications` label
 - ✅ Notifications when a container has a new image update
 - ✅ Updating of containers
 - ✅ Change tags (rollback or update)
@@ -136,7 +138,7 @@ volumes:
 - ✅ Works out which container it is on its own: nothing to tell it, and it still knows not to stop or delete itself
 - ✅ Settings editable from the bot itself with `/settings`, without touching the docker-compose or restarting
 - ✅ Button-based main menu in `/start`, grouped into categories; typed commands keep working exactly as before
-- ✅ Mute notifications temporarily
+- ✅ Mute notifications temporarily, also from a script with `dcb-mute`
 - ✅ Multi-architecture image (amd64, arm64, armv7…) compatible with Raspberry Pi, NAS and standard servers
 - ✅ Multilanguage support (Spanish, English, Dutch, German, Russian, Galician, Italian, Catalan)
 
@@ -596,6 +598,7 @@ services:
       - /volume2/temp/ha:/tmp
     labels:
       - "DCB-Auto-Update"
+      - "DCB-Notifications=problems" # only tells you when it fails, not on every start or stop
     restart: unless-stopped
 ```
 </details>

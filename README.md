@@ -111,7 +111,8 @@ volumes:
 - 🧩 **Compose:** detecta tus proyectos y los agrupa (proyecto → contenedores).
 - 📊 **Diagnóstico:** logs en el chat o como fichero, `exec` dentro del contenedor, puertos e info detallada.
 - 🔄 **Actualizaciones:** te avisa si hay imagen nueva, actualiza uno o todos, cambia de tag (rollback) y deja que elijas, contenedor a contenedor, cuáles se actualizan solos y cuáles no se comprueban.
-- ⏰ **Automatización:** tareas programadas con cron + silencio temporal con `/mute` + limpieza con `/prune`.
+- 🔔 **Avisos:** te dice cuándo un contenedor arranca, se para, se cae, se queda sin memoria o falla su healthcheck, y tú eliges de qué te avisa cada uno: todo, solo problemas o nada.
+- ⏰ **Automatización:** tareas programadas con cron + silencio temporal con `/mute` o desde un script con `dcb-mute` + limpieza con `/prune`.
 - 🖥️ **Multi-host y ajustes:** varios servidores desde un solo bot y todo configurable con `/settings`, sin reiniciar.
 
 <details>
@@ -124,6 +125,7 @@ volumes:
 - ✅ Obtener los logs tanto de manera directa como a través de fichero
 - ✅ Extraer el docker-compose de tus contenedores
 - ✅ Notificaciones cuando un contenedor se cae o se inicia
+- ✅ Avisos por contenedor: todos, solo problemas o ninguno, desde `/info`, `/settings` o la label `DCB-Notifications`
 - ✅ Notificaciones cuando un contenedor tiene una actualización pendiente
 - ✅ Actualizaciones de los contenedores
 - ✅ Cambiar el tag (rollback o actualización)
@@ -136,7 +138,7 @@ volumes:
 - ✅ Se identifica a sí mismo sin ayuda: no hay que decirle cómo se llama su contenedor para que sepa no pararse ni eliminarse
 - ✅ Ajustes editables desde el propio bot con `/settings`, sin tocar el docker-compose ni reiniciar
 - ✅ Menú principal por botones en `/start`, agrupado en categorías; los comandos escritos siguen funcionando igual
-- ✅ Silencia las notificaciones de forma temporal
+- ✅ Silencia las notificaciones de forma temporal, también desde un script con `dcb-mute`
 - ✅ Imagen multiarquitectura (amd64, arm64, armv7…) compatible con Raspberry Pi, NAS y servidores estándar
 - ✅ Soporte de idiomas (Spanish, English, Dutch, German, Russian, Galician, Italian, Catalan)
 
@@ -594,6 +596,7 @@ services:
       - /volume2/temp/ha:/tmp
     labels:
       - "DCB-Auto-Update"
+      - "DCB-Notifications=problems" # solo avisa si falla, no de cada arranque o parada
     restart: unless-stopped
 ```
 </details>
