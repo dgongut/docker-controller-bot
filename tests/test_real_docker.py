@@ -802,12 +802,15 @@ services:
   ports:
     <<: *base
     container_name: {PREFIX}ports
+    # Below 32768, out of Linux's ephemeral range: in it, any outgoing
+    # connection on the runner could hold one, and compose failed with
+    # "address already in use".
     ports:
-      - "127.0.0.1:55101-55103:8001-8003"
-      - "55104:80"
-      - "55105:80"
-      - "55106:53/udp"
-      - "55106:53/tcp"
+      - "127.0.0.1:25101-25103:8001-8003"
+      - "25104:80"
+      - "25105:80"
+      - "25106:53/udp"
+      - "25106:53/tcp"
   v6:
     <<: *base
     container_name: {PREFIX}v6
@@ -1520,7 +1523,7 @@ services:
     container_name: {PREFIX}plex
     labels: [dcbtest=1, DCB-Auto-Update]
     depends_on: [db]
-    ports: ["55201:32400"]
+    ports: ["25201:32400"]
     volumes: ["cfg:/config", "/tmp:/media:ro"]
     tmpfs: ["/transcode"]
     cpus: 2
@@ -1548,7 +1551,7 @@ volumes:
 		# What it does with a new version is on its button now, not in the text.
 		assert (gathered["update_mode"], gathered["update_mode_label"]) == ("auto", core.LABEL_AUTO_UPDATE), gathered
 		for expected in ("💚", "<code>1.4.2</code>", f"({core.get_text('info_limit')}: 2 CPU)",
-							"/ 256.0 MiB", "55201 → 32400/tcp", f"<code>{PREFIX}cfg</code> → <code>/config</code>",
+							"/ 256.0 MiB", "25201 → 32400/tcp", f"<code>{PREFIX}cfg</code> → <code>/config</code>",
 							"<code>tmpfs</code> → <code>/transcode</code>", "<code>db</code>", "<code>overseerr</code>"):
 			assert expected in plex, (expected, plex)
 		qb, _, can_start, _ = owner.get_info(fetch("qb").id, PREFIX + "qb")
@@ -1695,11 +1698,17 @@ def test_the_monitor_hears_through_its_filter_what_it_reads():
 			name=f"{PREFIX}ev-problems", detach=True, labels=dict(LABEL, **{"DCB-Notifications": "problems"}),
 			healthcheck={"test": ["CMD-SHELL", "test -f /ok"], "interval": 1_000_000_000, "retries": 1})
 		# 32m and not 8m, which was too little for runc itself now and then.
-		quiet = client.containers.run(BASE, ["sh", "-c", "x=a; while true; do x=$x$x; done"],
+		# Filled by `tail`, which reads /dev/zero as one endless line: a shell
+		# doubling a string got there late on a slow runner, and the test
+		# ended before the oom it was waiting for.
+		quiet = client.containers.run(BASE, ["sh", "-c", "sleep 1; tail /dev/zero"],
 									  name=f"{PREFIX}ev-quiet", detach=True, mem_limit="32m", memswap_limit="32m",
 									  labels=dict(LABEL, **{"DCB-Notifications": "none"}))
+		# Until both have happened, not a fixed time: the oom as well, which
+		# comes as an event of its own whenever the kernel gets to it.
 		deadline = time.time() + 30
-		while time.time() < deadline and core.get_text("container_unhealthy", problems.name) not in announced:
+		while time.time() < deadline and (core.get_text("container_unhealthy", problems.name) not in announced
+										  or "oom" not in received):
 			time.sleep(0.5)
 		plain.stop(timeout=5)
 		problems.stop(timeout=5)
