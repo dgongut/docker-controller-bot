@@ -56,6 +56,15 @@ PROBE_TIMEOUT_SECONDS = 5
 # one had just as much to do.
 SLOW_TIMEOUT_SECONDS = 600
 
+# What each step of an update waits for: stopping, creating, starting and
+# removing containers, and the rollback. Longer than the working thirty
+# seconds, because on a disk Docker has just saturated a container that
+# exited at once took 128 s to show as stopped, and an update that gave up
+# there left it stopped. Shorter than the prunes' ten minutes, because a host
+# that drops off halfway —a Tailscale tunnel gone— keeps the update, and the
+# batch behind it, waiting that long at every step.
+UPDATE_TIMEOUT_SECONDS = 300
+
 
 class NoAnswer(str):
 	"""
@@ -123,6 +132,8 @@ _probe_clients = {}
 # Clients for operations that legitimately take minutes. Cached apart for the
 # same reason as the probe ones.
 _slow_clients = {}
+# Clients for the steps of an update. See UPDATE_TIMEOUT_SECONDS.
+_update_clients = {}
 
 
 def hosts(include_paused=False):
@@ -673,6 +684,19 @@ def slow_client(host_id):
 	return _cached_client(_slow_clients, entry, timeout=SLOW_TIMEOUT_SECONDS)
 
 
+def update_client(host_id):
+	"""
+	A client for `host_id` that waits UPDATE_TIMEOUT_SECONDS, for the steps of
+	an update. Separate for the same reason as the slow one.
+
+	Raises HostUnavailable, like client().
+	"""
+	entry = host(host_id)
+	if entry is None:
+		raise HostUnavailable(host_id, "not configured")
+	return _cached_client(_update_clients, entry, timeout=UPDATE_TIMEOUT_SECONDS)
+
+
 def ping(host_id):
 	"""
 	Whether `host_id` answers right now.
@@ -730,15 +754,16 @@ def drop(host_id):
 	bad so that the next use reconnects instead of reusing a dead socket. The
 	working, probe and slow clients all go: they point at the same daemon, and
 	leaving one behind means the next check answers about a connection the rest
-	of the bot has already given up on.
+	of the bot has already given up on. So does the update one.
 	"""
 	with _lock:
 		removed = _clients.pop(host_id, None)
 		probe = _probe_clients.pop(host_id, None)
 		slow = _slow_clients.pop(host_id, None)
+		updating = _update_clients.pop(host_id, None)
 	# Outside the lock: an ssh teardown is not instant, and nothing else needs
 	# to wait on it to look up a different host.
-	_close((removed, probe, slow), host_id)
+	_close((removed, probe, slow, updating), host_id)
 	if removed:
 		debug(f"Dropped the cached client for host {host_id}")
 
@@ -1178,10 +1203,12 @@ def rename_host(host_id, new_alias):
 def reset():
 	"""Drops every cached client. For tests, and after a settings reload."""
 	with _lock:
-		discarded = list(_clients.items()) + list(_probe_clients.items()) + list(_slow_clients.items())
+		discarded = (list(_clients.items()) + list(_probe_clients.items()) + list(_slow_clients.items())
+					 + list(_update_clients.items()))
 		_clients.clear()
 		_probe_clients.clear()
 		_slow_clients.clear()
+		_update_clients.clear()
 	for host_id, entry in discarded:
 		_close((entry,), host_id)
 	with _probe_lock:

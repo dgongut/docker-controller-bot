@@ -126,8 +126,7 @@ def cmd_updateall(user_id=None, chat_id=None, container_id=None, container_name=
 	# The same builder the toggles repaint with, so the first render and every
 	# one after it agree. Building the keyboard here by hand is how the list
 	# ended up naming its hosts only from the second tap onwards.
-	markup = build_generic_keyboard(containersToUpdate, set(), None, "Update",
-									get_text("button_update"), get_text("button_update_all"))
+	markup = build_generic_keyboard(containersToUpdate, set(), None, "Update")
 	message = send_message(message=available_updates_text(containersToUpdate), reply_markup=markup)
 	if message:
 		save_update_data(message.chat.id, message.message_id, containersToUpdate)

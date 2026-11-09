@@ -125,6 +125,34 @@ def cb_infoSetUpdates(ctx):
 	core.repaint_info(ctx.call.id, ctx.chatId, ctx.messageId, ctx.containerId, alert=refused, found=(owner, container))
 
 @callback(
+	name='autoUpdateOffer',
+	params=('containerId',),
+	keeps_message=True,
+	answer_immediately=False,
+)
+def cb_autoUpdateOffer(ctx):
+	"""
+	The button under a single update's result: from now on the container
+	updates on its own. The message keeps what it said and adds that, without
+	the button; what stops it is the alert, and the button stays.
+	"""
+	owner, container = core.find_container(ctx.containerId)
+	if container is None:
+		core.answer_callback_quietly(ctx.call.id, text=get_text("error_can_not_do_that"), show_alert=True)
+		return
+	refused = core.set_update_mode(owner.host_id, container.name, container.labels,
+								   core.container_image(container), "auto")
+	if refused:
+		core.answer_callback_quietly(ctx.call.id, text=refused, show_alert=True)
+		return
+	core.answer_callback_quietly(ctx.call.id)
+	text = f"{ctx.call.message.html_text}\n\n{get_text('auto_update_offer_done')}"
+	try:
+		core.edit_message_text(text, ctx.chatId, ctx.messageId)
+	except Exception as e:
+		core.debug(f"Could not say {container.name} now updates on its own: {e}")
+
+@callback(
 	name='infoSetNotifications',
 	params=('value', 'containerId'),
 	keeps_message=True,
@@ -278,7 +306,7 @@ def cb_toggleUpdate(ctx):
 		page = core.page_of(containers, reference)
 		core.save_update_data(ctx.chatId, ctx.messageId, containers, selected, page)
 
-	markup = core.build_generic_keyboard(containers, selected, ctx.messageId, "Update", get_text("button_update"), get_text("button_update_all"), page)
+	markup = core.build_generic_keyboard(containers, selected, ctx.messageId, "Update", page)
 
 	# Use synchronous edit for immediate feedback
 	try:
@@ -321,7 +349,7 @@ def cb_toggleUpdateAll(ctx):
 		page = core.load_update_page(ctx.chatId, ctx.messageId)
 		core.save_update_data(ctx.chatId, ctx.messageId, containers, selected, page)
 
-	markup = core.build_generic_keyboard(containers, selected, ctx.messageId, "Update", get_text("button_update"), get_text("button_update_all"), page)
+	markup = core.build_generic_keyboard(containers, selected, ctx.messageId, "Update", page)
 
 	# Use synchronous edit for immediate feedback
 	try:
@@ -348,7 +376,7 @@ def cb_pageUpdate(ctx):
 		page, _pages = core.update_keyboard_page(containers, ctx.value)
 		core.save_update_data(ctx.chatId, ctx.messageId, containers, selected, page)
 
-	markup = core.build_generic_keyboard(containers, selected, ctx.messageId, "Update", get_text("button_update"), get_text("button_update_all"), page)
+	markup = core.build_generic_keyboard(containers, selected, ctx.messageId, "Update", page)
 	try:
 		core.edit_message_reply_markup_sync(ctx.chatId, ctx.messageId, reply_markup=markup)
 	except Exception as e:
@@ -362,6 +390,22 @@ def cb_pageUpdate(ctx):
 	params=('originalMessageId',),
 )
 def cb_confirmUpdateSelected(ctx):
+	core.confirm_update_selected(ctx.chatId, ctx.messageId)
+
+@callback(
+	name='updateEverything',
+	params=('originalMessageId',),
+)
+def cb_updateEverything(ctx):
+	"""Everything in the list, without marking it first: then as confirmUpdateSelected."""
+	with core.update_data_lock:
+		containers, selected = core.load_update_data(ctx.chatId, ctx.messageId)
+		if not containers:
+			core.send_message(message=get_text("update_list_expired"))
+			return
+		selected.update(cid for cid, _cname in containers)
+		core.save_update_data(ctx.chatId, ctx.messageId, containers, selected,
+							core.load_update_page(ctx.chatId, ctx.messageId))
 	core.confirm_update_selected(ctx.chatId, ctx.messageId)
 
 @callback(

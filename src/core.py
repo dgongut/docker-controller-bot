@@ -1,3 +1,4 @@
+import contextlib
 import contextvars
 import docker
 import functools
@@ -30,7 +31,7 @@ from telebot.types import InlineKeyboardButton
 from telebot.types import InlineKeyboardMarkup
 from compose_generator import ComposeGenerator
 from formatting import (
-	EVENT_LOG_LINES, by_host, render_container_info, comparison_version_change, comparison_version_line, comparison_version_notes, container_line, describe_exit_code, human_duration, log_excerpt, release_notes_url, telegram_head, telegram_tail, version_lines,
+	EVENT_LOG_LINES, by_host, render_container_info, comparison_body, container_line, describe_exit_code, human_duration, log_excerpt, release_notes_url, telegram_head, telegram_tail, version_lines,
 )
 from docker_update import container_platform, extract_container_config, image_repository, image_version, perform_update, pull_checked, stop_container, updates_in_progress
 from docker_compose_manager import (
@@ -47,7 +48,7 @@ from i18n import get_text, language
 from logger import debug, error, warning
 from message_queue import MessageQueue
 
-VERSION = "5.4.0"
+VERSION = "5.5.0"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -260,6 +261,21 @@ def _pruned_anything(pruned):
 	if pruned.get('SpaceReclaimed'):
 		return True
 	return any(value for key, value in pruned.items() if key.endswith('Deleted'))
+
+
+def through(client, container):
+	"""
+	`container` read again through `client`, so that what is done to it —its
+	stop, its start, its removal— goes through that client too: a container
+	object always uses the one it was read with. As it was if that fails.
+	"""
+	if client is getattr(container, "client", None):
+		return container
+	try:
+		return client.containers.get(container.id)
+	except Exception as e:
+		debug(f"Could not read {getattr(container, 'name', container)} through the update client: {e}")
+		return container
 
 
 class DockerManager:
@@ -597,6 +613,25 @@ class DockerManager:
 			error(f"Could not display information for container {container_name}. Error: [{e}]")
 			return get_text("error_showing_info_container", container_name), False, False, None
 
+	def update_client(self):
+		"""
+		The client the steps of an update go through, which waits
+		host_registry.UPDATE_TIMEOUT_SECONDS rather than thirty seconds.
+
+		An update that gives up halfway is the worst way for one to fail: the
+		container is stopped, and the rollback is left to a host that has just
+		stopped answering in time. Measured on a disk slowed down to 50 IOPS,
+		right after Docker deleted an image of a hundred thousand files: a
+		container that exited at once took 128 s to show as stopped. With the
+		working client the stop gave up at forty seconds, the rollback's start
+		at thirty, and the container was left stopped on its old image. With
+		this one the update went through.
+		"""
+		try:
+			return host_registry.update_client(self.host_id)
+		except host_registry.HostUnavailable:
+			return self.client
+
 	def update(self, container_id, container_name, message, bot, tag=None):
 		"""
 		Update a container with a new image while preserving all configuration.
@@ -630,9 +665,11 @@ class DockerManager:
 				)
 				return get_text("self_update_message")
 			else:
-				# Regular container update
-				client = self.client
-				container = client.containers.get(container_id)
+				# Regular container update. Looked up through the working
+				# client first, so that a host that is gone still says so in
+				# thirty seconds rather than ten minutes.
+				client = self.update_client()
+				container = through(client, self.client.containers.get(container_id))
 
 				# Extract all configuration from current container
 				config = extract_container_config(container, tag)
@@ -654,6 +691,7 @@ class DockerManager:
 					# Where the progress went: an auto-update reports to the
 					# notification channel, a button to the chat it was pressed in.
 					notify_func=update_notify(self.host_id, message.chat.id if message else None),
+					remove_image_func=lambda image_id: delete_old_image_later(self.host_id, image_id),
 				)
 				return result
 		except Exception as e:
@@ -673,12 +711,13 @@ class DockerManager:
 		network/ipc/pid/uts namespace).
 		"""
 		try:
-			container = self.client.containers.get(container_id)
+			client = self.update_client()
+			container = through(client, self.client.containers.get(container_id))
 			config = extract_container_config(container, tag=None)
 			if config_overrides:
 				config.update(config_overrides)
 			result = perform_update(
-				client=self.client,
+				client=client,
 				container=container,
 				config=config,
 				container_name=container_name,
@@ -2162,8 +2201,7 @@ class DockerUpdateMonitor:
 		# The same builder the toggles repaint with: a keyboard assembled by
 		# hand here drifts from the one that replaces it on the first tap, and
 		# both have to agree on what a button says.
-		markup = build_generic_keyboard(all_updates, set(), None, "Update",
-										get_text("button_update"), get_text("button_update_all"))
+		markup = build_generic_keyboard(all_updates, set(), None, "Update")
 		message = send_message(message=available_updates_text(all_updates), reply_markup=markup)
 		if message:
 			save_update_data(message.chat.id, message.message_id, all_updates)
@@ -4457,6 +4495,10 @@ def _restart_dependents(owner, dependents, updated_service_name, new_parent_cont
 	if not dependents:
 		return
 	dependent_count = len(dependents)
+	# Stopped and started as the update did its own, without giving up after
+	# thirty seconds on a slow disk: one that did was left stopped.
+	update_client = owner.update_client()
+	dependents = [through(update_client, c) for c in dependents]
 
 	# Prefer the parent's container name (what shows up in `docker ps`) over
 	# the compose service name when addressing the user; keep the service
@@ -4561,6 +4603,93 @@ def _restart_dependents(owner, dependents, updated_service_name, new_parent_cont
 	send_fn(get_text("dependent_services_restarted_success", parent_display_name, dependent_count))
 
 
+# The images updates leave behind, as (host_id, image id), while an update or
+# a batch of them is under way. See old_images_deleted_afterwards.
+_old_images = contextvars.ContextVar("old_images", default=None)
+
+
+@contextlib.contextmanager
+def old_images_deleted_afterwards():
+	"""
+	Holds back the deletion of the images updated containers ran until what
+	runs inside is over, and then deletes them in the background.
+
+	Deleted at the end of each update, the image held the batch up: on a slow
+	disk Docker takes more than the client's thirty seconds to delete one,
+	the client gave up, and the daemon, still busy with it, kept the next
+	request hanging for thirty more. A minute lost between one container and
+	the next, and an image that may or may not have gone.
+
+	Nested, the outermost wins: a batch deletes them once it is over, not
+	after each of its updates. Which also deletes once an image two of its
+	containers ran, the first deletion of which failed while the other still
+	used it.
+	"""
+	if _old_images.get() is not None:
+		yield
+		return
+	pending = []
+	token = _old_images.set(pending)
+	try:
+		yield
+	finally:
+		_old_images.reset(token)
+		if pending:
+			delete_old_images(pending)
+
+
+def delete_old_image_later(host_id, image_id):
+	"""
+	Leaves the image an updated container ran to be deleted when the update
+	or batch under way is over, or right away, in the background, with none.
+	"""
+	pending = _old_images.get()
+	if pending is None:
+		delete_old_images([(host_id, image_id)])
+	elif (host_id, image_id) not in pending:
+		pending.append((host_id, image_id))
+
+
+def delete_old_images(images):
+	"""Deletes the (host_id, image id) given in a thread of its own, one after another."""
+	if images:
+		threading.Thread(target=_delete_old_images, args=(list(images),), name="old-images", daemon=True).start()
+
+
+def _delete_old_images(images):
+	"""
+	The body of delete_old_images. Through each host's slow client, the one the
+	prunes use: nothing waits on this any more, and with the working client a
+	deletion that took longer than thirty seconds was logged as failed while
+	Docker could still be at it. Whatever goes wrong stays in the log — an
+	image left behind is what /prune is for.
+
+	Meanwhile Docker answers no other question about images on that host,
+	whichever image it is about: measured on a disk slowed down to 50 IOPS,
+	an `image inspect` of an unrelated one waited the whole two minutes the
+	deletion took. An update started then is not hurt by it: its steps go
+	through the update client, which waits that long. Only the reads with
+	the working client give up after thirty seconds, and they fail safe —
+	"not up to date", a version left unsaid, a check to repeat.
+	"""
+	for host_id, image_id in images:
+		short = image_id.replace("sha256:", "")[:CONTAINER_ID_LENGTH]
+		try:
+			try:
+				client = host_registry.slow_client(host_id)
+			except host_registry.HostUnavailable:
+				client = manager(host_id).client
+			debug(f"[DELETE_IMAGE] Removing old image {short}")
+			started = time.monotonic()
+			client.images.remove(image_id)
+			debug(f"[DELETE_IMAGE] ✅ Old image {short} deleted in {time.monotonic() - started:.0f}s")
+		except docker.errors.ImageNotFound:
+			debug(f"[DELETE_IMAGE] Old image {short} was already gone")
+		except Exception as e:
+			debug(f"[DELETE_IMAGE] Warning: Could not delete old image {short}: {e}")
+
+
+@old_images_deleted_afterwards()
 def perform_container_update(container_id, container_name, tag=None, send_fn=None, hold_events=False):
 	"""
 	Single entry point for container updates. Wraps the full flow:
@@ -4889,6 +5018,9 @@ def update_container(ref, name, tag=None, send=None):
 	`send` takes the text and returns the sent message, or None to stay
 	quiet. By default, the chat being answered.
 	"""
+	# Offered only to someone who updated it by hand, here, and not to a
+	# tag change: that one picks a version rather than following the tag.
+	offer = send is None and tag is None
 	if send is None:
 		send = lambda msg: send_message(message=msg)
 	# A new tag is a different image: what the old one runs says nothing.
@@ -4898,7 +5030,7 @@ def update_container(ref, name, tag=None, send=None):
 	if store.get("bot.extended_messages") or is_own_container(ref_host(ref), ref_id(ref), name):
 		perform_container_update(ref, name, tag=tag, send_fn=send)
 		return
-	_update_containers_quietly([(ref, name)], tag=tag, send=send)
+	_update_containers_quietly([(ref, name)], tag=tag, send=send, offer_auto_update=offer)
 
 
 def update_containers(targets, up_to_date=(), missing=(), send=None, report_up_to_date=True):
@@ -4946,15 +5078,19 @@ def update_containers(targets, up_to_date=(), missing=(), send=None, report_up_t
 			error(f"Could not update container {name}. Error: [{e}]")
 			reply(update_result_text(ref_host(ref), name, ok=False))
 
-	if store.get("bot.extended_messages"):
-		for ref, name in others:
-			guarded(ref, name)
-		for host_id, name in up_to_date:
-			reply(update_result_text(host_id, name, up_to_date=True))
-		for host_id, name in missing:
-			reply(update_result_text(host_id, name, ok=False))
-	elif others or up_to_date or missing:
-		_update_containers_quietly(others, up_to_date=up_to_date, missing=missing, send=send)
+	# The old images are deleted once all of them are updated, and before the
+	# bot's own update, which recreates the bot.
+	with old_images_deleted_afterwards():
+		if store.get("bot.extended_messages"):
+			for ref, name in others:
+				guarded(ref, name)
+			for host_id, name in up_to_date:
+				reply(update_result_text(host_id, name, up_to_date=True))
+			for host_id, name in missing:
+				reply(update_result_text(host_id, name, ok=False))
+		elif others or up_to_date or missing:
+			_update_containers_quietly(others, up_to_date=up_to_date, missing=missing, send=send,
+									   offer_auto_update=send is None)
 
 	for ref, name in own:
 		guarded(ref, name)
@@ -4991,11 +5127,13 @@ def update_result_text(host_id, name, old=None, new=None, ok=True, up_to_date=Fa
 	return f"{head}\n{by_host([(host_id, container_line(name, old, new))])}"
 
 
-def _update_containers_quietly(targets, tag=None, send=None, up_to_date=(), missing=()):
+def _update_containers_quietly(targets, tag=None, send=None, up_to_date=(), missing=(), offer_auto_update=False):
 	"""
 	The summarised form of update_containers, and of update_container.
 
 	`tag` only makes sense with one target: it is the /changetag flow's.
+	`offer_auto_update` puts the button that makes it update on its own under
+	the result of a single update that worked; see auto_update_offer.
 	"""
 	if send is None:
 		send = lambda msg: send_message(message=msg)
@@ -5040,10 +5178,48 @@ def _update_containers_quietly(targets, tag=None, send=None, up_to_date=(), miss
 			summary += get_text("updated_batch_failed") + "\n" + lines(failed)
 		if current:
 			summary += get_text("updated_batch_up_to_date") + "\n" + lines(current)
+	offer = auto_update_offer(*targets[0]) if offer_auto_update and total == 1 and updated else None
+	if offer is not None:
+		send_message(message=summary, reply_markup=offer)
+		return
 	# In pieces when long: a big fleet's batch, a line per container and its
 	# versions, went past 4096 characters and the whole summary was lost.
 	for piece in split_for_telegram(summary):
 		send(piece)
+
+
+def auto_update_offer(ref, name):
+	"""
+	The button under a container's "updated" that makes it update on its own
+	from then on, or None when it would have nothing to do.
+
+	Most installations update the same containers by hand time after time and
+	very few have ever set one to update on its own, which suggests they do not
+	know it can. Right after updating one is when it is worth saying.
+
+	Not when it is already decided —set from the bot or by a DCB-* label, which
+	the bot cannot change—, when the update check is off and nothing would run
+	it, or when it might be the bot. Only for one container: for several, the
+	list in /settings, where each tap is saved, already does it.
+	"""
+	if not store.get("bot.check_updates"):
+		return None
+	try:
+		owner, container = find_live_container(ref, name)
+	except Exception as e:
+		debug(f"Could not look {name} up to offer updating it on its own: {e}")
+		return None
+	if container is None:
+		return None
+	host_id = owner.host_id
+	if update_mode(host_id, container.name, container.labels) != (None, None):
+		return None
+	if might_be_the_bot(host_id, container_image(container)):
+		return None
+	markup = InlineKeyboardMarkup(row_width=1)
+	markup.add(InlineKeyboardButton(get_text("button_auto_update_offer"),
+									callback_data=f"autoUpdateOffer|{container_ref(host_id, container)}"))
+	return markup
 
 def run_compose_project(project_name, host_id=None):
 	"""Starts a complete Docker Compose project respecting dependency order."""
@@ -5081,8 +5257,8 @@ def delete_compose_project(project_name, host_id=None):
 	containers, own = without_the_bot(host_id, project_info.containers)
 	container_count = len(containers)
 
-	# Initial message
-	send_message(message=f'{label}{get_text("deleting_project", html.escape(str(project_name)), container_count)}')
+	# The progress line, gone when the work is done, as for the other project actions
+	progress = send_message(message=f'{label}{get_text("deleting_project", html.escape(str(project_name)), container_count)}')
 
 	# Delete each container
 	for container in containers:
@@ -5096,7 +5272,8 @@ def delete_compose_project(project_name, host_id=None):
 			debug(f"Error deleting {service_name}: {e}")
 			send_message(message=f'{label}{get_text("error_deleting_service", html.escape(str(service_name)))}')
 
-	# Final message
+	if progress:
+		delete_message(progress.message_id)
 	send_message(message=f'{get_text("project_deleted_success", html.escape(str(project_name)), container_count)}{host_suffix(host_id)}')
 	_tell_bot_skipped(host_id, own)
 
@@ -6021,54 +6198,10 @@ def _send_exec_result(containerId, containerName, command, result, only_failures
 def comparison_message(containerId, containerName, comparison):
 	"""
 	The comparison shown before an update or a tag change is confirmed: the
-	image running and the one it would become, what changes between them,
-	and where to read more.
-
-	One builder for both: they used to be two copies of the same text, and a
-	change had to be made twice — the versions were. When both are the same
-	image, which only a tag change can find, it says that instead.
+	container, and under it what comparison_body says about the new image.
+	One builder for both, so a change is made once.
 	"""
-	message = f"{host_label(ref_host(containerId))}📦 <b>{containerName}</b>\n\n"
-	if comparison['current_digest'] == comparison['new_digest']:
-		message += (f"ℹ️ <b>{get_text('update_information')}:</b>\n"
-					f"   {get_text('update_tag')}: <code>{comparison['current_tag']}</code> → <code>{comparison['new_tag']}</code>"
-					f"{comparison_version_line(comparison['current_version'])}\n"
-					f"   {get_text('update_created')}: {comparison['current_date']}\n"
-					f"   {get_text('update_size')}: {comparison['current_size']}\n"
-					f"   {get_text('update_digest')}: <code>{comparison['current_digest']}</code>\n\n"
-					f"{get_text('update_same_image')}")
-	else:
-		changes = [f"{get_text('update_size_change')}: {comparison['size_diff']}"]
-		if comparison['days_diff'] > 0:
-			changes.append(f"{comparison['days_diff']} {get_text('update_days_newer')}")
-		elif comparison['days_diff'] < 0:
-			changes.append(f"{abs(comparison['days_diff'])} {get_text('update_days_older')}")
-		version_change = comparison_version_change(comparison)
-		if version_change:
-			changes.append(version_change)
-		# Bullets only when there is more than one change.
-		changes_text = ("\n   • " + "\n   • ".join(changes)) if len(changes) > 1 else f"\n   {changes[0]}"
-		for side, emoji, title in (("current", "📌", "update_current_image"), ("new", "🆕", "update_new_image")):
-			message += (f"{emoji} <b>{get_text(title)}:</b>\n"
-						f"   {get_text('update_tag')}: <code>{comparison[side + '_tag']}</code>"
-						f"{comparison_version_line(comparison[side + '_version'])}\n"
-						f"   {get_text('update_created')}: {comparison[side + '_date']}\n"
-						f"   {get_text('update_size')}: {comparison[side + '_size']}\n"
-						f"   {get_text('update_digest')}: <code>{comparison[side + '_digest']}</code>\n\n")
-		message += f"📊 <b>{get_text('update_changes')}:</b>{changes_text}"
-
-	message += comparison_version_notes(comparison)
-
-	if comparison['description']:
-		message += f"\n\n📝 <b>{get_text('update_description')}:</b>\n{comparison['description']}"
-
-	if comparison['registry_url']:
-		if comparison['registry_name']:
-			link_text = get_text('update_more_info_registry', comparison['registry_name'])
-		else:
-			link_text = get_text('update_more_info')
-		message += f"\n\n🔗 <a href=\"{comparison['registry_url']}\">{link_text}</a>"
-	return message
+	return f"{host_label(ref_host(containerId))}📦 <b>{html.escape(str(containerName))}</b>\n\n{comparison_body(comparison)}"
 
 
 def confirm_change_tag(containerId, containerName, tag):
@@ -6174,15 +6307,18 @@ def get_image_comparison(containerId, containerName, new_tag=None):
 			and not same_running_manifest(owner.client, container, current_image.id, new_image)
 		size_diff = new_size - current_size
 
-		# Format dates
-		from datetime import datetime
+		# Dates: the day each image was built, and how old the new one is,
+		# which is what the comparison says of it.
+		from datetime import datetime, timezone
+		new_age_days = None
 		try:
 			current_date = datetime.fromisoformat(current_created.replace('Z', '+00:00'))
 			new_date = datetime.fromisoformat(new_created.replace('Z', '+00:00'))
 			current_date_str = current_date.strftime('%Y-%m-%d')
 			new_date_str = new_date.strftime('%Y-%m-%d')
 			days_diff = (new_date - current_date).days
-		except:
+			new_age_days = max(0, (datetime.now(timezone.utc) - new_date).days)
+		except Exception:
 			current_date_str = get_text('update_date_unknown')
 			new_date_str = get_text('update_date_unknown')
 			days_diff = 0
@@ -6194,28 +6330,6 @@ def get_image_comparison(containerId, containerName, new_tag=None):
 			size_diff_str = f"-{sizeof_fmt(abs(size_diff))}"
 		else:
 			size_diff_str = get_text('update_no_size_change')
-
-		# Get Docker Hub description (optional, may fail for private images)
-		description = get_dockerhub_description(tag_to_pull)
-
-		# Clean up description: remove Markdown formatting and truncate
-		if description:
-			# Remove Markdown headers (# ## ### with or without space)
-			description = re.sub(r'^#+\s*', '', description, flags=re.MULTILINE)
-			# Remove Markdown links [text](url) -> text
-			description = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', description)
-			# Remove Markdown bold/italic (**text** or *text* or __text__)
-			description = re.sub(r'[*_]{1,2}([^*_]+)[*_]{1,2}', r'\1', description)
-			# Remove extra whitespace and newlines
-			description = ' '.join(description.split())
-			# Remove any remaining # symbols
-			description = description.replace('#', '')
-			# Truncate if still too long
-			if len(description) > 200:
-				description = description[:200].rsplit(' ', 1)[0] + '...'
-			# Final cleanup: if description is just "..." or empty, set to None
-			if not description or description.strip() in ['...', '.', '']:
-				description = None
 
 		# Build registry URL
 		registry_url, registry_name = build_registry_url(tag_to_pull)
@@ -6240,7 +6354,8 @@ def get_image_comparison(containerId, containerName, new_tag=None):
 			'current_date': current_date_str,
 			'new_date': new_date_str,
 			'days_diff': days_diff,
-			'description': description,
+			'new_age_days': new_age_days,
+			'size_delta': size_diff,
 			'registry_url': registry_url,
 			'registry_name': registry_name,
 			'current_version': current_version,
@@ -6251,87 +6366,6 @@ def get_image_comparison(containerId, containerName, new_tag=None):
 		error(f"Error getting update comparison for {containerName}: {e}")
 		return None
 
-
-def sanitize_dockerhub_description(text):
-	"""
-	Sanitize a Docker Hub description so it renders cleanly inside a
-	Telegram HTML message:
-	- Convert <br> and common block-level closing tags to line breaks.
-	- Strip all remaining HTML tags.
-	- Decode HTML entities (e.g. &amp; -> &).
-	- Escape characters that are special in Telegram HTML (& < >).
-	- Collapse runs of whitespace and blank lines.
-	"""
-	if not text:
-		return text
-
-	# Line breaks for <br> variants and common block-level closers
-	text = re.sub(r'<\s*br\s*/?\s*>', '\n', text, flags=re.IGNORECASE)
-	text = re.sub(r'</\s*(p|div|li|tr|h[1-6])\s*>', '\n', text, flags=re.IGNORECASE)
-
-	# Strip any remaining HTML tags
-	text = re.sub(r'<[^>]+>', '', text)
-
-	# Decode HTML entities before re-escaping for Telegram
-	text = html.unescape(text)
-
-	# Escape Telegram HTML special chars (interpolated into an HTML message)
-	text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-
-	# Collapse whitespace: tabs/spaces -> single space, max one blank line
-	text = re.sub(r'[ \t]+', ' ', text)
-	text = re.sub(r' *\n *', '\n', text)
-	text = re.sub(r'\n{3,}', '\n\n', text)
-
-	return text.strip()
-
-def get_dockerhub_description(image_tag):
-	"""
-	Get description from Docker Hub API.
-	Returns truncated description or None if not available.
-	"""
-	try:
-		import requests
-
-		# Parse image name
-		# Format: [registry/]repository[:tag]
-		# Examples: nginx:latest, library/nginx:latest, ghcr.io/user/image:tag
-
-		parts = image_tag.split('/')
-
-		# Check if it's a Docker Hub image (no registry or docker.io)
-		if len(parts) == 1 or (len(parts) == 2 and '.' not in parts[0]):
-			# Docker Hub image
-			if len(parts) == 1:
-				# Official image (e.g., nginx:latest)
-				namespace = 'library'
-				repo_with_tag = parts[0]
-			else:
-				# User image (e.g., user/image:latest)
-				namespace = parts[0]
-				repo_with_tag = parts[1]
-
-			# Remove tag
-			repo = repo_with_tag.split(':')[0]
-
-			# Call Docker Hub API
-			url = f"https://hub.docker.com/v2/repositories/{namespace}/{repo}/"
-			response = requests.get(url, timeout=5)
-
-			if response.status_code == 200:
-				data = response.json()
-				full_description = data.get('full_description', '')
-				if full_description:
-					# Sanitize before truncating so we don't break HTML/entities
-					sanitized = sanitize_dockerhub_description(full_description)
-					if sanitized and len(sanitized) > 300:
-						return sanitized[:300].rsplit(' ', 1)[0] + '...'
-					return sanitized or None
-
-		return None
-	except Exception as e:
-		debug(f"Could not get Docker Hub description: {e}")
-		return None
 
 def build_registry_url(image_tag):
 	"""
@@ -6485,7 +6519,7 @@ def page_of(container_available, reference):
 	return 0
 
 
-def build_generic_keyboard(container_available, selected_containers, originalMessageId, action_type, button_text, button_text_all=None, page=0):
+def build_generic_keyboard(container_available, selected_containers, originalMessageId, action_type, page=0):
 	"""Generic keyboard builder for the multi-select update flow.
 
 	container_available: list of [id, name] pairs.
@@ -6529,19 +6563,19 @@ def build_generic_keyboard(container_available, selected_containers, originalMes
 			navigation.append(InlineKeyboardButton("▶️", callback_data=f"page{action_type}|{page + 1}"))
 		markup.row(*navigation)
 
-	fixed_buttons = []
+	# Marking all stays, for when unticking one is quicker than ticking all
+	# but one; with something ticked it becomes the button that updates it.
+	# Below, updating everything takes one tap less than marking all and then
+	# updating, and is there whatever is ticked.
 	if selected_containers:
-		fixed_buttons.append(InlineKeyboardButton(button_text, callback_data=f"confirm{action_type}Selected|{originalMessageId}"))
+		markup.row(InlineKeyboardButton(get_text("button_update_selected", len(selected_containers)),
+										callback_data=f"confirm{action_type}Selected|{originalMessageId}"))
 	else:
-		# Use button_text_all if provided, otherwise use button_text
-		text_to_use = button_text_all if button_text_all else button_text
-		fixed_buttons.append(InlineKeyboardButton(text_to_use, callback_data=f"toggle{action_type}All"))
-
-	fixed_buttons.append(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
-
+		markup.row(InlineKeyboardButton(get_text("button_mark_all"), callback_data=f"toggle{action_type}All"))
 	# Always side by side, one row: with a single column add() would stack
 	# them, and the last row is where the fixed buttons are expected to be.
-	markup.row(*fixed_buttons)
+	markup.row(InlineKeyboardButton(get_text("button_update_all"), callback_data=f"{action_type.lower()}Everything|{originalMessageId}"),
+				InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
 	return markup
 
 def count_actionable_buttons(markup):

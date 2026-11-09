@@ -114,43 +114,63 @@ def describe_exit_code(code):
 	return str(number)
 
 
-def comparison_version_line(version):
-	"""The version line under a tag in the comparison, or nothing."""
-	if not version:
+def image_age(days):
+	"""How old an image is, in words; "" when its date is unknown."""
+	if days is None or days < 0:
 		return ""
-	return f"\n   {get_text('update_version')}: <code>{html.escape(version)}</code>"
+	if days == 0:
+		return get_text('update_age_today')
+	if days == 1:
+		return get_text('update_age_yesterday')
+	return get_text('update_age_days', str(days))
 
 
-def comparison_version_change(comparison):
+def comparison_body(comparison):
 	"""
-	The version step as one of the comparison's changes, or None when there
-	is none to show. A bullet like the others: on its line when short, and
-	one version under the other, lined up with the bullet's text, when long.
+	What the comparison before an update or a tag change says, under the
+	container's name: the version step, how old the new image is and how much
+	its size changes on one line; the warning of a major version; and where to
+	read more. What it used to say besides — both images' tags, dates, sizes
+	and digests, and the project's description — is the same every time or
+	nothing anyone compares by eye, and made it a screen long.
+
+	The versions go one under the other when they are long, as everywhere
+	else. Without versions the tags stand in when they change, which only a
+	tag change does: `latest → latest` would say nothing.
 	"""
+	e = html.escape
 	old, new = comparison.get('current_version'), comparison.get('new_version')
-	if not (old and new and old != new):
-		return None
-	label = get_text('update_version')
-	if len(old) + len(new) > VERSION_STACK_THRESHOLD:
-		# Under the text of "   • ", which starts in the sixth column.
-		return f"{label}:{version_lines(old, new, indent=' ' * 6)}"
-	return f"{label}: {format_versions(old, new)}"
-
-
-def comparison_version_notes(comparison):
-	"""
-	What the comparison says about the versions below its changes: a warning
-	when the major version goes up — where the breaking changes are — and
-	where to read what is new.
-	"""
-	old, new = comparison.get('current_version'), comparison.get('new_version')
-	notes = ""
+	old_tag, new_tag = comparison.get('current_tag'), comparison.get('new_tag')
+	if comparison.get('current_digest') == comparison.get('new_digest'):
+		return (f"🏷️ <code>{e(str(old_tag))}</code> → <code>{e(str(new_tag))}</code>"
+				f"\n{get_text('update_same_image')}")
+	stacked = ""
+	parts = []
+	if old or new:
+		if old and new and old != new and len(old) + len(new) > VERSION_STACK_THRESHOLD:
+			stacked = version_lines(old, new)
+		else:
+			parts.append(format_versions(old, new))
+	elif old_tag != new_tag:
+		parts.append(f"<code>{e(str(old_tag))}</code> → <b><code>{e(str(new_tag))}</code></b>")
+	parts.append(image_age(comparison.get('new_age_days')))
+	if comparison.get('size_delta'):
+		parts.append(e(comparison['size_diff']))
+	parts = [part for part in parts if part]
+	lines = [f"⬆️ {' · '.join(parts)}{stacked}" if parts else f"⬆️{stacked}"]
 	if old and new and old != new and is_major_upgrade(old, new):
-		notes += f"\n\n{get_text('update_major_warning')}"
+		lines.append(get_text('update_major_short'))
+	links = []
 	if comparison.get('release_notes_url'):
-		notes += (f"\n\n📋 <a href=\"{html.escape(comparison['release_notes_url'], quote=True)}\">"
-				f"{get_text('update_release_notes', html.escape(new or ''))}</a>")
-	return notes
+		url = comparison['release_notes_url']
+		key = 'info_releases' if url.endswith("/releases") else 'info_release_notes'
+		links.append(f"📋 <a href=\"{e(url, quote=True)}\">{get_text(key)}</a>")
+	if comparison.get('registry_url'):
+		links.append(f"🔗 <a href=\"{e(comparison['registry_url'], quote=True)}\">"
+					f"{e(comparison.get('registry_name') or comparison['registry_url'])}</a>")
+	if links:
+		lines.append(" · ".join(links))
+	return "\n".join(lines)
 
 
 def release_notes_url(source, version):

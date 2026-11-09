@@ -1161,7 +1161,8 @@ def _report_updated(config, container_name, left_behind, get_text_func, save_sta
 
 def perform_update(client, container, config, container_name, message, edit_message_func,
 				   debug_func, error_func, get_text_func, save_status_func,
-				   container_id_length, telegram_group, skip_pull=False, notify_func=None):
+				   container_id_length, telegram_group, skip_pull=False, notify_func=None,
+				   remove_image_func=None):
 	"""
 	Perform the actual container update with the extracted configuration.
 	Uses a lock to prevent concurrent updates of the same container.
@@ -1185,6 +1186,9 @@ def perform_update(client, container, config, container_name, message, edit_mess
 		notify_func: Called with a text for the user when the update went
 			through but the original could not be deleted, and is left under
 			another name. The returned text is the plain success either way.
+		remove_image_func: Called with the id of the image the original ran,
+			once the update went through, for the caller to delete it later.
+			Without it the image is deleted here, before returning.
 
 	Returns:
 		str: Success or error message
@@ -1200,14 +1204,15 @@ def perform_update(client, container, config, container_name, message, edit_mess
 		return _perform_update_locked(client, container, config, container_name, message, edit_message_func,
 									   debug_func, error_func, get_text_func, save_status_func,
 									   container_id_length, telegram_group, skip_pull=skip_pull,
-									   notify_func=notify_func)
+									   notify_func=notify_func, remove_image_func=remove_image_func)
 	finally:
 		_done_updating(container.id)
 
 
 def _perform_update_locked(client, container, config, container_name, message, edit_message_func,
 						   debug_func, error_func, get_text_func, save_status_func,
-						   container_id_length, telegram_group, skip_pull=False, notify_func=None):
+						   container_id_length, telegram_group, skip_pull=False, notify_func=None,
+						   remove_image_func=None):
 	"""
 	Internal function that performs the actual update (called with lock held).
 	"""
@@ -1532,7 +1537,18 @@ def _perform_update_locked(client, container, config, container_name, message, e
 		# was just created from, so attempting to remove it would fail (or worse,
 		# leave dangling references); skip the delete entirely. So does an
 		# original that is still there, which is still using it.
-		if old_image_id and not skip_pull and not left_behind:
+		#
+		# With `remove_image_func` the image is handed over instead, for the
+		# caller to delete once the update, or the whole batch, is over. On a
+		# slow disk deleting an image outlasted the client's thirty seconds,
+		# and the daemon, still busy with it, left the next request hanging
+		# for another thirty: a minute lost between one update and the next.
+		if old_image_id and not skip_pull and not left_behind and remove_image_func is not None:
+			try:
+				remove_image_func(old_image_id)
+			except Exception as e:
+				debug_func(f"[DELETE_IMAGE] Warning: Could not hand over the old image: {e}")
+		elif old_image_id and not skip_pull and not left_behind:
 			try:
 				debug_func(f"[DELETE_IMAGE] Removing old image {old_image_id[:container_id_length]}")
 				client.images.remove(old_image_id)

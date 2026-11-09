@@ -2439,7 +2439,10 @@ def test_update_clears_the_update_cache_of_its_own_host():
 		captured = {}
 		original_perform = dcb.perform_update
 		original_extract = dcb.extract_container_config
-		dcb.perform_update = lambda **kwargs: captured.update(save=kwargs["save_status_func"]) or "ok"
+		dcb.perform_update = lambda **kwargs: captured.update(save=kwargs["save_status_func"],
+															  remove=kwargs["remove_image_func"],
+															  client=kwargs["client"],
+															  container=kwargs["container"]) or "ok"
 		dcb.extract_container_config = lambda container, tag=None: {"image": "nginx:1.27"}
 		try:
 			owner = dcb.manager("h_nas")
@@ -2449,10 +2452,27 @@ def test_update_clears_the_update_cache_of_its_own_host():
 			dcb.perform_update = original_perform
 			dcb.extract_container_config = original_extract
 		assert "save" in captured, "update did not reach perform_update"
+		# Its steps go through the update client, the container included: one
+		# that gave up after thirty seconds on a slow disk left it stopped.
+		import host_registry
+		slow = host_registry.update_client("h_nas")
+		assert captured["client"] is slow and captured["client"] is not owner.client
+		assert captured["container"] is slow.containers.get.return_value, "el contenedor sigue en el cliente normal"
 		# perform_update reports success with (image, name, False).
 		captured["save"]("nginx:1.27", "nginx", False)
 		assert dcb.read_container_update_status("nginx:1.27", "nginx", "h_nas") is False
 		assert dcb.read_container_update_status("nginx:1.27", "nginx", "h_local") is True
+		# And the old image is deleted on that host too, once the update is over.
+		handed = []
+		original_delete = dcb.delete_old_images
+		dcb.delete_old_images = handed.extend
+		try:
+			with dcb.old_images_deleted_afterwards():
+				captured["remove"]("sha256:old")
+				assert handed == [], "se borró la imagen antes de acabar"
+		finally:
+			dcb.delete_old_images = original_delete
+		assert handed == [("h_nas", "sha256:old")], handed
 	finally:
 		store.forget_update_status("h_nas", "nginx")
 		store.forget_update_status("h_local", "nginx")
@@ -2594,7 +2614,7 @@ def test_updateall_names_the_host_on_a_button_only_when_the_list_spans_hosts():
 		pairs = [[c.split("|", 1)[1], "nginx"]
 					for c in harness.keyboard_callbacks(markup) if c.startswith("toggleUpdate|")]
 		repainted = harness.keyboard_labels(
-			dcb.build_generic_keyboard(pairs, set(), None, "Update", "update", "update all"))
+			dcb.build_generic_keyboard(pairs, set(), None, "Update"))
 		assert any("casa" in label for label in repainted), repainted
 		assert any("nas" in label for label in repainted), repainted
 	finally:
@@ -2614,12 +2634,12 @@ def test_a_list_across_hosts_gets_one_column_and_one_host_keeps_the_setting():
 	try:
 		pairs = [[dcb.make_ref("h_local", "aaaaa"), "nginx"], [dcb.make_ref("h_nas", "bbbbb"), "plex"],
 					[dcb.make_ref("h_nas", "ccccc"), "sonarr"]]
-		rows = dcb.build_generic_keyboard(pairs, set(), None, "Update", "u", "ua").keyboard
-		assert [len(row) for row in rows[:-1]] == [1, 1, 1], rows
+		rows = dcb.build_generic_keyboard(pairs, set(), None, "Update").keyboard
+		assert [len(row) for row in rows[:-2]] == [1, 1, 1], rows
 
 		one_host = [[dcb.make_ref("h_local", c), n] for c, n in (("aaaaa", "nginx"), ("bbbbb", "plex"))]
-		rows = dcb.build_generic_keyboard(one_host, set(), None, "Update", "u", "ua").keyboard
-		assert [len(row) for row in rows[:-1]] == [2], rows
+		rows = dcb.build_generic_keyboard(one_host, set(), None, "Update").keyboard
+		assert [len(row) for row in rows[:-2]] == [2], rows
 	finally:
 		store.set("bot.button_columns", previous)
 		_restore_hosts()
@@ -3089,7 +3109,8 @@ def test_a_project_action_removes_its_progress_line():
 	dcb.send_message = fake_send
 	dcb.delete_message = lambda message_id, *a, **kw: deleted.append(message_id)
 	try:
-		for action in (dcb.stop_compose_project, dcb.run_compose_project, dcb.restart_compose_project):
+		for action in (dcb.stop_compose_project, dcb.run_compose_project, dcb.restart_compose_project,
+					   dcb.delete_compose_project):
 			sent.clear(); deleted.clear()
 			action("media", "h_nas")
 			assert deleted == [1], (action.__name__, sent, deleted)
@@ -3341,17 +3362,131 @@ def _comparison(old, new):
 			'current_version': old, 'new_version': new, 'release_notes_url': None}
 
 
-def test_the_comparison_lists_the_version_as_one_more_change():
-	"""It came after the bullets without one, and a long version ran on in one line."""
+def test_the_comparison_says_what_decides_an_update_in_a_few_lines():
+	"""
+	It used to give both images' tags, dates, sizes and digests and the
+	project's description, a screen long. Now: the versions, how old the new
+	image is and its size change on one line; the major version warning; links.
+	"""
 	ref = dcb.make_ref("h_local", "abcde")
-	short = dcb.comparison_message(ref, "plex", _comparison("1.43.3", "1.43.4"))
-	assert "   • " + i18n.get_text("update_version") + ": <code>1.43.3</code> → <b><code>1.43.4</code></b>" in short, short
-	long = dcb.comparison_message(ref, "plex", _comparison("1.43.4.10903-e5521bd8c-ls326", "1.43.4.10903-e5521bd8c-ls327"))
-	assert ("   • " + i18n.get_text("update_version") + ":\n      <code>1.43.4.10903-e5521bd8c-ls326</code>"
-			"\n       ↓\n      <b><code>1.43.4.10903-e5521bd8c-ls327</code></b>") in long, long
-	assert dcb.comparison_message(ref, "plex", _comparison(None, None)).count("   • ") == 2
-	for text in (short, long):
+	t = i18n.get_text
+	short = dcb.comparison_message(ref, "plex", dict(_comparison("1.43.3", "1.43.4"), new_age_days=2, size_delta=-6900000))
+	assert short.endswith("\n\n⬆️ <code>1.43.3</code> → <b><code>1.43.4</code></b> · " + t("update_age_days", "2") + " · -6.6MiB"), short
+	assert "aaa" not in short and "405MiB" not in short, "ni digest ni tamaños de cada imagen"
+
+	long = dcb.comparison_message(ref, "plex", dict(_comparison("1.43.4.10903-e5521bd8c-ls326", "1.43.4.10903-e5521bd8c-ls327"),
+														new_age_days=0))
+	assert ("⬆️ " + t("update_age_today") + "\n   <code>1.43.4.10903-e5521bd8c-ls326</code>"
+			"\n    ↓\n   <b><code>1.43.4.10903-e5521bd8c-ls327</code></b>") in long, long
+
+	# Without versions, `latest → latest` says nothing: only how old it is.
+	bare = dcb.comparison_message(ref, "plex", dict(_comparison(None, None), new_age_days=1))
+	assert bare.endswith("⬆️ " + t("update_age_yesterday")), bare
+	# A tag change without versions names the tags.
+	tags = dcb.comparison_message(ref, "plex", dict(_comparison(None, None), new_tag="plex:beta"))
+	assert "<code>plex:latest</code> → <b><code>plex:beta</code></b>" in tags, tags
+
+	major = dcb.comparison_message(ref, "app", dict(_comparison("1.4.2", "2.0.0"), registry_url="https://hub.docker.com/r/a/b",
+												registry_name="Docker Hub", release_notes_url="https://github.com/a/b/releases/tag/2.0.0"))
+	assert t("update_major_short") in major, major
+	assert major.endswith(f">{t('info_release_notes')}</a> · 🔗 <a href=\"https://hub.docker.com/r/a/b\">Docker Hub</a>"), major
+
+	same = dcb.comparison_message(ref, "plex", dict(_comparison(None, None), new_digest="aaa", new_tag="plex:1"))
+	assert same.endswith(t("update_same_image")), same
+	for text in (short, long, bare, tags, major, same):
 		_assert_telegram_html(text, "comparativa")
+
+
+def test_the_update_list_offers_to_update_everything_in_one_tap():
+	"""Marking all stays, and becomes "update selected (n)" once something is ticked."""
+	pairs = [[dcb.make_ref("h_local", c), n] for c, n in (("aaaaa", "nginx"), ("bbbbb", "plex"))]
+	t = i18n.get_text
+	rows = dcb.build_generic_keyboard(pairs, set(), 7, "Update").keyboard
+	assert [(b.text, b.callback_data) for b in rows[-2]] == [(t("button_mark_all"), "toggleUpdateAll")]
+	assert [(b.text, b.callback_data) for b in rows[-1]] == [(t("button_update_all"), "updateEverything|7"),
+																(t("button_cancel"), "cerrar")]
+	rows = dcb.build_generic_keyboard(pairs, {pairs[0][0]}, 7, "Update").keyboard
+	assert [(b.text, b.callback_data) for b in rows[-2]] == [(t("button_update_selected", 1), "confirmUpdateSelected|7")]
+	assert rows[-1][0].callback_data == "updateEverything|7"
+
+	confirmed = []
+	original = (dcb.confirm_update_selected, dcb.send_message)
+	dcb.confirm_update_selected = lambda chat, message: confirmed.append(dcb.load_update_data(chat, message))
+	sent = []
+	dcb.send_message = lambda **kw: sent.append(kw.get("message"))
+	try:
+		dcb.save_update_data(9, 90, pairs, {pairs[1][0]})
+		callbacks.cb_updateEverything(_update_ctx("updateEverything", 9, 90, originalMessageId="90"))
+		assert confirmed and confirmed[0][1] == {pairs[0][0], pairs[1][0]}, confirmed
+		dcb.clear_update_data(9, 90)
+		callbacks.cb_updateEverything(_update_ctx("updateEverything", 9, 90, originalMessageId="90"))
+		assert sent == [t("update_list_expired")] and len(confirmed) == 1, sent
+	finally:
+		dcb.confirm_update_selected, dcb.send_message = original
+
+
+def test_updating_one_by_hand_offers_to_let_it_update_on_its_own():
+	"""Only for one container, by hand, with the check on, and nothing decided yet."""
+	ref = dcb.make_ref("h_local", "aaaaa")
+	plex = _container("plex", "running")
+	plex.labels = {}
+	plex.attrs = {"Config": {"Image": "plex:latest"}}
+	owner = MagicMock(host_id="h_local")
+	original = (dcb.find_live_container, dcb.might_be_the_bot, store.container_update_mode)
+	dcb.find_live_container = lambda r, n: (owner, plex)
+	dcb.might_be_the_bot = lambda h, i: False
+	modes = {}
+	store.container_update_mode = lambda h, n: modes.get(n)
+	previous = store.get("bot.check_updates")
+	try:
+		store.set("bot.check_updates", True)
+		offer = dcb.auto_update_offer(ref, "plex")
+		assert offer.keyboard[0][0].callback_data.startswith("autoUpdateOffer|"), offer
+		modes["plex"] = "auto"
+		assert dcb.auto_update_offer(ref, "plex") is None
+		modes.clear()
+		plex.labels = {dcb.LABEL_AUTO_UPDATE: "false"}
+		assert dcb.auto_update_offer(ref, "plex") is None, "una etiqueta decide"
+		plex.labels = {}
+		dcb.might_be_the_bot = lambda h, i: True
+		assert dcb.auto_update_offer(ref, "plex") is None
+		dcb.might_be_the_bot = lambda h, i: False
+		store.set("bot.check_updates", False)
+		assert dcb.auto_update_offer(ref, "plex") is None, "sin comprobación nada lo actualizaría"
+	finally:
+		store.set("bot.check_updates", previous)
+		dcb.find_live_container, dcb.might_be_the_bot, store.container_update_mode = original
+
+
+def test_the_offer_goes_under_one_update_by_hand_only():
+	ref = dcb.make_ref("h_local", "aaaaa")
+	sent, offers = [], []
+	original = (dcb.send_message, dcb.perform_container_update, dcb.auto_update_offer, dcb.runs_latest_image,
+				dcb.delete_message, dcb.update_result_text)
+	dcb.send_message = lambda **kw: sent.append((kw.get("message"), kw.get("reply_markup"))) or MagicMock()
+	dcb.perform_container_update = lambda *a, **kw: dcb.UpdateOutcome(True, "", "1", "2")
+	dcb.auto_update_offer = lambda r, n: offers.append(n) or "MARKUP"
+	dcb.runs_latest_image = lambda r, n: False
+	dcb.delete_message = lambda *a, **kw: None
+	dcb.update_result_text = lambda *a, **kw: "ok"
+	previous = store.get("bot.extended_messages")
+	try:
+		store.set("bot.extended_messages", False)
+		dcb.update_container(ref, "plex")
+		assert sent[-1] == ("ok", "MARKUP"), sent
+		sent.clear(); offers.clear()
+		dcb.update_container(ref, "plex", tag="beta")
+		assert not offers and sent[-1][1] is None, "un cambio de tag no lo ofrece"
+		sent.clear()
+		dcb.update_container(ref, "plex", send=lambda m: sent.append((m, None)))
+		assert not offers, "la actualización automática no lo ofrece"
+		sent.clear()
+		dcb.update_containers([(ref, "plex"), (dcb.make_ref("h_local", "bbbbb"), "sonarr")])
+		assert not offers, "varios a la vez tampoco"
+	finally:
+		store.set("bot.extended_messages", previous)
+		(dcb.send_message, dcb.perform_container_update, dcb.auto_update_offer, dcb.runs_latest_image,
+		 dcb.delete_message, dcb.update_result_text) = original
 
 
 def _info(**overrides):
@@ -3866,6 +4001,17 @@ def test_the_slow_client_waits_longer_and_is_dropped_with_the_others():
 		assert host_registry.client("h_nas") is not first
 		host_registry.drop("h_nas")
 		assert host_registry.slow_client("h_nas") is not first
+
+		# The update's own, in between: long enough for a slow disk, short
+		# enough that a host gone halfway does not keep it ten minutes a step.
+		asked.clear()
+		updating = host_registry.update_client("h_nas")
+		assert asked == [host_registry.UPDATE_TIMEOUT_SECONDS], asked
+		assert (host_registry.DEFAULT_TIMEOUT_SECONDS < host_registry.UPDATE_TIMEOUT_SECONDS
+				< host_registry.SLOW_TIMEOUT_SECONDS)
+		assert host_registry.update_client("h_nas") is updating, "debe cachearse"
+		host_registry.drop("h_nas")
+		assert host_registry.update_client("h_nas") is not updating
 	finally:
 		_restore_hosts()
 
@@ -4780,6 +4926,80 @@ def test_the_bot_updates_itself_last_and_outside_the_summary():
 		restore()
 
 
+def test_a_batch_deletes_the_old_images_once_it_is_over():
+	"""
+	Deleted at the end of each update, an old image held the batch up: on a
+	slow Unraid disk Docker took more than the client's thirty seconds, and
+	still busy with it, kept the next request hanging for thirty more. A
+	minute between Ghost-Bitnarios and the next container. Now they are
+	deleted once the batch is over, before the bot updates itself, and an
+	image two of its containers ran is deleted once.
+	"""
+	calls, sent, edited, deleted, restore = _batch_stubs({}, own=("docker-controller-bot",))
+	stub = dcb.perform_container_update
+	removed, seen = [], []
+
+	def perform(ref, name, tag=None, send_fn=None, hold_events=False):
+		seen.append((name, list(removed)))
+		# As the real one does: each update holds its own back, too.
+		with dcb.old_images_deleted_afterwards():
+			if name != "docker-controller-bot":
+				dcb.delete_old_image_later("h_local", "sha256:ghost")
+		return stub(ref, name, tag=tag, send_fn=send_fn, hold_events=hold_events)
+
+	original_delete = dcb.delete_old_images
+	dcb.perform_container_update = perform
+	dcb.delete_old_images = lambda images: removed.append(list(images))
+	try:
+		dcb.update_containers(_targets("Ghost", "Ghost-Bitnarios", "docker-controller-bot"))
+		assert seen == [("Ghost", []), ("Ghost-Bitnarios", []),
+						("docker-controller-bot", [[("h_local", "sha256:ghost")]])], seen
+		assert removed == [[("h_local", "sha256:ghost")]], removed
+	finally:
+		dcb.delete_old_images = original_delete
+		restore()
+
+
+def test_old_images_are_deleted_in_the_background_through_the_slow_client():
+	"""
+	Nothing waits on the deletion any more, so it goes through the client the
+	prunes use, which waits minutes rather than thirty seconds. One already
+	gone or one that fails does not stop the rest, and outside any update or
+	batch an image is deleted right away.
+	"""
+	import docker
+	import host_registry
+	import requests
+	slow = MagicMock()
+	slow.images.remove.side_effect = [
+		None,
+		docker.errors.ImageNotFound("No such image: sha256:b"),
+		requests.exceptions.ReadTimeout("Read timed out. (read timeout=600)"),
+		None,
+	]
+	done = threading.Event()
+	original_slow, original_body = host_registry.slow_client, dcb._delete_old_images
+
+	def body(images):
+		try:
+			original_body(images)
+		finally:
+			done.set()
+
+	host_registry.slow_client = lambda host_id: slow
+	dcb._delete_old_images = body
+	try:
+		dcb.delete_old_image_later("h_local", "sha256:a")
+		assert done.wait(5), "no se borró sin lote"
+		done.clear()
+		dcb.delete_old_images([("h_local", "sha256:b"), ("h_local", "sha256:c"), ("h_local", "sha256:d")])
+		assert done.wait(5)
+		removed = [c.args[0] for c in slow.images.remove.call_args_list]
+		assert removed == ["sha256:a", "sha256:b", "sha256:c", "sha256:d"], removed
+	finally:
+		host_registry.slow_client, dcb._delete_old_images = original_slow, original_body
+
+
 def test_a_single_update_reads_like_a_batch_of_one():
 	"""
 	One update used to leave its result plus a "stopped", "created" and
@@ -5222,23 +5442,23 @@ def test_a_long_update_list_is_paginated():
 	def toggles(markup):
 		return [b for b in buttons(markup) if b.callback_data.startswith("toggleUpdate|")]
 
-	short = dcb.build_generic_keyboard(pairs[:size], set(), None, "Update", "u", "ua")
+	short = dcb.build_generic_keyboard(pairs[:size], set(), None, "Update")
 	assert len(toggles(short)) == size
 	assert not [b for b in buttons(short) if b.callback_data.startswith("pageUpdate|")]
 
-	first = dcb.build_generic_keyboard(pairs, set(), None, "Update", "u", "ua")
+	first = dcb.build_generic_keyboard(pairs, set(), None, "Update")
 	assert len(buttons(first)) < 100, len(buttons(first))
 	assert len(toggles(first)) == size
-	assert [b.text for b in first.keyboard[-2]] == ["1/2", "▶️"], first.keyboard[-2]
-	assert first.keyboard[-1][0].callback_data == "toggleUpdateAll"
+	assert [b.text for b in first.keyboard[-3]] == ["1/2", "▶️"], first.keyboard[-3]
+	assert first.keyboard[-2][0].callback_data == "toggleUpdateAll"
 
-	second = dcb.build_generic_keyboard(pairs, {pairs[0][0]}, None, "Update", "u", "ua", page=1)
+	second = dcb.build_generic_keyboard(pairs, {pairs[0][0]}, None, "Update", page=1)
 	assert len(toggles(second)) == 32
-	assert [b.text for b in second.keyboard[-2]] == ["◀️", "2/2"], second.keyboard[-2]
+	assert [b.text for b in second.keyboard[-3]] == ["◀️", "2/2"], second.keyboard[-3]
 	# Something selected on another page still offers to confirm it.
-	assert second.keyboard[-1][0].callback_data.startswith("confirmUpdateSelected|")
+	assert second.keyboard[-2][0].callback_data.startswith("confirmUpdateSelected|")
 	# A page that no longer exists shows the last one rather than nothing.
-	assert len(toggles(dcb.build_generic_keyboard(pairs, set(), None, "Update", "u", "ua", page=9))) == 32
+	assert len(toggles(dcb.build_generic_keyboard(pairs, set(), None, "Update", page=9))) == 32
 
 	painted = []
 	original = (dcb.edit_message_reply_markup_sync, dcb.answer_callback_quietly)

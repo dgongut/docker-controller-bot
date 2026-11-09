@@ -1056,3 +1056,27 @@ def test_compose_gets_the_mac_set_by_hand_where_only_the_endpoint_says_it():
 	# From 28 they are random, and by name Config.MacAddress says it.
 	assert config_for("1.48", "02:42:ac:aa:00:06")["mac_address_by_hand"] is None
 	assert config_for("1.47", "02:42:ac:aa:00:06", mode="lan")["mac_address_by_hand"] is None
+
+
+def test_the_old_image_is_handed_over_rather_than_deleted_when_asked():
+	"""
+	The caller deletes it once the update, or the whole batch, is over: on a
+	slow disk deleting it here held the next update up for a minute. And one
+	still in use by an original left behind is not handed over either.
+	"""
+	engine = FakeDocker()
+	original = engine.add("ghost", role="original")
+	handed = []
+
+	result = _update(engine, original, remove_image_func=handed.append)
+
+	assert result == "updated_container", result
+	assert handed == ["sha256:old"], handed
+	assert engine.removed_images == [], "se borró la imagen en vez de entregarla"
+
+	engine = FakeDocker()
+	original = engine.add("ghost", role="original")
+	engine.fail_remove = (docker.errors.APIError("device or resource busy"), False)
+	handed = []
+	_update(engine, original, remove_image_func=handed.append)
+	assert handed == [], "se entregó la imagen que el original sigue usando"

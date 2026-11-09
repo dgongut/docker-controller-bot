@@ -1,4 +1,3 @@
-
 services:
     test-docker-controller-bot:
         container_name: test-docker-controller-bot
@@ -6,10 +5,12 @@ services:
           - .env
         volumes:
           - /var/run/docker.sock:/var/run/docker.sock # NO CAMBIAR
-          - ./:/app # CAMBIAR LA PARTE IZQUIERDA
+          # El código, y aparte los datos del bot, que siguen en la raíz del repositorio
+          - ./src:/app # CAMBIAR LA PARTE IZQUIERDA
+          - ./config:/app/config
           # Solo si se van a probar hosts ssh://. En solo lectura: el bot no
           # tiene por qué escribir en known_hosts, y así no puede.
           - ~/.ssh:/root/.ssh:ro
         build:
           context: .
-          dockerfile: ./Dockerfile_local
+          dockerfile: dev/Dockerfile_local
