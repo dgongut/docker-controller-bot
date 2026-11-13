@@ -1181,6 +1181,25 @@ def test_a_batch_deletes_the_old_image_its_containers_shared_once_it_is_over():
 		cleanup()
 
 
+def _uplink():
+	"""
+	The interface of the default route where the daemon runs, to hang the
+	macvlan network from. Asked from a container on the host network, since
+	the daemon may be in another machine or in dind: GitHub's ubuntu-24.04
+	runners have it as eth0 on some machines and enp39s0 on others. Docker
+	Desktop's VM keeps its default route out of the main table, so without
+	one it is the first interface backed by a device.
+	"""
+	script = ('awk \'$2 == "00000000" { print $1; exit }\' /proc/net/route;'
+			  ' for d in /sys/class/net/*/device; do basename "${d%/device}"; done')
+	done = subprocess.run(["docker", "run", "--rm", "--label", "dcbtest=1", "--network", "host", BASE,
+						   "sh", "-c", script], capture_output=True, text=True)
+	assert done.returncode == 0, done.stderr
+	found = done.stdout.split()
+	assert found and found[0] != "*", done.stdout
+	return found[0]
+
+
 def test_docker_run_oddities_survive_their_update():
 	"""
 	`--link` on the default bridge, macvlan with a fixed IP and MAC, two
@@ -1201,7 +1220,7 @@ def test_docker_run_oddities_survive_their_update():
 		label = ["--label", "dcbtest=1"]
 		commands = [
 			["network", "create", *label, "-d", "macvlan", "--subnet", "192.168.250.0/24",
-				"--gateway", "192.168.250.1", "-o", "parent=eth0", f"{PREFIX}mac"],
+				"--gateway", "192.168.250.1", "-o", f"parent={_uplink()}", f"{PREFIX}mac"],
 			["network", "create", *label, "--subnet", "172.31.230.0/24", f"{PREFIX}gwa"],
 			["network", "create", *label, "--subnet", "172.31.231.0/24", f"{PREFIX}gwb"],
 			["network", "create", *label, "--subnet", "172.31.232.0/24", f"{PREFIX}idnet"],

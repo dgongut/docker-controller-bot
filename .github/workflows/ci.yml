@@ -97,14 +97,15 @@ jobs:
           platforms: arm64,amd64
 
       # Para que un fallo diga contra qué se ha probado. El test de macvlan
-      # cuelga la red de eth0: si el runner la llamara de otra forma, se ve aquí
+      # cuelga la red de la interfaz de la ruta por defecto, que en los
+      # runners de ubuntu-24.04 a veces es eth0 y a veces enp39s0
       - name: Entorno
         run: |
           docker version
           docker compose version
           docker info --format 'storage={{.Driver}} cgroup={{.CgroupDriver}} v{{.CgroupVersion}}'
           ip -br link
-          ip link show eth0 >/dev/null || echo "::warning::El runner no tiene eth0: test_docker_run_oddities_survive_their_update fallará en la red macvlan"
+          ip -o route show default
 
       # Necesitan registry:2 y alpine:3.24.3 de Docker Hub (anónimo, sin
       # secretos), levantan un registro en 127.0.0.1:55000 y solo tocan lo que
