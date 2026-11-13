@@ -1,0 +1,14 @@
+name: Docker Hub description
+
+# Publishes README.md as the Docker Hub description. The logic lives in
+# https://github.com/dgongut/.github
+on:
+  push:
+    branches: [main]
+    paths: [README.md, .github/workflows/dockerhub-description.yml]
+  workflow_dispatch:
+
+jobs:
+  sync:
+    uses: dgongut/.github/.github/workflows/dockerhub-description.yml@main
+    secrets: inherit

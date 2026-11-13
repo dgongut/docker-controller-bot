@@ -22,7 +22,12 @@
 
 ![Docker-Controller-Bot](https://github.com/dgongut/pictures/blob/main/Docker-Controller-Bot/mockup.png)
 
+<!-- dockerhub:skip -->
 ¿Lo buscas en [![](https://badgen.net/badge/icon/docker?icon=docker&label)](https://hub.docker.com/r/dgongut/docker-controller-bot)?
+<!-- /dockerhub:skip -->
+<!-- dockerhub:only
+📦 Código fuente, incidencias y documentación completa en [GitHub](https://github.com/dgongut/docker-controller-bot).
+-->
 
 **NUEVO** Canal de novedades en [![](https://badgen.net/badge/icon/telegram?icon=telegram&label)](https://t.me/dockercontrollerbotnews)
 
@@ -191,6 +196,7 @@ Desde `/schedule` puedes crear tareas que se ejecuten en cron.
 
 </details>
 
+<!-- dockerhub:skip -->
 <details>
 <summary>🔕 Silenciar el bot desde un script</summary>
 
@@ -208,6 +214,7 @@ docker exec docker-controller-bot dcb-mute 0    # quita el silencio
 - Como en la 4.x, también vale escribir a mano en `.muted_until`, dentro del volumen de datos (`/app/config`, o `/app/schedule` si tu instalación aún usa el de la 4.x), el segundo epoch en que termina el silencio, o `0` para quitarlo: `sh -c 'echo $(( $(date +%s) + 3600 )) > /app/config/.muted_until'`. El bot lo aplica redondeado al minuto hacia arriba y lo borra, también si lo encuentra al arrancar.
 
 </details>
+<!-- /dockerhub:skip -->
 
 <details>
 <summary>⚙️ Configuración avanzada y <code>/settings</code></summary>
@@ -263,6 +270,10 @@ Hay dos formas, y para la mayoría de la gente la primera es la respuesta:
 
 > ℹ️ **Nota:** Docker también admite `tcp://` cifrado con TLS. Es bastante más trabajo y con `ssh://` disponible no le veo la necesidad, pero si tu caso lo pide está explicado en la [FAQ](#-preguntas-frecuentes-faq), en «*Quiero usar `tcp://` pero cifrado con TLS*».
 
+<!-- dockerhub:only
+La guía paso a paso (cómo comprobar la conexión, `ssh://`, socket proxy, varios servidores y NAS) está en [GitHub](https://github.com/dgongut/docker-controller-bot#la-prueba-que-lo-decide).
+-->
+<!-- dockerhub:skip -->
 ### La prueba que lo decide
 
 Antes de configurar nada en el bot, comprueba desde una terminal **de la máquina donde corre el bot**:
@@ -470,6 +481,7 @@ En mi caso no conseguí dejarlo fino por SSH en Synology, así que opté por lev
 > 💡 **Consejo:** si tienes tus máquinas en una red privada tipo Tailscale o WireGuard, `tcp://` a secas sobre esa red te evita tanto los certificados como el ssh, porque el cifrado y la autenticación los pone la malla. Es lo más cómodo cuando ya la tienes montada.
 
 </details>
+<!-- /dockerhub:skip -->
 
 ### Las credenciales nunca se guardan en los ajustes
 
@@ -534,6 +546,7 @@ Tampoco se envía nada si la configuración no está en un volumen, porque sin �
 
 </details>
 
+<!-- dockerhub:skip -->
 ## Agradecimientos
 
 - Traducción al neerlandés: [ManCaveMedia](https://github.com/ManCaveMedia)
@@ -544,11 +557,18 @@ Tampoco se envía nada si la configuración no está en un volumen, porque sin �
 - Traducción al catalán: [flancky](https://t.me/flancky)
 - Pruebas del Docker Login: [garanda](https://github.com/garanda21)
 - Readme en inglés: [phampyk](https://github.com/phampyk)
+<!-- /dockerhub:skip -->
 
 ## ❓ Preguntas Frecuentes (FAQ)
 
+<!-- dockerhub:skip -->
 > Pulsa cada pregunta para ver la respuesta.
+<!-- /dockerhub:skip -->
 
+<!-- dockerhub:only
+Las preguntas frecuentes (versiones de las imágenes, labels, varios hosts, `tcp://` con TLS...) están en [GitHub](https://github.com/dgongut/docker-controller-bot#-preguntas-frecuentes-faq).
+-->
+<!-- dockerhub:skip -->
 <details>
 <summary>🧭 ¿Puede el bot decirme de qué versión a qué versión se actualiza una imagen?</summary>
 
@@ -754,7 +774,9 @@ Internamente el bot lanza un contenedor auxiliar (`UPDATER-Docker-Controler-Bot`
 
 Si en su `/info` eliges **🔄 Actualizar solo** (o le añades la label `DCB-Auto-Update` en su `docker-compose.yml`), se actualizará solo en cuanto detecte una nueva versión.
 </details>
+<!-- /dockerhub:skip -->
 
+<!-- dockerhub:skip -->
 ---
 
 <details>
@@ -865,3 +887,4 @@ Abre la carpeta del repositorio en [Visual Studio Code](https://code.visualstudi
 - Para detener la sesión de depuración, ve a `Run > Stop Debugging` o presiona `Shift+F5`
 
 </details>
+<!-- /dockerhub:skip -->
