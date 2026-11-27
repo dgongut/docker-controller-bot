@@ -186,6 +186,15 @@ def cb_checkUpdate(ctx):
 	core.manager_for(ctx.containerId).force_check_update(core.ref_id(ctx.containerId))
 
 @callback(
+	name='checkUpdateWholeProject',
+	params=('containerName',),
+	project_arg=True,
+)
+def cb_checkUpdateWholeProject(ctx):
+	"""Every container of a project, answered in one message."""
+	core.check_project_updates(ctx.containerName, ctx.hostId)
+
+@callback(
 	name='update',
 	params=('containerId',),
 )
@@ -579,7 +588,7 @@ def cb_confirmDeleteWholeProject(ctx):
 	markup = InlineKeyboardMarkup(row_width=2)
 	markup.add(
 		InlineKeyboardButton(
-			f"✅ {get_text('button_yes_delete')}",
+			get_text('button_confirm_delete'),
 			callback_data=f"deleteWholeProject|{core.register_project_hash(project_name, ctx.hostId)}"
 		),
 		InlineKeyboardButton(
@@ -625,16 +634,11 @@ def cb_prune(ctx):
 	Confirms and runs a prune on one host.
 
 	`action` is confirmPrune<Kind> or prune<Kind>, `value` is the host. Driving
-	the four object types off one table rather than four near-identical
+	the object types off one table rather than four near-identical
 	branches, which is what this was.
 	"""
 	host_id = ctx.value or core.host_registry.local_host_id()
-	labels = {
-		"Containers": "button_containers",
-		"Images": "button_images",
-		"Networks": "button_networks",
-		"Volumes": "button_volumes",
-	}
+	labels = dict(core.PRUNE_TYPES)
 
 	if ctx.action.startswith("confirmPrune"):
 		kind = ctx.action[len("confirmPrune"):]
@@ -668,9 +672,10 @@ def cb_prune(ctx):
 	result, data, _ = getattr(owner, f"prune_{kind.lower()}")()
 	if working:
 		core.delete_message(working.message_id)
-	markup = core.create_simple_keyboard("button_delete")
-	if data is None:
-		# It failed: the message says so, and there is nothing to attach.
+	markup = core.create_simple_keyboard("button_close")
+	if not data:
+		# It failed, or there was nothing to remove: the message says which,
+		# and there is nothing to attach.
 		core.send_message(message=result, reply_markup=markup)
 		return
 	fichero_temporal = core.get_temporal_file(data, get_text(labels[kind]))

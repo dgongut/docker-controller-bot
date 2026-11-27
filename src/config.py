@@ -178,7 +178,7 @@ HOST_SCOPED_SCHEDULE_ACTIONS = frozenset(
     action for action, fields in SCHEDULE_ACTION_FIELDS.items()
     if "container" in fields or "host" in fields)
 
-SCHEDULE_PRUNE_TYPES = ("containers", "images", "networks", "volumes")
+SCHEDULE_PRUNE_TYPES = ("containers", "images", "networks", "volumes", "builds")
 
 # The third value of a scheduled task's show_output, besides true and false:
 # only say something when the exec fails or prints, or the prune fails or

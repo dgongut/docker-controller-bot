@@ -158,13 +158,13 @@ Most commands can be used in two ways: typing the command alone (`/run`) to let 
 | `/delete` | Remove a container or a whole Compose project |
 | `/exec` | Run a command inside a container |
 | `/logs` `/logfile` | Logs in the chat or as a file |
-| `/checkupdate` | Check whether a container has an update available |
+| `/checkupdate` | Check whether a container, or a whole Compose project, has an update available |
 | `/updateall` | Update every container, across every host at once |
 | `/changetag` | Change the image tag (rollback or jump to another version) |
 | `/compose` | Extract the `docker-compose` of a container or a project |
 | `/info` | Show detailed information of a container or a project |
 | `/ports` | List used ports, check a specific one or generate a free one |
-| `/prune` | Clean up unused containers, images, networks or volumes |
+| `/prune` | Clean up unused containers, images, networks, volumes or build cache |
 | `/mute <minutes>` | Mute notifications for a number of minutes |
 | `/schedule` | Menu to create, edit and delete scheduled tasks |
 | `/settings` | Bot settings: language, columns, update checking, notification channel and **Docker hosts** |

@@ -1,6 +1,6 @@
 requests==2.34.2
 pyTelegramBotAPI==4.37.1
 docker==7.2.0
-PyYAML==6.0.3
-croniter==6.2.4
+PyYAML==6.0.4
+croniter==7.0.0
 dgongut-telemetry @ https://github.com/dgongut/telemetry/archive/5122dbba55968823ff5dd64da4c8419df31a512c.zip#subdirectory=clients/python

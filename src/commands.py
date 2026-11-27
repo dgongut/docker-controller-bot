@@ -20,15 +20,15 @@ from core import (
 	send_picker, manager_for, ref_id,
 	register_command,
 	VERSION, ask_command, ask_text_input,
-	build_generic_keyboard, change_tag_container,
+	change_tag_container,
 	compose, confirm_delete, create_simple_keyboard,
 	delete_message_later, display_all_hosts, send_split_message,
 	info, log_file, logs,
 	mute, print_donors, restart,
-	run, save_container_refs, save_update_data,
+	run,
 	send_message, send_settings_menu,
 	send_ports_menu,
-	stop, pending_updates, available_updates_text,
+	stop, pending_updates, send_update_list,
 )
 
 
@@ -123,17 +123,7 @@ def cmd_updateall(user_id=None, chat_id=None, container_id=None, container_name=
 		send_message(message=get_text("already_updated_all"))
 		return
 
-	# The same builder the toggles repaint with, so the first render and every
-	# one after it agree. Building the keyboard here by hand is how the list
-	# ended up naming its hosts only from the second tap onwards.
-	markup = build_generic_keyboard(containersToUpdate, set(), None, "Update")
-	message = send_message(message=available_updates_text(containersToUpdate), reply_markup=markup)
-	if message:
-		save_update_data(message.chat.id, message.message_id, containersToUpdate)
-		# Pre-populate the name cache so the callback parser can resolve names
-		# from references. Per reference rather than per host: this list spans
-		# machines, so a single host id would mislabel all but one of them.
-		save_container_refs(message.chat.id, message.message_id, containersToUpdate)
+	send_update_list(containersToUpdate)
 
 def cmd_changetag(user_id=None, chat_id=None, container_id=None, container_name=None, argument=None):
 	if container_id:

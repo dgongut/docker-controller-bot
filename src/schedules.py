@@ -487,7 +487,9 @@ def ask(user_id, state, error_key=None):
 	if field == "confirm":
 		text = get_text("schedule_confirm_title") + "\n\n" + "\n".join(task_lines(task))
 		markup = InlineKeyboardMarkup(row_width=2)
-		markup.add(button("button_confirm", "schedConfirm"), button("button_cancel", "schedCancel"))
+		# What the button does, not "Sí": the title above asks nothing, and a
+		# task is saved active.
+		markup.add(button("schedule_button_save", "schedConfirm"), button("button_cancel", "schedCancel"))
 	else:
 		asked, markup = question(field, task, state)
 		if state.get("task_id") is None:
@@ -1068,13 +1070,14 @@ class Scheduler:
 		if not show_output or (show_output == SHOW_OUTPUT_FAILURES and not failed and not cleaned):
 			debug(f"Scheduled prune of {prune_type}: {message}")
 			return
-		if failed:
+		if not details:
+			# Failed, or nothing to remove: the message alone, as in /prune.
 			core.send_message(message=message)
 			return
 		# The same as a /prune: the message, with what went in a file.
 		loading = core.send_message(message=get_text("loading_file"))
 		core.send_document(document=core.get_temporal_file(details, get_text(f"button_{prune_type}")),
-							reply_markup=core.create_simple_keyboard("button_delete"), caption=message)
+							reply_markup=core.create_simple_keyboard("button_close"), caption=message)
 		if loading:
 			core.delete_message(loading.message_id)
 

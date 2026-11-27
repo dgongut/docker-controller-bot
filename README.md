@@ -163,13 +163,13 @@ Casi todos funcionan de dos formas: escribe el comando solo (`/run`) y el bot te
 | `/delete` | Elimina un contenedor o un proyecto Compose entero |
 | `/exec` | Ejecuta un comando dentro de un contenedor |
 | `/logs` `/logfile` | Logs en mensaje o como fichero |
-| `/checkupdate` | Comprueba si un contenedor tiene actualización |
+| `/checkupdate` | Comprueba si un contenedor, o un proyecto Compose entero, tiene actualización |
 | `/updateall` | Actualiza todos los contenedores, de todos los hosts a la vez |
 | `/changetag` | Cambia el tag de la imagen (rollback o salto de versión) |
 | `/compose` | Extrae el `docker-compose` de un contenedor o proyecto |
 | `/info` | Muestra información detallada de un contenedor o de un proyecto |
 | `/ports` | Lista puertos usados, comprueba uno concreto o genera uno libre |
-| `/prune` | Limpia contenedores, imágenes, redes o volúmenes no usados |
+| `/prune` | Limpia contenedores, imágenes, redes, volúmenes o caché de build que no se usan |
 | `/mute <minutos>` | Silencia las notificaciones durante X minutos |
 | `/schedule` | Menú para crear, editar y borrar tareas programadas |
 | `/settings` | Ajustes del bot: idioma, columnas, comprobación de actualizaciones, canal de notificaciones y **hosts de Docker** |

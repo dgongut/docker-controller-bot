@@ -2546,20 +2546,20 @@ def test_a_port_question_about_a_host_that_is_gone_says_so():
 def _capture_updateall():
 	"""Runs /updateall and returns the message and keyboard it sent."""
 	captured = {}
-	original = (commands.send_message, dcb.update_available,
-				commands.save_update_data, commands.save_container_refs)
-	commands.send_message = lambda message="", reply_markup=None, **kwargs: captured.update(
+	original = (dcb.send_message, dcb.update_available,
+				dcb.save_update_data, dcb.save_container_refs)
+	dcb.send_message = lambda message="", reply_markup=None, **kwargs: captured.update(
 		message=message, reply_markup=reply_markup) or None
 	# The update cache is not what this is about: every container has one
 	# pending, so the list is the whole fleet.
 	dcb.update_available = lambda container, host_id=None: True
-	commands.save_update_data = lambda *a, **k: None
-	commands.save_container_refs = lambda *a, **k: None
+	dcb.save_update_data = lambda *a, **k: None
+	dcb.save_container_refs = lambda *a, **k: None
 	try:
 		commands.cmd_updateall()
 	finally:
-		(commands.send_message, dcb.update_available,
-			commands.save_update_data, commands.save_container_refs) = original
+		(dcb.send_message, dcb.update_available,
+			dcb.save_update_data, dcb.save_container_refs) = original
 	return captured.get("message", ""), captured.get("reply_markup")
 
 
@@ -3404,7 +3404,7 @@ def test_the_update_list_offers_to_update_everything_in_one_tap():
 	rows = dcb.build_generic_keyboard(pairs, set(), 7, "Update").keyboard
 	assert [(b.text, b.callback_data) for b in rows[-2]] == [(t("button_mark_all"), "toggleUpdateAll")]
 	assert [(b.text, b.callback_data) for b in rows[-1]] == [(t("button_update_all"), "updateEverything|7"),
-																(t("button_cancel"), "cerrar")]
+																(t("button_close"), "cerrar")]
 	rows = dcb.build_generic_keyboard(pairs, {pairs[0][0]}, 7, "Update").keyboard
 	assert [(b.text, b.callback_data) for b in rows[-2]] == [(t("button_update_selected", 1), "confirmUpdateSelected|7")]
 	assert rows[-1][0].callback_data == "updateEverything|7"
@@ -3886,8 +3886,10 @@ def test_a_prune_that_fails_says_so_instead_of_raising():
 		owner.client.images.prune.side_effect = None
 		owner.client.images.prune.return_value = {"ImagesDeleted": None}
 		message, details, cleaned = owner.prune_images()
-		assert details is not None and "0.0B" in message, message
-		assert cleaned is False, "no ha borrado nada"
+		# Nothing to remove is said as that, with no file: "removed, 0 B freed"
+		# read as if there had been something.
+		assert details == "" and cleaned is False, (message, details)
+		assert message == i18n.get_text("prune_nothing", i18n.get_text("button_images")), message
 	finally:
 		host_registry.slow_client = original_slow
 		_restore_hosts()
@@ -6052,6 +6054,60 @@ def test_a_scheduled_exec_hands_its_setting_to_the_result():
 		dcb.manager_for, dcb._send_exec_result = original
 
 
+def test_the_build_cache_is_one_more_thing_to_prune():
+	"""
+	Pruning images leaves the build cache where it was: it is not images, and
+	on a machine that builds its own it is the larger of the two. All of it,
+	through the slow client like the rest, from the button and from a
+	scheduled task.
+	"""
+	import host_registry
+	import schedule_manager
+	_with_hosts([HOST_FIXTURE[0]], unreachable=())
+	owner = dcb.DockerManager("h_local")
+	owner.client = MagicMock()
+	slow = MagicMock()
+	original_slow, original_send = host_registry.slow_client, dcb.send_message
+	host_registry.slow_client = lambda host_id: slow
+	try:
+		slow.api.prune_builds.return_value = {"CachesDeleted": ["abc"], "SpaceReclaimed": 2048}
+		message, details, cleaned = owner.prune_builds()
+		slow.api.prune_builds.assert_called_once_with(all=True)
+		owner.client.api.prune_builds.assert_not_called()
+		assert cleaned and "abc" in details, details
+		assert message == i18n.get_text("prune_builds", dcb.sizeof_fmt(2048)), message
+
+		# A machine that only pulls images has none: nothing removed, no error.
+		slow.api.prune_builds.return_value = {"CachesDeleted": None, "SpaceReclaimed": 0}
+		message, details, cleaned = owner.prune_builds()
+		assert details == "" and cleaned is False, message
+		assert message == i18n.get_text("prune_nothing", i18n.get_text("button_builds")), message
+
+		slow.api.prune_builds.side_effect = Exception("boom")
+		message, details, cleaned = owner.prune_builds()
+		assert details is None and message == i18n.get_text("error_prune_builds"), message
+
+		callbacks = harness.keyboard_callbacks(dcb.prune_types_keyboard("h_local"))
+		assert "prune|confirmPruneBuilds|h_local" in callbacks, callbacks
+		captured = {}
+		dcb.send_message = lambda **kwargs: captured.update(kwargs)
+		dcb.confirm_prune("Builds", "h_local")
+		assert "prune|pruneBuilds|h_local" in harness.keyboard_callbacks(captured["reply_markup"])
+		assert i18n.get_text("confirm_prune_builds") in captured["message"], captured["message"]
+
+		# One list of kinds each side, and both have it.
+		assert "builds" in dcb.SCHEDULE_PRUNE_TYPES
+		assert {kind.lower() for kind, _ in dcb.PRUNE_TYPES} == set(dcb.SCHEDULE_PRUNE_TYPES)
+		for kind in dcb.SCHEDULE_PRUNE_TYPES:
+			assert callable(getattr(owner, f"prune_{kind}")), kind
+		task = schedule_manager.check({"name": "caché", "cron": "@weekly", "action": "prune",
+										"prune_type": "builds", "host": "h_local"})
+		assert task["prune_type"] == "builds", task
+	finally:
+		host_registry.slow_client, dcb.send_message = original_slow, original_send
+		_restore_hosts()
+
+
 def test_what_counts_as_a_prune_that_removed_something():
 	assert dcb._pruned_anything({"NetworksDeleted": ["old_net"]}) is True
 	assert dcb._pruned_anything({"ContainersDeleted": ["abc"], "SpaceReclaimed": 0}) is True
@@ -6521,6 +6577,212 @@ def test_a_dcb_label_decides_over_the_setting_chosen_in_the_bot():
 		assert dcb.update_mode("h_nas", "plex", MagicMock()) == ("auto", None)
 	finally:
 		store.set_container_update_mode("h_nas", "plex", None)
+		_restore_hosts()
+
+
+def test_a_whole_project_is_checked_for_updates_and_answered_once():
+	"""
+	Checking a project was a tap on each of its containers and two messages
+	for each. One button checks them all and answers once: the same list
+	/updateall sends with the ones that have an update, or that all are up to
+	date.
+	"""
+	_with_hosts([HOST_FIXTURE[0]], unreachable=())
+	web = _container("web", "running", image="nginx:1")
+	api = _container("api", "running", image="nginx:1")
+	db = _container("db", "exited", image="postgres:17")
+	ignored = _container("cache", "running", image="redis:8")
+	broken = _container("worker", "running", image="gone:latest")
+	for fake in (web, api, db, ignored, broken):
+		fake.listed = False
+		fake.image.id = f"sha256:local-{fake.attrs['Config']['Image']}"
+	project = types.SimpleNamespace(
+		containers=[web, api, db, ignored, broken],
+		services={fake.name: fake for fake in (web, api, db, ignored, broken)})
+	project.get_service_names = lambda: list(project.services)
+	owner = dcb.manager("h_local")
+	pulls = []
+	remote = {"nginx:1": "sha256:new-nginx", "postgres:17": "sha256:local-postgres:17"}
+	def fake_pull(client, image, container):
+		pulls.append(image)
+		if image not in remote:
+			raise RuntimeError("manifest unknown")
+		return types.SimpleNamespace(id=remote[image])
+	sent, deleted, lists, headers, edits = [], [], [], [], []
+	def fake_send(**kw):
+		sent.append(kw.get("message", ""))
+		return types.SimpleNamespace(message_id=len(sent), chat=types.SimpleNamespace(id=1))
+	original = (owner.get_project_info, dcb.send_message, dcb.delete_message, dcb.pull_image,
+				dcb.same_running_manifest, dcb.running_version, dcb.available_version, dcb.send_update_list,
+				dcb.edit_message_text, dcb.PROJECT_CHECK_PROGRESS_EVERY)
+	dcb.edit_message_text = lambda text, chat_id, message_id, **kw: edits.append((text, message_id))
+	dcb.PROJECT_CHECK_PROGRESS_EVERY = 0
+	owner.get_project_info = lambda name: project if name == "media" else None
+	dcb.send_message = fake_send
+	dcb.delete_message = lambda message_id, *a, **kw: deleted.append(message_id)
+	dcb.pull_image = fake_pull
+	dcb.same_running_manifest = lambda *a, **kw: False
+	dcb.running_version = lambda host_id, container: "1.0"
+	dcb.available_version = lambda image, reference: "1.1"
+	dcb.send_update_list = lambda pairs, header=None: (lists.append(pairs), headers.append(header))
+	was_checking = store.get("bot.check_updates")
+	store.set("bot.check_updates", True)
+	store.set_container_update_mode("h_local", "cache", "ignore")
+	status = lambda fake: dcb.read_container_update_status(fake.attrs["Config"]["Image"], fake.name, "h_local")
+	try:
+		callbacks_ = harness.keyboard_callbacks(dcb.build_compose_project_level2_keyboard(
+			project, "media", "checkupdate", "backToCheckUpdateLevel1", host_id="h_local"))
+		whole = [data for data in callbacks_ if data.startswith("checkUpdateWholeProject|")]
+		assert len(whole) == 1, callbacks_
+		# On a row of its own, with going back and closing under it.
+		rows = [[button.callback_data for button in row] for row in dcb.build_compose_project_level2_keyboard(
+			project, "media", "checkupdate", "backToCheckUpdateLevel1", host_id="h_local").keyboard]
+		assert rows[-2:] == [whole, ["backToCheckUpdateLevel1", "cerrar"]], rows
+		assert "media" in dcb.resolve_project_hash(whole[0].split("|")[1])
+		assert callback_registry.get("checkUpdateWholeProject").project_arg
+
+		dcb.check_project_updates("media", "h_local")
+		# One pull per image, the ignored one never asked for, the stopped one checked.
+		assert sorted(pulls) == ["gone:latest", "nginx:1", "postgres:17"], pulls
+		assert [[name for _ref, name in pairs] for pairs in lists] == [["api", "web"]], lists
+		assert all(ref.startswith("h_local") for ref, _name in lists[0]), lists
+		assert status(web) is True and status(api) is True and status(db) is False
+		assert store.update_versions("h_local", "web") == ("1.0", "1.1")
+		assert status(ignored) is None and status(broken) is None
+		# The progress line goes, and what could not be checked is named.
+		assert deleted == [1], deleted
+		# It counts the four it checks on the line already there, not the ignored one.
+		assert sent[0] == i18n.get_text("checking_project_updates", "media", "0/4"), sent
+		assert edits == [(i18n.get_text("checking_project_updates", "media", f"{done}/4"), 1) for done in (1, 2, 3)], edits
+		assert sent[1:] == [i18n.get_text("error_checking_project_updates", "worker")], sent
+		# The list says whose it is: in the chat it read like the fleet's.
+		assert headers == [i18n.get_text("available_updates_project", 2, "media")], headers
+		assert dcb.available_updates_text(lists[0], headers[0]).startswith(headers[0])
+
+		# Services checked in no time do not repaint it once each.
+		dcb.PROJECT_CHECK_PROGRESS_EVERY = 3600
+		edits.clear(); deleted.clear(); sent.clear()
+		dcb.check_project_updates("media", "h_local")
+		assert edits == [] and deleted == [1], (edits, deleted)
+
+		# Nothing pending and nothing failed: one line saying so.
+		remote.update({"nginx:1": "sha256:local-nginx:1", "gone:latest": "sha256:local-gone:latest"})
+		sent.clear(); lists.clear(); headers.clear()
+		dcb.check_project_updates("media", "h_local")
+		assert not lists and sent[1:] == [i18n.get_text("already_updated_project", "media")], sent
+		assert status(web) is False, "lo que ya no está pendiente sale de /updateall"
+
+		sent.clear()
+		dcb.check_project_updates("nope", "h_local")
+		assert sent == [i18n.get_text("error_project_not_found", "nope")], sent
+
+		# With the checks off the list could update nothing: no button.
+		store.set("bot.check_updates", False)
+		callbacks_ = harness.keyboard_callbacks(dcb.build_compose_project_level2_keyboard(
+			project, "media", "checkupdate", "backToCheckUpdateLevel1", host_id="h_local"))
+		assert not [data for data in callbacks_ if data.startswith("checkUpdateWholeProject|")], callbacks_
+		assert callbacks_[-2:] == ["backToCheckUpdateLevel1", "cerrar"], callbacks_
+	finally:
+		(owner.get_project_info, dcb.send_message, dcb.delete_message, dcb.pull_image,
+			dcb.same_running_manifest, dcb.running_version, dcb.available_version, dcb.send_update_list,
+			dcb.edit_message_text, dcb.PROJECT_CHECK_PROGRESS_EVERY) = original
+		store.forget_host_containers("h_local")
+		for fake in (web, api, db, ignored, broken):
+			dcb.save_container_update_status(fake.attrs["Config"]["Image"], fake.name, None, "h_local")
+		store.set("bot.check_updates", was_checking)
+		_restore_hosts()
+
+
+def test_every_project_menu_offers_back_and_close_under_its_own_button():
+	"""
+	Inside a project there was only Volver: closing meant going back to the
+	list first. What acts on the whole project sits on a row of its own, and
+	the row under it is the navigation, as in /settings.
+	"""
+	_with_hosts([HOST_FIXTURE[0]], unreachable=())
+	web, db = _container("web", "running"), _container("db", "exited")
+	project = types.SimpleNamespace(containers=[web, db], services={"web": web, "db": db})
+	project.get_service_names = lambda: list(project.services)
+	was_checking = store.get("bot.check_updates")
+	store.set("bot.check_updates", True)
+	whole = {"restart": "restartWholeProject", "run": "runWholeProject", "stop": "stopWholeProject",
+			 "delete": "confirmDeleteWholeProject", "info": "showProjectInfo", "checkupdate": "checkUpdateWholeProject"}
+	try:
+		for action in ("restart", "run", "stop", "delete", "exec", "logs", "logfile", "info", "changetag", "checkupdate", "ports"):
+			markup = dcb.build_compose_project_level2_keyboard(project, "media", action, "volver", host_id="h_local")
+			rows = [[button.callback_data for button in row] for row in markup.keyboard]
+			assert rows[-1] == ["volver", "cerrar"], (action, rows)
+			if action in whole:
+				assert len(rows[-2]) == 1 and rows[-2][0].startswith(f"{whole[action]}|"), (action, rows)
+			else:
+				assert not any("WholeProject" in data for row in rows for data in row), (action, rows)
+			# The project's own button is nothing left to do: with every
+			# container acted on, the menu goes back to the list.
+			assert dcb.count_actionable_buttons(markup) == 2, (action, rows)
+		emptied = dcb.build_compose_project_level2_keyboard(project, "media", "stop", "volver",
+															filter_status=["paused"], host_id="h_local")
+		assert len(emptied.keyboard) == 2 and dcb.count_actionable_buttons(emptied) == 0, emptied.keyboard
+	finally:
+		store.set("bot.check_updates", was_checking)
+		_restore_hosts()
+
+
+def test_checking_one_container_always_answers():
+	"""
+	/checkupdate on a container, on the comparison the other checks use. A pull
+	the daemon cut halfway took the "downloading" line away and answered
+	nothing; now whatever the check fails on says the image could not be pulled.
+	"""
+	_with_hosts([HOST_FIXTURE[0]], unreachable=())
+	web = _container("web", "running", image="nginx:1")
+	web.image.id = "sha256:local"
+	owner = dcb.DockerManager("h_local")
+	owner.client = MagicMock()
+	owner.client.containers.get.return_value = web
+	sent, deleted, outcome = [], [], {}
+	def fake_send(**kw):
+		sent.append(kw)
+		return types.SimpleNamespace(message_id=len(sent), chat=types.SimpleNamespace(id=1))
+	def fake_pull(client, image, container):
+		if isinstance(outcome["remote"], Exception):
+			raise outcome["remote"]
+		return outcome["remote"]
+	original = (dcb.send_message, dcb.delete_message, dcb.pull_image, dcb.same_running_manifest,
+				dcb.running_version, dcb.available_version, dcb.save_container_cache)
+	dcb.send_message = fake_send
+	dcb.delete_message = lambda message_id, *a, **kw: deleted.append(message_id)
+	dcb.pull_image = fake_pull
+	dcb.same_running_manifest = lambda *a, **kw: False
+	dcb.running_version = lambda host_id, container: "1.0"
+	dcb.available_version = lambda image, reference: "1.1"
+	dcb.save_container_cache = lambda *a, **kw: None
+	status = lambda: dcb.read_container_update_status("nginx:1", "web", "h_local")
+	try:
+		outcome["remote"] = types.SimpleNamespace(id="sha256:new")
+		owner.force_check_update("abc")
+		assert deleted == [1] and len(sent) == 2, sent
+		assert i18n.get_text("available_update", "web") in sent[1]["message"] and "1.1" in sent[1]["message"]
+		assert any(data.startswith("confirmUpdate|") for data in harness.keyboard_callbacks(sent[1]["reply_markup"]))
+		assert status() is True and store.update_versions("h_local", "web") == ("1.0", "1.1")
+
+		sent.clear(); deleted.clear()
+		outcome["remote"] = types.SimpleNamespace(id="sha256:local")
+		owner.force_check_update("abc")
+		assert [kw["message"] for kw in sent[1:]] == [i18n.get_text("already_updated", "web")], sent
+		assert status() is False
+
+		for failure in (RuntimeError("unexpected EOF"), None):
+			sent.clear(); deleted.clear()
+			dcb.save_container_update_status("nginx:1", "web", True, "h_local")
+			outcome["remote"] = failure
+			owner.force_check_update("abc")
+			assert deleted == [1], deleted
+			assert [kw["message"] for kw in sent[1:]] == [i18n.get_text("error_pulling_image", "nginx:1")], sent
+			assert status() is None
+	finally:
+		(dcb.send_message, dcb.delete_message, dcb.pull_image, dcb.same_running_manifest,
+			dcb.running_version, dcb.available_version, dcb.save_container_cache) = original
+		dcb.save_container_update_status("nginx:1", "web", None, "h_local")
 		_restore_hosts()
 
 

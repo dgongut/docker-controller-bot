@@ -10,6 +10,29 @@ Sin dependencias extra: usan solo lo que ya trae el bot. Para filtrar por ficher
 python3 tests/run_all.py store
 ```
 
+## En Docker, sin depender de la máquina
+
+```bash
+dev/run_tests.sh
+```
+
+Pasa las dos baterías dentro de contenedores: los unitarios sobre la base de
+la imagen (la del `Dockerfile`), y los de Docker de verdad dentro de un
+`docker:29-dind`, con su propio demonio Linux. Es lo que hace el CI, y no
+depende del Python ni del Docker que tenga la máquina: en un Mac, el Python
+del sistema no lee los nanosegundos de una fecha y el demonio de Docker
+Desktop no dice la MAC de un contenedor parado, y dos tests fallan por eso.
+
+```bash
+dev/run_tests.sh unit            # solo los unitarios
+dev/run_tests.sh unit store      # filtrando por fichero
+dev/run_tests.sh docker          # solo contra Docker de verdad (Docker 29)
+dev/run_tests.sh docker 28-dind  # lo mismo en Docker 28, el otro que mira el CI
+```
+
+El dind se borra al terminar con todo lo que los tests crearon: nada toca el
+Docker que lo lanza.
+
 ## Qué cubren
 
 | Fichero | Qué comprueba |
@@ -52,7 +75,7 @@ de otra plataforma necesita QEMU registrado, que Docker Desktop ya trae.
 cada tag y en cada pull request:
 
 - `unit`: Python 3.14 con solo `requirements.txt`.
-- `unit-alpine`: lo mismo sobre `alpine:3.24.3` con paramiko y ssh de apk, que
+- `unit-alpine`: lo mismo sobre `alpine:3.24.4` con paramiko y ssh de apk, que
   es lo que corre en producción.
 - `docker`: `--docker` en `ubuntu-26.04` (Docker 29 y Compose 5) y en
   `ubuntu-24.04` (Docker 28 y Compose 2). Docker no se porta igual en todas

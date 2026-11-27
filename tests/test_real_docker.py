@@ -19,7 +19,7 @@ container outside Compose was left inside the dead one.
 	python3 tests/run_all.py --docker
 
 Needs a daemon on /var/run/docker.sock, and pulls `registry:2` and
-`alpine:3.24.3` the first time. Updates need a registry to pull the "new"
+`alpine:3.24.4` the first time. Updates need a registry to pull the "new"
 image from, so one runs on 127.0.0.1:55000 for the duration.
 
 Only what these tests create is touched: every container, network and volume
@@ -52,7 +52,7 @@ LABEL = {"dcbtest": "1"}
 REGISTRY_NAME = f"{PREFIX}registry"
 REGISTRY = "localhost:55000"
 IMAGE = f"{REGISTRY}/dcbtest/app"
-BASE = "alpine:3.24.3"
+BASE = "alpine:3.24.4"
 
 # PID 1 ignores SIGTERM unless it says otherwise, and every stop would then
 # wait out its whole grace period: minutes, across the file.

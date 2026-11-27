@@ -48,7 +48,7 @@ from i18n import get_text, language
 from logger import debug, error, warning
 from message_queue import MessageQueue
 
-VERSION = "5.5.0"
+VERSION = "5.6.0"
 
 _unmute_timer = None
 _mute_lock = threading.Lock()  # Lock for thread-safe mute timer operations
@@ -63,9 +63,9 @@ UPDATE_CHECK_POLL_SECONDS = 60
 def sizeof_fmt(num, suffix="B"):
 	for unit in ("", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "Zi"):
 		if abs(num) < 1024.0:
-			return f"{num:3.1f}{unit}{suffix}"
+			return f"{num:3.1f} {unit}{suffix}"
 		num /= 1024.0
-	return f"{num:.1f}Yi{suffix}"
+	return f"{num:.1f} Yi{suffix}"
 
 
 # Initial variable validation
@@ -738,6 +738,14 @@ class DockerManager:
 			return get_text("error_updating_container", container_name)
 
 	def force_check_update(self, container_id):
+		"""
+		/checkupdate on one container: asks the registry now and answers with
+		the update and its button, or that it is up to date.
+
+		A check that fails forgets what was known and says the image could not
+		be pulled, whatever it failed on: a pull the daemon cut halfway used
+		to take the "downloading" line away and answer nothing.
+		"""
 		loading_msg = None
 		container = None
 		image_with_tag = ''
@@ -745,61 +753,19 @@ class DockerManager:
 		versions = None
 		try:
 			container = self.client.containers.get(container_id)
-			container_attrs = container.attrs.get('Config', {})
-			image_with_tag = container_attrs.get('Image', '')
-			local_image = container.image.id
+			image_with_tag = container.attrs.get('Config', {}).get('Image', '')
 
 			# Show loading message while pulling the image (can be slow for big images)
 			loading_msg = send_message(message=get_text("fetching_image_data"))
-
 			try:
-				remote_image = pull_image(self.client, image_with_tag, container)
-				if not remote_image or not remote_image.id:
-					error(f"Failed to pull image {image_with_tag}. Verify that the image exists in the registry.")
-					has_update = None
-					save_container_update_status(image_with_tag, container.name, has_update, self.host_id)
-					if loading_msg:
-						delete_message(loading_msg.message_id)
-						loading_msg = None
-					send_message(message=f'{host_label(self.host_id)}{get_text("error_pulling_image", image_with_tag)}')
-					return
-			except docker.errors.ImageNotFound:
-				error(f"Image {image_with_tag} not found in registry. Check the image name.")
-				has_update = None
-				save_container_update_status(image_with_tag, container.name, has_update, self.host_id)
+				has_update, versions = registry_update(self.client, self.host_id, container, image_with_tag, {})
+			finally:
 				if loading_msg:
 					delete_message(loading_msg.message_id)
-					loading_msg = None
-				send_message(message=f'{host_label(self.host_id)}{get_text("error_pulling_image", image_with_tag)}')
-				return
-			except docker.errors.APIError as e:
-				error(f"Error pulling image {image_with_tag}. Error: [{e}]")
-				has_update = None
-				save_container_update_status(image_with_tag, container.name, has_update, self.host_id)
-				if loading_msg:
-					delete_message(loading_msg.message_id)
-					loading_msg = None
-				send_message(message=f'{host_label(self.host_id)}{get_text("error_pulling_image", image_with_tag)}')
-				return
 
-			local_image_normalized = local_image.replace('sha256:', '')
-			remote_image_normalized = remote_image.id.replace('sha256:', '')
-
-			debug(f"Checking update: {container.name} ({image_with_tag}): LOCAL IMAGE [{local_image_normalized[:CONTAINER_ID_LENGTH]}] - REMOTE IMAGE [{remote_image_normalized[:CONTAINER_ID_LENGTH]}]")
-
-			if loading_msg:
-				delete_message(loading_msg.message_id)
-				loading_msg = None
-
-			if local_image_normalized != remote_image_normalized \
-					and not same_running_manifest(self.client, container, local_image, remote_image):
-				# Keep the pulled image cached locally so the subsequent update
-				# operation does not need to re-download it.
-				debug(f"{container.name} update detected! Keeping downloaded image [{remote_image_normalized[:CONTAINER_ID_LENGTH]}] for upcoming update")
+			if has_update:
 				markup = InlineKeyboardMarkup(row_width = 1)
 				markup.add(InlineKeyboardButton(get_text("button_update"), callback_data=f"confirmUpdate|{container_ref(self.host_id, container)}"))
-				has_update = True
-				versions = (running_version(self.host_id, container), available_version(remote_image, image_with_tag))
 				sent_message = send_message(
 					message=f'{get_text("available_update", container.name)}{host_suffix(self.host_id)}{version_lines(*versions)}',
 					reply_markup=markup)
@@ -807,17 +773,13 @@ class DockerManager:
 				if sent_message:
 					save_container_cache(sent_message.chat.id, sent_message.message_id, [container], self.host_id)
 			else:
-				has_update = False
 				send_message(message=f'{get_text("already_updated", container.name)}{host_suffix(self.host_id)}')
 		except Exception as e:
 			error(f"Could not check update for {getattr(container, 'name', container_id)} "
 				  f"({image_with_tag or '?'}) on {self.alias}: [{e}]")
 			has_update = None
-			if loading_msg:
-				try:
-					delete_message(loading_msg.message_id)
-				except:
-					pass
+			if image_with_tag:
+				send_message(message=f'{host_label(self.host_id)}{get_text("error_pulling_image", image_with_tag)}')
 
 		if image_with_tag and container is not None and getattr(container, 'name', None):
 			save_container_update_status(image_with_tag, container.name, has_update, self.host_id, versions)
@@ -839,27 +801,42 @@ class DockerManager:
 			return get_text("error_deleting_container", container_name)
 
 	# Each prune returns (message, details, cleaned): the details go out as a
-	# file, and are None when it failed, so there is no file to send. A
+	# file; they are None when it failed and empty when there was nothing to
+	# remove, so in neither case is there a file to send. A
 	# failure used to return the message alone, which the callers' unpacking
 	# turned into a ValueError: the /prune button answered nothing, and a
 	# scheduled one only left a line in the log. `cleaned` says whether it
 	# removed anything, which a scheduled prune set to report only failures or
 	# output needs, and the details, already text, no longer tell.
 	def prune_containers(self):
-		return self._prune("containers", "prune_containers", "error_prune_containers", "docker container prune -f", reclaims=True)
+		return self._prune("containers", "prune_containers", "error_prune_containers", lambda docker_client: docker_client.containers.prune(),
+							"docker container prune -f", reclaims=True)
 
 	def prune_images(self):
-		return self._prune("images", "prune_images", "error_prune_images", "docker image prune -a -f", reclaims=True, filters={'dangling': False})
+		return self._prune("images", "prune_images", "error_prune_images", lambda docker_client: docker_client.images.prune(filters={'dangling': False}),
+							"docker image prune -a -f", reclaims=True)
 
 	def prune_networks(self):
-		return self._prune("networks", "prune_networks", "error_prune_networks", "docker network prune -f", reclaims=False)
+		return self._prune("networks", "prune_networks", "error_prune_networks", lambda docker_client: docker_client.networks.prune(),
+							"docker network prune -f", reclaims=False)
 
 	def prune_volumes(self):
-		return self._prune("volumes", "prune_volumes", "error_prune_volumes", "docker volume prune -f", reclaims=True)
+		return self._prune("volumes", "prune_volumes", "error_prune_volumes", lambda docker_client: docker_client.volumes.prune(),
+							"docker volume prune -f", reclaims=True)
 
-	def _prune(self, collection, done_key, error_key, command, reclaims, **kwargs):
+	def prune_builds(self):
 		"""
-		Runs one prune through the host's slow client.
+		The build cache: what the daemon keeps from building images on that
+		machine. It is not images, so pruning those leaves it where it was, and
+		it does not show in `docker images` either. All of it that no build is
+		using, as with the images: the untagged part alone is a fraction.
+		"""
+		return self._prune("builds", "prune_builds", "error_prune_builds", lambda docker_client: docker_client.api.prune_builds(all=True),
+							"docker builder prune -a -f", reclaims=True)
+
+	def _prune(self, collection, done_key, error_key, run, command, reclaims):
+		"""
+		Runs one prune through the host's slow client: `run` takes it and prunes.
 
 		The working client gives up after thirty seconds, and the daemon
 		cancels a prune as soon as the client hangs up: on a slow disk with
@@ -873,8 +850,13 @@ class DockerManager:
 		except host_registry.HostUnavailable:
 			connection = self.client
 		try:
-			pruned = getattr(connection, collection).prune(**kwargs)
+			pruned = run(connection)
 			cleaned = _pruned_anything(pruned)
+			if not cleaned:
+				# Said as what it is, with no file: "removed, 0 B freed" read
+				# as if there had been something to remove.
+				debug(f"Nothing to prune in {collection}: [{str(pruned)}]")
+				return get_text("prune_nothing", get_text(f"button_{collection}")), "", False
 			if not reclaims:
 				debug(f"Deleted: [{str(pruned)}]")
 				return get_text(done_key), str(pruned), cleaned
@@ -2198,17 +2180,7 @@ class DockerUpdateMonitor:
 		if is_muted():
 			debug(f"Message [{get_text('available_updates', len(all_updates))}] omitted because muted")
 			return
-		# The same builder the toggles repaint with: a keyboard assembled by
-		# hand here drifts from the one that replaces it on the first tap, and
-		# both have to agree on what a button says.
-		markup = build_generic_keyboard(all_updates, set(), None, "Update")
-		message = send_message(message=available_updates_text(all_updates), reply_markup=markup)
-		if message:
-			save_update_data(message.chat.id, message.message_id, all_updates)
-			# The name cache the callback parser reads, written from the
-			# references themselves: they already carry host and name, so
-			# nothing has to be asked of each daemon a second time.
-			save_container_refs(message.chat.id, message.message_id, all_updates)
+		send_update_list(all_updates)
 
 	def _auto_update(self, targets):
 		"""
@@ -2312,20 +2284,10 @@ class DockerUpdateMonitor:
 				continue
 			versions = None
 			try:
-				local_image = container.image.id
-				# Per image and platform: two containers on the same tag may run
-				# different architectures of it.
-				pull_key = (image_with_tag, container_platform(container))
-				if pull_key not in pulled:
-					try:
-						pulled[pull_key] = pull_image(owner.client, image_with_tag, container)
-					except Exception as pull_error:
-						pulled[pull_key] = pull_error
-				remote_image = pulled[pull_key]
-				if isinstance(remote_image, Exception):
-					raise remote_image
-				debug(f"Checking update: {container.name} ({image_with_tag}): LOCAL IMAGE [{local_image.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}] - REMOTE IMAGE [{remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}]")
-				if local_image != remote_image.id and not same_running_manifest(owner.client, container, local_image, remote_image):
+				# One pull per image and platform: two containers on the same
+				# tag may run different architectures of it.
+				has_update, versions = registry_update(owner.client, host_id, container, image_with_tag, pulled)
+				if has_update:
 					if mode == "auto":
 						# Not here: all together at the end of the pass, in one
 						# batch. The bot among them, which updating would
@@ -2336,12 +2298,6 @@ class DockerUpdateMonitor:
 						self._decided += 1
 						continue
 					old_has_update = read_container_update_status(image_with_tag, container.name, host_id)
-					has_update = True
-					versions = (running_version(host_id, container), available_version(remote_image, image_with_tag))
-					# Keep the pulled image cached locally so the subsequent update
-					# operation does not need to re-download it.
-					debug(f"{container.name} update detected! Keeping downloaded image [{remote_image.id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]}] for upcoming update")
-
 					if not is_own_container(host_id, container.id, container.name):
 						grouped_updates_containers.append([container_ref(host_id, container), container.name])
 
@@ -2372,8 +2328,6 @@ class DockerUpdateMonitor:
 						continue
 
 					should_notify = not cold_cache
-				else: # Contenedor actualizado
-					has_update = False
 			except Exception as e:
 				# What was known stays as it was. Forgetting it on a failed pull
 				# —a Docker Hub rate limit, a registry down for the night— made
@@ -5437,7 +5391,7 @@ log_followers = LogFollowers()
 
 def log_file(containerId, containerName):
 	debug(f"Running command: log_file for container {containerName}")
-	markup = create_simple_keyboard("button_delete")
+	markup = create_simple_keyboard("button_close")
 	result = manager_for(containerId).show_logs_raw(container_id=ref_id(containerId), container_name=containerName)
 	if result is None:
 		send_message(message=get_text("error_showing_logs_container", containerName), reply_markup=markup)
@@ -5623,7 +5577,7 @@ def _external_mute_loop():
 
 def compose(containerId, containerName):
 	debug(f"Running command: compose for container {containerName}")
-	markup = create_simple_keyboard("button_delete")
+	markup = create_simple_keyboard("button_close")
 	result = manager_for(containerId).get_docker_compose(container_id=ref_id(containerId), container_name=containerName)
 	if result is not None:
 		fichero_temporal = io.BytesIO(result.encode('utf-8'))
@@ -6255,7 +6209,7 @@ def change_tag_container(containerId, containerName):
 				warning(f"Tag name too long for container {containerName}: {tag}")
 
 		markup.add(*botones)
-		markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+		markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
 		send_message(message=f'{host_label(ref_host(containerId))}{get_text("change_tag", containerName)}',
 					reply_markup=markup)
 	except Exception as e:
@@ -6575,7 +6529,7 @@ def build_generic_keyboard(container_available, selected_containers, originalMes
 	# Always side by side, one row: with a single column add() would stack
 	# them, and the last row is where the fixed buttons are expected to be.
 	markup.row(InlineKeyboardButton(get_text("button_update_all"), callback_data=f"{action_type.lower()}Everything|{originalMessageId}"),
-				InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+				InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
 	return markup
 
 def count_actionable_buttons(markup):
@@ -6586,8 +6540,16 @@ def count_actionable_buttons(markup):
 	"""
 	rows = markup.keyboard or []
 	# The page buttons act on nothing: counted, an emptied list never closed.
+	# Nor does the button for the whole project stand for something left to
+	# do: counted, a project with every container acted on never went back to
+	# the list.
 	return sum(1 for row in rows[:-1] for button in row
-			if not str(getattr(button, "callback_data", "") or "").startswith("pickPage|"))
+			if not _acts_on_no_container(str(getattr(button, "callback_data", "") or "")))
+
+
+def _acts_on_no_container(callback_data):
+	name = callback_data.split("|", 1)[0]
+	return name == "pickPage" or name == "showProjectInfo" or name.endswith("WholeProject")
 
 
 def picker_page_key(chat_id, message_id):
@@ -6745,9 +6707,10 @@ def build_hierarchical_keyboard(containers, action_type, exclude_own=False, filt
 			navigation.append(InlineKeyboardButton("▶️", callback_data=f"pickPage|{action_type}|{host_id}|{page + 1}"))
 		markup.row(*navigation)
 
-	# Add cancel button. Once something has been acted upon there is nothing
-	# left to cancel, only to close
-	close = InlineKeyboardButton(get_text("button_close" if marked_names else "button_cancel"), callback_data="cerrar")
+	# Closing, not cancelling: a list asks nothing that could be cancelled, and
+	# "Cancelar" under /info or /logs promised to undo something. Cancelling
+	# is for the confirmations.
+	close = InlineKeyboardButton(get_text("button_close"), callback_data="cerrar")
 	# A way back to choosing the host: tapping the wrong one meant cancelling
 	# and typing the command again. In the same row as the cancel button,
 	# which is where the fixed buttons are expected to be.
@@ -6938,7 +6901,7 @@ def send_container_disambiguation(action_type, container_name, candidates):
 		markup.add(InlineKeyboardButton(
 			f'🖥️ {entry.get("alias", entry["id"])}  ·  {get_status_emoji(container.status, container.name, container, entry["id"])}',
 			callback_data=f'{spec["container_callback"]}|{container_ref(entry["id"], container)}'))
-	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+	markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
 
 	text = get_text("container_on_several_hosts", container_name)
 	if len(candidates) == 1:
@@ -6962,6 +6925,7 @@ PRUNE_TYPES = (
 	("Images", "button_images"),
 	("Networks", "button_networks"),
 	("Volumes", "button_volumes"),
+	("Builds", "button_builds"),
 )
 
 
@@ -7109,7 +7073,7 @@ def _host_picker_markup(action_type, sections):
 		markup.add(InlineKeyboardButton(
 			f'🖥️ {entry.get("alias", entry["id"])}',
 			callback_data=f'pickHost|{action_type}|{entry["id"]}'))
-	markup.add(InlineKeyboardButton(get_text("button_cancel"), callback_data="cerrar"))
+	markup.add(InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
 	return markup
 
 
@@ -7585,7 +7549,7 @@ def build_compose_project_level2_keyboard(project_info, project_name, action_typ
 		'logfile': {'icon': '📁', 'button_key': None, 'whole_callback': None, 'use_emoji': True},
 		'info': {'icon': 'ℹ️', 'button_key': None, 'whole_callback': None, 'use_emoji': True},
 		'changetag': {'icon': '🏷️', 'button_key': None, 'whole_callback': None, 'use_emoji': True, 'callback_prefix': 'changeTagContainer'},
-		'checkupdate': {'icon': '🔄', 'button_key': None, 'whole_callback': None, 'use_emoji': True, 'callback_prefix': 'checkUpdate'},
+		'checkupdate': {'icon': '🔄', 'button_key': 'button_check_project', 'whole_callback': 'checkUpdateWholeProject', 'use_emoji': True, 'callback_prefix': 'checkUpdate'},
 		'ports': {'icon': '🔌', 'button_key': None, 'whole_callback': None, 'use_emoji': True}
 	}
 
@@ -7636,36 +7600,28 @@ def build_compose_project_level2_keyboard(project_info, project_name, action_typ
 	# Add container buttons to markup
 	markup.add(*botones)
 
-	# Add bottom row with action button and back button (if configured)
-	bottom_buttons = []
-
-	# Special case for 'info': add "View project info" button
+	# What acts on the project as a whole, on a row of its own.
+	whole_project = None
+	project_hash = register_project_hash(project_name, host_id)
 	if action_type.lower() == 'info':
-		bottom_buttons.append(
-			InlineKeyboardButton(
-				get_text("button_view_project_info"),
-				callback_data=f"showProjectInfo|{register_project_hash(project_name, host_id)}"
-			)
-		)
+		whole_project = InlineKeyboardButton(get_text("button_view_project_info"),
+											callback_data=f"showProjectInfo|{project_hash}")
+	elif action_type.lower() == 'checkupdate' and not store.get("bot.check_updates"):
+		# Checking a whole project ends in the list /updateall sends, and that
+		# list only updates what the update cache says is pending: with the
+		# checks turned off it says nothing is, so the button is not offered.
+		pass
 	elif config.get('whole_callback'):
-		bottom_buttons.append(
-			InlineKeyboardButton(
-				f"{config['icon']} {get_text(config['button_key'])}",
-				callback_data=f"{config['whole_callback']}|{register_project_hash(project_name, host_id)}"
-			)
-		)
+		whole_project = InlineKeyboardButton(f"{config['icon']} - {get_text(config['button_key'])}",
+											callback_data=f"{config['whole_callback']}|{project_hash}")
+	if whole_project:
+		markup.row(whole_project)
 
-	bottom_buttons.append(
-		InlineKeyboardButton(
-			get_text('button_back'),
-			callback_data=back_callback
-		)
-	)
-
-	# One row, whatever the columns: with one, add() stacked them in two, the
-	# whole-project button outside the last row, counted as one still to act on,
-	# and an emptied project never went back to the list.
-	markup.row(*bottom_buttons)
+	# Going back and closing, last and in one row whatever the columns: the
+	# last row is where the fixed buttons are expected to be. Closing from
+	# inside a project used to mean going back to the list first.
+	markup.row(InlineKeyboardButton(get_text('button_back'), callback_data=back_callback),
+				InlineKeyboardButton(get_text("button_close"), callback_data="cerrar"))
 
 	return markup
 
@@ -9000,12 +8956,140 @@ def read_container_update_status(image_with_tag, container_name, host_id=None):
 AVAILABLE_UPDATES_TEXT_BUDGET = 3500
 
 
-def available_updates_text(pairs):
+def pull_image_once(client, image_with_tag, container, pulled):
+	"""
+	The image a container would update to, pulled once per image and platform
+	for as long as the caller keeps `pulled`. A failure is kept too and raised
+	again, so the rest of that image's containers do not ask a second time.
+	"""
+	pull_key = (image_with_tag, container_platform(container))
+	if pull_key not in pulled:
+		try:
+			pulled[pull_key] = pull_image(client, image_with_tag, container)
+		except Exception as pull_error:
+			pulled[pull_key] = pull_error
+	if isinstance(pulled[pull_key], Exception):
+		raise pulled[pull_key]
+	return pulled[pull_key]
+
+
+def registry_update(client, host_id, container, image_with_tag, pulled):
+	"""
+	Whether the registry has a newer image than the one a container runs, and
+	the versions it would go from and to: (has_update, versions), the second
+	None when there is no update. Raises when the image cannot be pulled.
+
+	The one comparison behind the periodic check, /checkupdate on a container
+	and on a whole project, which had a copy each. The pulled image stays on
+	the host, so the update that follows does not download it again.
+	"""
+	local_image = container.image.id
+	remote_image = pull_image_once(client, image_with_tag, container, pulled)
+	if not remote_image or not remote_image.id:
+		raise docker.errors.ImageNotFound(f"No image came back for {image_with_tag}")
+	short = lambda image_id: image_id.replace('sha256:', '')[:CONTAINER_ID_LENGTH]
+	debug(f"Checking update: {container.name} ({image_with_tag}): LOCAL IMAGE [{short(local_image)}] - REMOTE IMAGE [{short(remote_image.id)}]")
+	if local_image == remote_image.id or same_running_manifest(client, container, local_image, remote_image):
+		return False, None
+	debug(f"{container.name} update detected! Keeping downloaded image [{short(remote_image.id)}] for upcoming update")
+	return True, (running_version(host_id, container), available_version(remote_image, image_with_tag))
+
+
+def send_update_list(pairs, header=None):
+	"""
+	The message listing several pending updates, with a button each to tick
+	and the ones that update them: what a pass of the checks announces, what
+	/updateall answers and what checking a whole project ends in.
+
+	One builder for the three, the same the toggles repaint with: a keyboard
+	assembled by hand drifts from the one that replaces it on the first tap.
+	`header` is its first line when it is not the fleet's: the chat is the
+	record of what was checked, and a project's list read like everyone's.
+	"""
+	markup = build_generic_keyboard(pairs, set(), None, "Update")
+	message = send_message(message=available_updates_text(pairs, header), reply_markup=markup)
+	if message:
+		save_update_data(message.chat.id, message.message_id, pairs)
+		# The name cache the callback parser reads, written from the
+		# references themselves: they already carry host and name, and the
+		# list can span machines, so one host id would mislabel the rest.
+		save_container_refs(message.chat.id, message.message_id, pairs)
+	return message
+
+
+# How often, at most, the line saying how far a project's check has got is
+# repainted.
+PROJECT_CHECK_PROGRESS_EVERY = 1
+
+
+def check_project_updates(project_name, host_id=None):
+	"""
+	Checks every container of a Compose project for an update, and answers
+	once: the /updateall list with the ones that have it, or that the project
+	is up to date. Checking them one by one was a tap and two messages each.
+
+	As the check of one container, it looks at the stopped ones too, whatever
+	the setting says about the periodic checks. The ones set to be ignored
+	are left out: the list could not update them.
+
+	A project of fifteen services on fifteen images is a minute of pulls, so
+	the line that says it is working counts them.
+	"""
+	host_id = host_id or host_registry.local_host_id()
+	project = html.escape(str(project_name))
+	project_info = project_info_or_none(host_id, project_name)
+	if not project_info:
+		send_message(message=f'{get_text("error_project_not_found", project)}{host_suffix(host_id)}')
+		return
+	owner = manager(host_id)
+	containers = [container for container in sort_containers_by_priority(project_info.containers, host_id)
+				  if update_mode(host_id, container.name, container.labels)[0] != "ignore"]
+	progress = lambda done: get_text("checking_project_updates", project, f"{done}/{len(containers)}")
+	loading = send_message(message=progress(0))
+	painted = time.monotonic()
+	pending, failed, pulled = [], [], {}
+	try:
+		for done, container in enumerate(containers):
+			# How far it has got, on the line that is already there. Not more
+			# than once a second: services on one image are checked in no
+			# time, and Telegram limits how often a message is edited.
+			if loading and done and time.monotonic() - painted >= PROJECT_CHECK_PROGRESS_EVERY:
+				edit_message_text(progress(done), loading.chat.id, loading.message_id)
+				painted = time.monotonic()
+			image_with_tag = ''
+			try:
+				if getattr(container, "listed", False):
+					container.reload()
+				image_with_tag = container.attrs['Config']['Image']
+				has_update, versions = registry_update(owner.client, host_id, container, image_with_tag, pulled)
+			except Exception as e:
+				# What was known about it stays as it was, as in the periodic check.
+				error(f"Could not check update for {container.name} ({image_with_tag or '?'}) "
+					  f"on {host_registry.alias(host_id)}: [{e}]")
+				failed.append(container.name)
+				continue
+			save_container_update_status(image_with_tag, container.name, has_update, host_id, versions)
+			if has_update:
+				pending.append([container_ref(host_id, container), container.name])
+	finally:
+		if loading:
+			delete_message(loading.message_id)
+
+	if pending:
+		send_update_list(pending, get_text("available_updates_project", len(pending), project))
+	elif not failed:
+		send_message(message=f'{get_text("already_updated_project", project)}{host_suffix(host_id)}')
+	if failed:
+		names = ", ".join(html.escape(name) for name in failed)
+		send_message(message=f'{host_label(host_id)}{get_text("error_checking_project_updates", names)}')
+
+
+def available_updates_text(pairs, header=None):
 	"""
 	The announcement of several updates: how many, and what each one goes
 	from and to — the buttons below only have room for the names.
 	"""
-	header = get_text("available_updates", len(pairs))
+	header = header or get_text("available_updates", len(pairs))
 	entries = []
 	left_out = 0
 	used = len(header)
